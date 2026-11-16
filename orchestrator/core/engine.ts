@@ -1004,7 +1004,13 @@ export class Engine {
 
   private deadLine(it: Item, t: number): string {
     const age = it.deadAt !== null ? `died ${ago(t - it.deadAt)} ago` : `sent ${ago(t - it.createdAt)} ago`;
-    return `- ${it.id} ${it.kind}${it.ref ? ` (${it.ref})` : ""} ${it.sender} → ${it.recipient}, ${age}: ${it.note ?? "?"}${it.onBoard ? ` [on ${this.owner.name}'s board]` : ""}. ${JSON.stringify(it.body.replace(/\s+/g, " ").slice(0, 160))}`;
+    return `- ${it.id} ${it.kind}${it.ref ? ` (${it.ref})` : ""} ${it.sender} → ${it.recipient}, ${age}: ${it.note ?? "?"}${it.onBoard ? ` [on ${this.owner.name}'s board]` : ""}. ${this.importPreview(it.id, 160) ?? JSON.stringify(it.body.replace(/\s+/g, " ").slice(0, 160))}`;
+  }
+
+  /** An imported item's one-line preview (labelled, from what was imported, whatever its body became), else null. */
+  private importPreview(id: string, max: number): string | null {
+    const external = this.db.prepare(`SELECT json FROM external_mail WHERE item_id = ?`).get(id) as { json: string } | undefined;
+    return external ? externalPreview(JSON.parse(external.json) as ExternalMail, max) : null;
   }
 
   /** The CoS sends a dead letter to another live address. Its sender and id stay, so an ack (and its note) still reach the sender. */
@@ -3377,8 +3383,7 @@ export class Engine {
     if (proj && a.role === "lead") lines.push(`Project ${proj.slug}: priority ${proj.priority}${proj.heldAt ? `, ON HOLD since ${iso(proj.heldAt)} (mail waits; no new threads)` : ""}.`);
     lines.push(items.length ? `Open items (${items.length}); use orch_inbox(id=<item id>) for full text and references:` : "No open items.");
     for (const it of items) {
-      const external = this.db.prepare(`SELECT json FROM external_mail WHERE item_id = ?`).get(it.id) as { json: string } | undefined;
-      const preview = external ? externalPreview(JSON.parse(external.json) as ExternalMail) : it.body.slice(0, 300);
+      const preview = this.importPreview(it.id, 300) ?? it.body.slice(0, 300);
       lines.push(`- ${it.kind} ${it.ref && it.kind.startsWith("decision") ? it.ref : it.id} from ${it.sender}${it.needsAck ? " [needs ack]" : ""}: ${preview}`);
     }
     if (owed.length) {

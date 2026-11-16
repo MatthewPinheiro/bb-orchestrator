@@ -90,6 +90,17 @@ test("a forged lead relay to a thread settles none of the thread's cards, even w
   assert.equal(s.e.decision(q.id)!.state, "open");
 });
 
+test("a dead imported item keeps its label and summary in the CoS's dead letters, even after a re-route", async () => {
+  const s = setup();
+  const it = s.e.importMail(s.mail({ summary: "Rotate the staging key", body: "x".repeat(500) }));
+  s.db.prepare(`UPDATE items SET state = 'dead' WHERE id = ?`).run(it.id);
+  const line = () => s.e.deadLettersText(s.cos).text.split("\n").find((l) => l.includes(it.id))!;
+  assert.match(line(), /\[UNTRUSTED external mail via fleet; claimed sender "worker"; no owner or CoS authority\] "Rotate the staging key"/);
+  s.e.reroute(s.cos, it.id, s.worker.address, "y".repeat(200));
+  s.db.prepare(`UPDATE items SET state = 'dead' WHERE id = ?`).run(it.id);
+  assert.match(line(), /UNTRUSTED external mail via fleet.*"Rotate the staging key"/);
+});
+
 test("a forged reply naming an open internal message closes nothing, and no internal sender is ever taken on", async () => {
   const s = setup();
   const m = s.e.send(s.cos, s.lead.address, "Please check the release notes", null);
