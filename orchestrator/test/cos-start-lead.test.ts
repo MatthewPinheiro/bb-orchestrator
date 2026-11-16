@@ -44,7 +44,7 @@ type Tool = { name: string; parameters: { parse(v: unknown): unknown }; execute(
 type Route = (c: unknown) => Promise<Response>;
 
 /** The real server against a fake bb: records tools, routes and spawns; one connected host, one bb project for the repo. */
-async function server() {
+async function server(settings: Record<string, unknown> = {}) {
   const root = scratch("server");
   const projects = join(root, "projects");
   const repo = join(root, "repo");
@@ -54,8 +54,13 @@ async function server() {
   const tools = new Map<string, Tool>();
   const routes = new Map<string, Route>();
   const spawns: Record<string, any>[] = [];
+  let cli: any;
+  const threadRows = new Map<string, any>();
+  const metadata: any[] = [];
   const noop: any = new Proxy(function () {}, { get: (_t, k) => (k === "then" ? undefined : noop), apply: () => noop });
   const sdk = {
+    environments: { get: async () => ({ hostId: "host-1" }) },
+    providers: { models: async () => ({ modelLoadError: null, providers: [{ id: "claude-code", available: true }, { id: "codex", available: true }], models: ["claude-opus-5-5", "claude-sonnet-5-5", "gpt-6-astra"].map((model) => ({ id: model, model, reasoningDiscovery: "known", supportedReasoningEfforts: [{ reasoningEffort: "high" }, { reasoningEffort: "medium" }] })) }) },
     hosts: { list: async () => [{ id: "host-1", status: "connected", lifecycle: { phase: "active" } }] },
     projects: { list: async () => [{ id: "bbp-1", name: "repo", sources: [{ hostId: "host-1", path: repo }] }], create: noop, get: noop },
     threads: {
@@ -63,8 +68,9 @@ async function server() {
         spawns.push(a);
         return { id: `T-${spawns.length}`, environmentId: `env-${spawns.length}` };
       },
-      updatePluginMetadata: async () => ({}),
-      get: async () => ({}),
+      queuedMessages: { list: async () => [] },
+      updatePluginMetadata: async (p: any) => { metadata.push(p); return {}; },
+      get: async ({ threadId }: { threadId: string }) => threadRows.get(threadId) ?? ({ id: threadId, projectId: "bbp-1", environmentId: "env-lead", status: "idle", archivedAt: null, parentThreadId: null }),
       list: async () => [],
     },
   };
@@ -77,12 +83,13 @@ async function server() {
           return {
             define: (schema: Record<string, { default: unknown }>) => {
               const v: any = Object.fromEntries(Object.entries(schema).map(([key, d]) => [key, d.default]));
-              Object.assign(v, { stateDir: join(root, "state"), projectsDir: projects, projectRecord: RECORD, memoryConfig: "", diskPath: root, ownerName: "" });
+              Object.assign(v, { stateDir: join(root, "state"), projectsDir: projects, projectRecord: RECORD, memoryConfig: "", diskPath: root, ownerName: "", ...settings });
               return { get: async () => v, onChange: () => {} };
             },
           };
         if (k === "storage") return { database: () => db, kv: noop };
         if (k === "agents") return new Proxy({ registerTool: (t: Tool) => tools.set(t.name, t) }, { get: (a: any, n) => a[n] ?? noop });
+        if (k === "cli") return { register: (c: any) => { cli = c.run; } };
         if (k === "http") return { route: (_m: string, path: string, h: Route) => routes.set(path, h) };
         if (k === "sdk") return new Proxy(sdk, { get: (s: any, n) => s[n] ?? noop });
         if (k === "background") return { service: () => {} };
@@ -108,7 +115,7 @@ async function server() {
     const r = await t.execute(t.parameters.parse(raw), { threadId });
     return { ok: !r.isError, text: r.content[0]!.text };
   };
-  return { root, projects, repo, engine, tools, spawns, button, call };
+  return { root, projects, repo, engine, tools, spawns, button, call, threadRows, metadata, cli: (args: string[], threadId: string | null = null) => cli(args, { threadId, cwd: root }) };
 }
 
 const cosStarted = (e: Engine, address: string) => e.board().find((b) => b.title === `cos started ${address}`);
@@ -327,4 +334,99 @@ test("constraints given as lines, and no base, still make a project Start lead c
   assert.match(md, /## Limits\n- one\n- two\n- three\n/);
   assert.deepEqual(primaryRepo(md), { path: repo, base: null });
   assert.equal(JSON.parse(readFileSync(join(p.root, "delta", RECORD), "utf8")).repo.base, null);
+});
+
+for (const by of ["cos", "person"] as const) {
+  test(`${by} starts a Codex lead with the exact configured model and existing gates`, async () => {
+    const s = await server({ leadProvider: "codex", leadModel: "gpt-6-astra", leadReasoning: "high" });
+    s.engine.register("T-cos", "cos", null);
+    projectFolder(s.projects, "alpha", s.repo);
+    const start = () => by === "cos" ? s.call("orch_start_lead", { slug: "alpha" }, "T-cos") : s.button("alpha");
+    assert.ok((await start()).ok);
+    assert.equal(s.spawns[0]!.providerId, "codex");
+    assert.equal(s.spawns[0]!.model, "gpt-6-astra");
+    assert.equal(s.spawns[0]!.reasoningLevel, "high");
+    assert.equal((await start()).ok, false, "a second live lead is still refused");
+    assert.equal(s.spawns.length, 1);
+  });
+}
+
+test("an unavailable configured model does not spawn a fallback lead", async () => {
+  const s = await server({ leadProvider: "codex", leadModel: "missing-model" });
+  s.engine.register("T-cos", "cos", null);
+  projectFolder(s.projects, "alpha", s.repo);
+  const result = await s.call("orch_start_lead", { slug: "alpha" }, "T-cos");
+  assert.equal(result.ok, false);
+  assert.match(result.text, /model missing-model is unavailable/);
+  assert.equal(s.spawns.length, 0);
+  assert.equal(s.engine.agentByAddress("lead:alpha"), null);
+});
+
+test("worker spawn preserves provider, parent and approved-plan count; unavailable model releases reservation", async () => {
+  const s = await server();
+  const cos = s.engine.register("T-cos", "cos", null);
+  const lead = s.engine.register("T-lead", "lead", "alpha");
+  const d = s.engine.ask(lead, { title: "Plan", question: "Start one?", options: [{ label: "Go" }, { label: "Wait" }], kind: "plan", threads: 1 });
+  const args = { plan: d.id, title: "Worker", prompt: "Test", provider: "codex", model: "gpt-6-astra" };
+  assert.equal((await s.call("orch_spawn_thread", args, lead.threadId)).ok, false);
+  assert.equal(s.spawns.length, 0);
+  s.engine.triageAskPerson(cos, d.id, { question: "Start?", options: [{ label: "Go" }, { label: "Wait" }], allowText: true });
+  s.engine.personAnswer(d.id, s.engine.needsYou().cards[0]!.rev, "1", null, "desktop");
+  assert.equal((await s.call("orch_spawn_thread", { ...args, model: "missing" }, lead.threadId)).ok, false);
+  assert.equal(s.spawns.length, 0);
+  const result = await s.call("orch_spawn_thread", args, lead.threadId);
+  assert.ok(result.ok, result.text);
+  assert.equal(s.spawns[0]!.providerId, "codex");
+  assert.equal(s.spawns[0]!.model, "gpt-6-astra");
+  assert.equal(s.spawns[0]!.parentThreadId, lead.threadId);
+  assert.equal(s.spawns[0]!.environment.workspace.type, "managed-worktree");
+  assert.equal((await s.call("orch_spawn_thread", args, lead.threadId)).ok, false);
+  assert.equal(s.spawns.length, 1);
+});
+
+test("CLI spawn forwards explicit provider/model without a fallback", async () => {
+  const s = await server();
+  const file = join(s.root, "prompt.md");
+  writeFileSync(file, "Test");
+  const args = ["spawn", "lead", "alpha", "--project-id", "bbp-1", "--prompt-file", file, "--provider", "codex", "--model", "gpt-6-astra"];
+  const result = await s.cli(args);
+  assert.equal(result.exitCode ?? 0, 0, result.stderr);
+  assert.equal(s.spawns.length, 1);
+  assert.equal(s.spawns[0]!.providerId, "codex");
+  assert.equal(s.spawns[0]!.model, "gpt-6-astra");
+});
+
+test("integration CLI is opt-in, rejects agent callers and preserves idempotent receipts", async () => {
+  const s = await server({ integrationRoutes: '{"fleet":["cos"]}' });
+  s.engine.register("T-cos", "cos", null);
+  const file = join(s.root, "import.json");
+  writeFileSync(file, JSON.stringify({ source: "fleet", id: "one", to: "cos", sender: "worker", task: "task", severity: "INFO", summary: "Quiet", createdAt: 1 }));
+  assert.equal((await s.cli(["integration", "import", file], "unregistered-agent")).exitCode, 1);
+  const first = await s.cli(["integration", "import", file]);
+  assert.equal(first.exitCode, 0, first.stderr);
+  const second = await s.cli(["integration", "import", file]);
+  assert.equal(JSON.parse(first.stdout).itemId, JSON.parse(second.stdout).itemId);
+  const receipts = await s.cli(["integration", "receipts", "fleet"]);
+  assert.equal(JSON.parse(receipts.stdout).length, 1);
+  const disabled = await server();
+  assert.equal((await disabled.cli(["integration", "import", file])).exitCode, 1);
+  assert.equal((await s.cli(["adopt", "T-worker", "thread", "--project", "alpha", "--parent", "T-lead", "--approval", "test"], "unregistered-agent")).exitCode, 1);
+});
+
+test("operator adopts existing parented lead and worker through the CLI without spawning or reparenting", async () => {
+  const s = await server();
+  s.engine.register("T-cos", "cos", null);
+  for (const [id, parent] of [["T-lead", "T-cos"], ["T-worker", "T-lead"]]) s.threadRows.set(id, { id, parentThreadId: parent, projectId: "bbp-1", environmentId: `env-${id}`, status: "idle", archivedAt: null });
+  for (const [id, role, parent] of [["T-lead", "lead", "T-cos"], ["T-worker", "thread", "T-lead"]]) {
+    const args = ["adopt", id!, role!, "--project", "alpha", "--parent", parent!, "--approval", "approved-map"];
+    const first = await s.cli(args);
+    assert.equal(first.exitCode, 0, first.stderr);
+    assert.equal((await s.cli(args)).stdout, first.stdout);
+    assert.equal(s.engine.agentByThread(id!)!.parentThreadId, parent);
+    assert.equal(s.engine.agentByThread(id!)!.environmentId, `env-${id}`);
+  }
+  assert.equal(s.spawns.length, 0);
+  assert.equal(s.engine.board().filter((b) => b.title.startsWith("Adopted ")).length, 2);
+  assert.equal(s.metadata.length, 4);
+  assert.match((await s.cli(["status"])).stdout, /T-worker parent=T-lead/);
 });
