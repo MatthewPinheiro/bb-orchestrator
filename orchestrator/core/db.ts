@@ -286,6 +286,12 @@ export const MIGRATIONS: string[] = [
      updated_at INTEGER NOT NULL,
      nudged_at INTEGER
    )`,
+  // Pokémon types per project (2026-11-16, mons.ts TYPES): each project's type, picked once and kept; and a stage kept
+  // through a change of Pokémon (the stage and the level it was kept at), so a re-assigned agent keeps its stage.
+  // The re-assignment itself is the engine's settleMons (it needs mons.ts), idempotent and run at every start.
+  `ALTER TABLE projects ADD COLUMN mon_type TEXT;
+   ALTER TABLE agents ADD COLUMN mon_stage INTEGER;
+   ALTER TABLE agents ADD COLUMN mon_stage_level INTEGER`,
   `CREATE TABLE external_mail (
      seq INTEGER PRIMARY KEY AUTOINCREMENT,
      source TEXT NOT NULL,
