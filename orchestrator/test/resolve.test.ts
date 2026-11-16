@@ -56,6 +56,7 @@ async function host() {
   let cliRun: ((argv: string[], ctx: { threadId: string | null; cwd: string | null }) => Promise<{ exitCode: number; stdout: string; stderr?: string }>) | null = null;
   const noop: any = new Proxy(function () {}, { get: (_t, k) => (k === "then" ? undefined : noop), apply: () => noop });
   const sdk = {
+    providers: { models: async () => ({ modelLoadError: null, providers: [{ id: "codex", available: true }], models: [{ id: "gpt-6-astra", model: "gpt-6-astra", isDefault: true }] }) },
     threads: {
       get: async ({ threadId }: { threadId: string }) => {
         const t = threads.get(threadId);

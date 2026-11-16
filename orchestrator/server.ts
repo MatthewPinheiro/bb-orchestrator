@@ -58,6 +58,9 @@ import { formAt, tokensForLevel } from "./mons.ts";
 import { placeable, pruneSections } from "./core/sections.ts";
 import { type Agent, type Decision, EngineError, OUTCOMES, projectTitle, type Role, ROLES, sectionTitle } from "./core/model.ts";
 import { type LeadStartPorts, loadBrief, pokemonSentence, samePath, startLead, type StartedBy } from "./core/start.ts";
+import { externalMailSchema, integrationRoutes, allowImport } from "./core/integration.ts";
+import { adoptThread, type AdoptThread } from "./core/adopt.ts";
+import { spawnSelection } from "./core/provider.ts";
 import { newProject } from "./core/new-project.ts";
 import { cosTitleOf, ownerWords, type OwnerWords } from "./core/owner.ts";
 // dreams
@@ -128,10 +131,14 @@ export default async function plugin(bb: BbPluginApi) {
     memoryUnits: { type: "string", label: "Memory check: systemd user unit patterns to watch for failures, space-separated (empty: none)", default: "" },
     memoryTimers: { type: "string", label: "Memory check: <unit>.timer=<minutes> pairs; a timer that hasn't run for that long is stale (empty: none)", default: "" },
     // The owner's Start buttons (Projects tab)
+    integrationRoutes: { type: "string", label: "External mail source → allowed recipient addresses (JSON; empty disables imports)", default: "{}" },
+    leadProvider: { type: "string", label: "Provider of the lead started from the Projects tab", default: "claude-code" },
     leadModel: { type: "string", label: "Model of a lead started from the Projects tab", default: "claude-opus-5-5" },
     leadReasoning: { type: "string", label: "Reasoning of a lead started from the Projects tab", default: "high" },
+    cosProvider: { type: "string", label: "Provider of the cos started from the Projects tab", default: "claude-code" },
     cosModel: { type: "string", label: "Model of the CoS started from the Projects tab", default: "claude-opus-5-5" },
     cosReasoning: { type: "string", label: "Reasoning of the CoS started from the Projects tab", default: "high" },
+    stewardProvider: { type: "string", label: "Provider of the steward started from the Projects tab", default: "claude-code" },
     stewardModel: { type: "string", label: "Model of the Steward started from the Projects tab", default: "claude-sonnet-5-5" },
     stewardReasoning: { type: "string", label: "Reasoning of the Steward started from the Projects tab", default: "medium" },
     homeProjectId: { type: "string", label: "bb project of the CoS and the Steward (empty: the bb project of the mirror folder, created when missing)", default: "" },
@@ -204,7 +211,10 @@ export default async function plugin(bb: BbPluginApi) {
 
   const engine = new Engine(
     db,
-    { now: () => Date.now(), deliver, mirror, changed, log: (m) => bb.log.warn(m), cardUp: (d) => void pushCard(d), delivered: (d) => void pushDelivered(d) },
+    { now: () => Date.now(), externalEnabled: (source, to) => {
+      try { allowImport(integrationRoutes(cfg.integrationRoutes), source, to); return true; }
+      catch { return false; }
+    }, deliver, mirror, changed, log: (m) => bb.log.warn(m), cardUp: (d) => void pushCard(d), delivered: (d) => void pushDelivered(d) },
     { escalateMs: cfg.escalateMinutes * 60_000, resendMs: cfg.resendMinutes * 60_000, owner: cfg.ownerName, pokemon: cfg.pokemon },
   );
   settings.onChange((next) => {
@@ -508,8 +518,8 @@ export default async function plugin(bb: BbPluginApi) {
     name: "orch_inbox",
     description: "Your recovery view: unread items, decisions waiting for you, your own open decisions, and the standing rules you may cite.",
     presentation: { label: { pending: "Reading the inbox", completed: "Read the inbox" } },
-    parameters: z.object({}),
-    execute: (_p, { threadId }) => run(threadId, (a) => engine.inbox(a).text),
+    parameters: z.object({ id: z.string().regex(/^i-[a-f0-9]+$/).optional().describe("Read the complete text of one item addressed to you, including passive INFO") }),
+    execute: (p, { threadId }) => run(threadId, (a) => p.id ? engine.readItem(a, p.id) : engine.inbox(a).text),
   });
 
   bb.agents.registerTool({
@@ -578,6 +588,7 @@ export default async function plugin(bb: BbPluginApi) {
     description: `Lead only: start one thread of a plan card ${O.name} approved (its go option). Each gets its own new worktree, you as its bb parent, and the orchestrator role. Refused without an approved plan, past the plan's thread count, or while the project is on hold.`,
     presentation: { label: { pending: "Starting a thread", completed: "Started a thread" } },
     parameters: z.object({
+      provider: z.string().min(1).max(100).optional().describe("Provider id (default: claude-code); unavailable selections are refused"),
       plan: z.string().describe("The approved plan card's decision id (d-…)"),
       title: z.string().min(1).max(80),
       prompt: z.string().min(1).max(20000).describe("The thread's brief: goal, scope, constraints, done criteria"),
@@ -595,14 +606,13 @@ export default async function plugin(bb: BbPluginApi) {
         // a new worktree on the lead's own machine (bb needs the host for a managed worktree)
         const leadEnv = lead.environmentId ? ((await bb.sdk.environments.get({ environmentId: lead.environmentId })) as unknown as { hostId?: string | null }) : null;
         if (!leadEnv?.hostId) throw new EngineError("bad_state", "can't tell which machine the lead runs on");
+        const selection = await spawnSelection(bb.sdk.providers, { hostId: leadEnv.hostId, projectId: lead.projectId }, p);
         const t = await bb.sdk.threads.spawn({
           projectId: lead.projectId,
           environment: { type: "host", hostId: leadEnv.hostId, workspace: { type: "managed-worktree", baseBranch: p.base_branch ? { kind: "named", name: p.base_branch } : { kind: "default" } } },
           prompt: p.prompt,
           title: p.title,
-          providerId: "claude-code",
-          ...(p.model ? { model: p.model } : {}),
-          ...(p.reasoning ? { reasoningLevel: p.reasoning } : {}),
+          ...selection,
           parentThreadId: a.threadId,
           parentNotifications: "auto",
           pluginMetadata: { role: "thread", project: a.project, plan: p.plan },
@@ -785,15 +795,14 @@ export default async function plugin(bb: BbPluginApi) {
         if (!env.path) throw new EngineError("bad_state", `${p.to}'s environment has no folder on this machine`);
         const root = realpathSync(env.path);
         const file = handoffFile(root, p.file);
+        const selection = await spawnSelection(bb.sdk.providers, { environmentId: th.environmentId }, p);
         // spawned without a parent, so the auto-register for a lead's new child doesn't take it; the parent is set below
         const n = await bb.sdk.threads.spawn({
           projectId: th.projectId,
           environment: { type: "reuse", environmentId: th.environmentId },
           prompt: `You take over ${p.to} (from thread ${t.threadId}) in this worktree. Read ${file} first: it says what is done, how to test, and what to do next. You are ${p.to} in ${ownerWords(cfg.ownerName).name}'s orchestrator; your lead is lead:${a.project}.`,
           title: `${th.title ?? p.to} (${p.provider})`,
-          providerId: p.provider,
-          ...(p.model ? { model: p.model } : {}),
-          ...(p.reasoning ? { reasoningLevel: p.reasoning } : {}),
+          ...selection,
           pluginMetadata: { role: "thread", project: a.project, successorOf: t.threadId },
         } as Parameters<typeof bb.sdk.threads.spawn>[0]);
         let succ: Agent;
@@ -1346,7 +1355,7 @@ export default async function plugin(bb: BbPluginApi) {
             const to = engine.agentByAddress(it.recipient);
             if (!to) continue;
             const rows = await bb.sdk.threads.queuedMessages.list({ threadId: to.threadId });
-            if (!rows.some((r) => r.id === it.queuedMessageId)) engine.dispatched(it.queuedMessageId!);
+            if (!rows.some((r) => r.id === it.queuedMessageId)) engine.reconcileQueued((queued) => queued.id === it.id ? false : null);
           }
           for (const a of engine.agents()) {
             if (signal.aborted) return;
@@ -1832,15 +1841,14 @@ export default async function plugin(bb: BbPluginApi) {
    * Spawn and register one agent the owner (or, for a lead, the CoS) started. A failure after the spawn names the
    * thread, which then exists.
    */
-  async function spawnStarted(p: { role: Role; project: string | null; projectId: string; hostId: string; folder: string; prompt: string; title: string; model: string; reasoning: string; by: StartedBy }): Promise<Agent> {
+  async function spawnStarted(p: { role: Role; project: string | null; projectId: string; hostId: string; folder: string; prompt: string; title: string; provider: string; model: string; reasoning: string; by: StartedBy }): Promise<Agent> {
+    const selection = await spawnSelection(bb.sdk.providers, { hostId: p.hostId, projectId: p.projectId }, p);
     const t = await bb.sdk.threads.spawn({
       projectId: p.projectId,
       environment: { type: "host", hostId: p.hostId, workspace: { type: "unmanaged", path: p.folder } },
       prompt: p.prompt,
       title: p.title,
-      providerId: "claude-code",
-      ...(p.model.trim() ? { model: p.model.trim() } : {}),
-      ...(p.reasoning.trim() ? { reasoningLevel: p.reasoning.trim() } : {}),
+      ...selection,
       pluginMetadata: { role: p.role, project: p.project },
     });
     try {
@@ -1938,7 +1946,7 @@ export default async function plugin(bb: BbPluginApi) {
     owner: ownerWords(cfg.ownerName).name,
     bbProject: bbProjectFor,
     spawn: ({ slug, projectId, hostId, folder, prompt }) =>
-      spawnStarted({ role: "lead", project: slug, projectId, hostId, folder, prompt, title: `Lead · ${projectTitle(slug)}`, model: cfg.leadModel, reasoning: cfg.leadReasoning, by }),
+      spawnStarted({ role: "lead", project: slug, projectId, hostId, folder, prompt, title: `Lead · ${projectTitle(slug)}`, provider: cfg.leadProvider, model: cfg.leadModel, reasoning: cfg.leadReasoning, by }),
   });
 
   startRoute(WRITES.startLead, startLeadBody, async ({ slug }) => {
@@ -2019,6 +2027,7 @@ export default async function plugin(bb: BbPluginApi) {
       folder,
       prompt,
       title: role === "cos" ? cosTitleOf(cfg.cosTitle) : "Steward",
+      provider: role === "cos" ? cfg.cosProvider : cfg.stewardProvider,
       model: role === "cos" ? cfg.cosModel : cfg.stewardModel,
       reasoning: role === "cos" ? cfg.cosReasoning : cfg.stewardReasoning,
       by: "person",
@@ -2029,9 +2038,11 @@ export default async function plugin(bb: BbPluginApi) {
   // ---------------------------------------------------------------- CLI
   const usage = [
     "bb orchestrator status",
+    "bb orchestrator integration import <json-file> | integration receipts <source> [after-sequence] [limit]",
+    "bb orchestrator adopt <threadId> <role> --approval <reference> [--project <slug>] [--parent <threadId>]",
     "bb orchestrator role set <threadId> <cos|steward|lead|thread> [<project>]",
     "bb orchestrator role clear <threadId>",
-    "bb orchestrator spawn <role> [<project>] --project-id <id> --title T --prompt-file F [--parent <threadId>] [--model M]",
+    "bb orchestrator spawn <role> [<project>] --project-id <id> --title T --prompt-file F [--parent <threadId>] [--provider P] [--model M]",
     "bb orchestrator inbox [--thread <id>] [--hook]",
     "bb orchestrator stop <address> | start <address>",
     "bb orchestrator compact-cos [--force]",
@@ -2059,19 +2070,49 @@ export default async function plugin(bb: BbPluginApi) {
           engine.boardAdd("notice", "orchestrator", null, `CLI: bb orchestrator ${argv.join(" ")}`.slice(0, 200), `Run from ${self ? self.address : ctx.threadId ? `thread ${ctx.threadId}` : "no bb thread (a terminal, or a caller that dropped BB_THREAD_ID)"}${ctx.cwd ? ` in ${ctx.cwd}` : ""}.`, null);
         switch (cmd) {
           case "status": {
-            const lines = engine.agents().map((a) => `${a.address.padEnd(24)} ${a.role.padEnd(8)} ${a.status.padEnd(8)} ${a.threadId}`);
+            const lines = engine.agents().map((a) => `${a.address.padEnd(24)} ${a.role.padEnd(8)} ${a.status.padEnd(8)} ${a.threadId} parent=${a.parentThreadId ?? "none"}`);
             const ny = engine.needsYou();
             return out(`${lines.join("\n") || "no agents"}\nNeeds you: ${ny.cards.length} card(s), ${ny.triaging.length} being triaged, ${ny.deferred.length} deferred; dead letters: ${engine.deadLetters().length}`);
+          }
+          case "integration": {
+            if (ctx.threadId) throw new EngineError("forbidden", "external integration is operator-only");
+            if (rest[0] === "import" && rest.length === 2) {
+              const { readFileSync, statSync } = await import("node:fs");
+              if (statSync(rest[1]!).size > 65536) throw new EngineError("invalid", "external mail file exceeds 64 KiB");
+              const mail = externalMailSchema.parse(JSON.parse(readFileSync(rest[1]!, "utf8")));
+              allowImport(integrationRoutes(cfg.integrationRoutes), mail.source, mail.to);
+              const item = engine.importMail(mail);
+              void flush();
+              return out(JSON.stringify({ itemId: item.id, state: item.state }));
+            }
+            if (rest[0] === "receipts" && rest[1]) {
+              return out(JSON.stringify(engine.externalReceipts(rest[1], Number(rest[2] ?? 0), Number(rest[3] ?? 100))));
+            }
+            throw new EngineError("invalid", "integration import <json-file> | integration receipts <source> [after-sequence] [limit]");
+          }
+          case "adopt": {
+            if (ctx.threadId) throw new EngineError("forbidden", "agents cannot adopt role threads");
+            const flag = (name: string) => { const i = rest.indexOf(`--${name}`); return i < 0 ? null : rest[i + 1] ?? null; };
+            const [threadId, role] = rest;
+            if (!threadId || !ROLES.includes(role as Role)) throw new EngineError("invalid", "adopt <threadId> <role> --approval <reference> [--project <slug>] [--parent <threadId>]");
+            const a = await oneAtATime(() => adoptThread({
+              engine,
+              get: async (id) => await bb.sdk.threads.get({ threadId: id }) as unknown as AdoptThread,
+              queued: async (id) => (await bb.sdk.threads.queuedMessages.list({ threadId: id })).length > 0,
+              parent: async (id, parentThreadId) => { await bb.sdk.threads.update({ threadId: id, parentThreadId, parentNotifications: "auto" }); },
+              mirror: async (id, address, role) => { await bb.sdk.threads.updatePluginMetadata({ threadId: id, set: { address, role } }); },
+            }, { threadId, role: role as Role, project: flag("project"), parentThreadId: flag("parent"), approval: flag("approval") ?? "" }));
+            return out(`${a.threadId} is ${a.address}; parent=${a.parentThreadId ?? "none"}`);
           }
           case "role": {
             if (self) throw new EngineError("forbidden", `${self.address} can't change roles`);
             const [sub, threadId, role, project] = rest;
-            if (!threadId) throw new EngineError("invalid", usage[1]!);
+            if (!threadId) throw new EngineError("invalid", "role set <threadId> <cos|steward|lead|thread> [<project>]");
             if (sub === "clear") {
               engine.retire(threadId);
               return out(`cleared ${threadId}`);
             }
-            if (sub !== "set" || !ROLES.includes(role as Role)) throw new EngineError("invalid", usage[1]!);
+            if (sub !== "set" || !ROLES.includes(role as Role)) throw new EngineError("invalid", "role set <threadId> <cos|steward|lead|thread> [<project>]");
             const th = await threadInfo(threadId);
             const a = engine.register(threadId, role as Role, project ?? null);
             if (a.role === "lead") engine.ensureProject(a.project!, th.projectId);
@@ -2081,7 +2122,7 @@ export default async function plugin(bb: BbPluginApi) {
             return out(`${threadId} is ${a.address}`);
           }
           case "spawn": {
-            // bb orchestrator spawn <role> [<project>] --project-id <proj_…> --title T --prompt-file F [--parent <threadId>] [--model M] [--reasoning L]
+            // bb orchestrator spawn <role> [<project>] --project-id <proj_…> --title T --prompt-file F [--parent <threadId>] [--provider P] [--model M] [--reasoning L]
             if (self) throw new EngineError("forbidden", "agents don't spawn role threads");
             const flag = (n: string) => {
               const i = rest.indexOf(`--${n}`);
@@ -2091,18 +2132,17 @@ export default async function plugin(bb: BbPluginApi) {
             const project = maybeProject && !maybeProject.startsWith("--") ? maybeProject : null;
             const projectId = flag("project-id");
             const promptFile = flag("prompt-file");
-            if (!ROLES.includes(role as Role) || !projectId || !promptFile) throw new EngineError("invalid", "spawn <role> [<project>] --project-id <id> --title T --prompt-file F [--parent <threadId>] [--model M] [--reasoning L]");
+            if (!ROLES.includes(role as Role) || !projectId || !promptFile) throw new EngineError("invalid", "spawn <role> [<project>] --project-id <id> --title T --prompt-file F [--parent <threadId>] [--provider P] [--model M] [--reasoning L]");
             const { readFileSync } = await import("node:fs");
             const prompt = readFileSync(promptFile, "utf8");
             const parent = flag("parent");
+            const selection = await spawnSelection(bb.sdk.providers, { projectId }, { provider: flag("provider"), model: flag("model"), reasoning: flag("reasoning") });
             const t = await bb.sdk.threads.spawn({
               projectId,
               environment: { type: "project-default" },
               prompt,
               title: flag("title") ?? `${role}${project ? ` ${project}` : ""}`,
-              providerId: "claude-code",
-              ...(flag("model") ? { model: flag("model") } : {}),
-              ...(flag("reasoning") ? { reasoningLevel: flag("reasoning") } : {}),
+              ...selection,
               ...(parent ? { parentThreadId: parent } : {}),
               pluginMetadata: { role: role!, project },
             } as Parameters<typeof bb.sdk.threads.spawn>[0]);
@@ -2265,6 +2305,7 @@ export async function retireClearSetting(
 /** The CLI commands that change roles, threads, projects or state: each leaves an audit line on the Board. */
 export function privileged(cmd: string | undefined, rest: string[]): boolean {
   switch (cmd) {
+    case "adopt":
     case "role":
     case "spawn":
     case "stop":
@@ -2274,6 +2315,8 @@ export function privileged(cmd: string | undefined, rest: string[]): boolean {
     case "setup":
     case "sweep":
       return true;
+    case "integration":
+      return rest[0] === "import";
     case "project":
       return rest.includes("--priority") || rest.includes("--hold") || rest.includes("--resume");
     case "dreams":

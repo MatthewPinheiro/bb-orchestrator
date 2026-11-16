@@ -64,3 +64,54 @@ Settings (`bb plugin config orchestrator set <key> <value>`): `escalateMinutes` 
 `diskPath` (/), `cosCompactTokens` (0 = off, the default: Claude Code compacts on its own; a token count opts in), `stateDir` (empty: state/ in the plugin's data folder),
 `ownerName` (empty: agents say "the owner"), `cosTitle` (Chief of Staff), `projectsDir`, `projectRecord` (project.json),
 `memoryConfig` (empty: memory off), `memoryConfigEnv` (MEMORY_CONFIG), `memoryUnits`, `memoryTimers`, `dreamsEnabled` (false).
+
+## External fleet integration (opt-in; operator CLI)
+
+Worker spawning accepts `provider` as well as `model`; the default provider remains
+`claude-code`. Start buttons and `orch_start_lead` use `leadProvider`, `cosProvider`
+and `stewardProvider` with their existing model/reasoning settings. All spawn paths
+validate the destination catalog and refuse unavailable selections; no model/provider
+fallback is attempted. Organization-specific routing belongs in the caller.
+
+`bb orchestrator adopt <threadId> <role> --approval <reference> [--project <slug>]
+[--parent <threadId>]` registers an existing idle, unarchived thread without spawning
+or replacing its session. Non-CoS roles need their approved parent (worker→own lead,
+lead/Steward→CoS). An already-correct bb parent is preserved. A missing parent can be
+filled; conflicting parents, occupied roles and retired holders are refused. Retry
+a failed metadata write with identical inputs. bb and SQLite are separate writes;
+if a thread activates during adoption, reconcile the reported partial parent update
+at an idle checkpoint. This command does not implement CoS takeover.
+
+`integrationRoutes` defaults to `{}`. An operator can enable exact source/recipient
+pairs, for example `{"fleet":["cos","lead:alpha"]}`. Then:
+
+- `bb orchestrator integration import <json-file>` accepts one strict external-mail
+  object (see `core/integration.ts`), up to 64 KiB. Source/id is immutable and
+  idempotent; changed content under an old ID is refused. Imported sender labels
+  are provenance, never an internal agent or owner approval. Imports create inbox
+  notices, never decision cards. INFO without needsReply stays passive until due.
+- `bb orchestrator integration receipts <source> [after-sequence] [limit]` returns
+  at most 100 receipts. Sequence paginates imports, not receipt changes: rescan from
+  zero to refresh states. Queued/dispatched/completed are distinct; readAt is null
+  because delivery does not prove reading. Missing queue rows after downtime leave
+  imported mail unresolved until dispatch/cancellation evidence is observed.
+
+Imported tasks require explicit orch_ack outcomes; newer mail and no-ref replies do
+not close unrelated imports. External body references are preserved, not fetched by
+the plugin. A companion must validate those references and retain originals.
+
+Adoption and import reject callers carrying a thread ID and audit mutations on the
+board. Like the existing privileged CLI, this is a same-user operator boundary,
+not protection against a process that can drop BB_THREAD_ID. Keep configuration,
+journals and handoff manifests private; never treat labels as approval provenance.
+
+Use `orch_inbox(id=<item id>)` for full item text and references. Imported envelopes
+expose source/external ID, original ID, reply reference, creation time, due time and
+needs-reply without converting those fields into implicit approval or completion.
+Adoption also requires an empty bb queue before and after its parent check.
+
+Removing a source/recipient pair from `integrationRoutes` pauses already-accepted
+pending imports, deadline delivery and retries. Receipt reads remain available even
+with all routes disabled. This cannot recall an already-queued bb message or undo
+an in-flight send: reconcile/cancel those through the operator before restoring a
+legacy consumer. A disabled companion alone stops new imports, not accepted mail.

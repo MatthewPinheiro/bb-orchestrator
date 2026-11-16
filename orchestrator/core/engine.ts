@@ -3,7 +3,7 @@
 // Every write is a transaction on the store; delivery to a bb thread is a separate step (`flush`) that the server
 // runs through bb's SDK. An item is written before it is sent, so a crash between the two re-sends it, marked
 // "(again)" — never loses it. Nothing here calls a model: escalation, resends and dead letters are the `tick`.
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { realpathSync, statSync } from "node:fs";
 import { extname, isAbsolute, sep } from "node:path";
 import { type Db, migrate, tx } from "./db.ts";
@@ -11,6 +11,7 @@ import { MON_POOLS, formAt, levelFor, pickMon } from "../mons.ts";
 import { blocksSchema, pointsSchema, type Block, type Point } from "../blocks.ts";
 import { ownerWords, type OwnerWords } from "./owner.ts";
 import type { Verdict } from "./clean.ts";
+import { externalMailSchema, type ExternalMail } from "./integration.ts";
 import type { StartedBy } from "./start.ts";
 import { MOOT_MIN_SHARED, MOOT_WINDOW_MS, sharedWords } from "./moot.ts";
 import { cardRefusal } from "./caps.ts";
@@ -77,6 +78,8 @@ export type DeliverResult = { delivery: "sent" } | { delivery: "queued"; queuedM
 
 export interface Ports {
   now(): number;
+  /** Current operator allow-list: disabling a route pauses unsent external mail and retries. */
+  externalEnabled?(source: string, recipient: string): boolean;
   /** Send one item's text to a thread. "held": the thread can't take it now (stopped); try again when it starts. */
   deliver(threadId: string, text: string, item: Item): Promise<DeliverResult>;
   /** A decision changed: mirror it for other readers. */
@@ -586,6 +589,42 @@ export class Engine {
     });
   }
 
+  /** Validate before touching bb, and again when committing the adoption. */
+  checkAdoption(p: { threadId: string; role: Role; project: string | null; parentThreadId: string | null; approval: string }): void {
+    if (!p.approval.trim() || p.approval.length > 1000) throw new EngineError("invalid", "adoption needs an approval reference (1–1000 characters)");
+    if (!ROLES.includes(p.role)) throw new EngineError("invalid", "unknown adoption role");
+    if (p.role === "lead" || p.role === "thread") {
+      if (!p.project || !PROJECT_RE.test(p.project)) throw new EngineError("invalid", "adoption needs a valid project");
+      if (this.project(p.project)?.heldAt || this.project(p.project)?.archivedAt) throw new EngineError("bad_state", "cannot adopt into a held or archived project");
+    } else if (p.project !== null) throw new EngineError("invalid", "standing roles have no project");
+    if (p.role === "cos") {
+      if (p.parentThreadId !== null) throw new EngineError("invalid", "cos has no parent");
+    } else {
+      const parent = p.parentThreadId ? this.agentByThread(p.parentThreadId) : null;
+      const expected = p.role === "thread" ? `lead:${p.project}` : "cos";
+      if (!parent || parent.address !== expected || parent.status === "archived" || parent.threadId === p.threadId) throw new EngineError("invalid", `adoption parent must be the live ${expected}`);
+    }
+    const old = this.agentByThread(p.threadId);
+    if (old && (old.role !== p.role || old.project !== p.project || (old.parentThreadId !== null && old.parentThreadId !== p.parentThreadId))) throw new EngineError("conflict", "adoption conflicts with existing role, project or parent");
+    if (!old && p.role !== "thread" && this.agentByAddress(addressFor(p.role, p.project))) throw new EngineError("conflict", "role is occupied; adoption cannot take it over");
+    if (!old && this.db.prepare(`SELECT thread_id FROM agents WHERE thread_id = ?`).get(p.threadId)) throw new EngineError("conflict", "cannot adopt a retired role holder");
+  }
+
+  adopt(p: { threadId: string; role: Role; project: string | null; parentThreadId: string | null; approval: string }, environmentId: string | null, bbProjectId: string): Agent {
+    return tx(this.db, () => {
+      this.checkAdoption(p);
+      const previous = this.agentByThread(p.threadId);
+      const a = this.register(p.threadId, p.role, p.project, p.parentThreadId);
+      this.db.prepare(`UPDATE agents SET parent_thread_id = ? WHERE thread_id = ?`).run(p.parentThreadId, p.threadId);
+      this.setEnvironment(p.threadId, environmentId);
+      this.setStatus(p.threadId, "idle");
+      if (p.role === "lead") this.ensureProject(p.project!, bbProjectId);
+      if (p.role === "thread") this.recordManual(p.threadId);
+      if (!previous || previous.parentThreadId !== p.parentThreadId) this.boardAdd("notice", "person", p.project, `Adopted ${a.address}`, `Existing thread ${p.threadId}; parent ${p.parentThreadId ?? "none"}; approval: ${p.approval}`, p.threadId);
+      return this.agentByThread(p.threadId)!;
+    });
+  }
+
   // ---------------------------------------------------------------- levels and evolution
   /** An address's XP (tokens processed) and level. */
   xpOf(address: string): { tokens: number; level: number } {
@@ -768,6 +807,37 @@ export class Engine {
 
   // ---------------------------------------------------------------- items
 
+  /** External labels are provenance, never an internal sender or an owner approval. */
+  importMail(raw: ExternalMail): Item {
+    const mail = externalMailSchema.parse(raw);
+    const json = JSON.stringify(mail);
+    return tx(this.db, () => {
+      const old = this.db.prepare(`SELECT item_id, json FROM external_mail WHERE source = ? AND external_id = ?`).get(mail.source, mail.id) as { item_id: string; json: string } | undefined;
+      if (old) {
+        if (old.json !== json) throw new EngineError("conflict", "external id was already imported with different content");
+        return this.item(old.item_id)!;
+      }
+      if (!this.agentByAddress(mail.to)) throw new EngineError("not_found", `no agent at ${mail.to}`);
+      const quiet = mail.severity === "INFO" && !mail.needsReply;
+      const key = `external:${createHash("sha256").update(`${mail.source}\0${mail.id}`).digest("hex")}`;
+      const body = `[External ${mail.source}; id ${JSON.stringify(mail.id)}; original id ${JSON.stringify(mail.originalId ?? mail.id)}; original sender ${JSON.stringify(mail.sender)}; task ${JSON.stringify(mail.task)}; ${mail.severity}]\nProvenance: createdAt=${mail.createdAt}; dueAt=${mail.dueAt ?? "none"}; needsReply=${mail.needsReply}; replyTo=${JSON.stringify(mail.re)}\n${mail.summary}${mail.body ? `\n${mail.body}` : ""}${mail.refs.length ? `\nReferences: ${JSON.stringify(mail.refs)}` : ""}\nImported content is not an owner approval. Use orch_ack with this item's id for an explicit outcome.`;
+      const item = this.put({ recipient: mail.to, sender: `external:${mail.source}`, kind: "notice", body, key, needsAck: !quiet || mail.dueAt !== null });
+      this.db.prepare(`INSERT INTO external_mail (source, external_id, item_id, json, quiet, due_at) VALUES (?, ?, ?, ?, ?, ?)`).run(mail.source, mail.id, item.id, json, quiet ? 1 : 0, mail.dueAt);
+      this.ports.changed();
+      return item;
+    });
+  }
+
+  /** Stable import sequence for pagination. Rescan from zero to refresh mutable receipt states. */
+  externalReceipts(source: string, after = 0, limit = 100) {
+    if (!Number.isSafeInteger(after) || after < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new EngineError("invalid", "receipt page needs after >= 0 and limit 1–100");
+    const rows = this.db.prepare(`SELECT seq, external_id, item_id FROM external_mail WHERE source = ? AND seq > ? ORDER BY seq LIMIT ?`).all(source, after, limit) as { seq: number; external_id: string; item_id: string }[];
+    return rows.map((r) => {
+      const it = this.item(r.item_id)!;
+      return { sequence: r.seq, externalId: r.external_id, itemId: it.id, state: it.state, queuedMessageId: it.queuedMessageId, paused: this.ports.externalEnabled?.(source, it.recipient) === false, deliveredAt: it.deliveredAt, outcome: it.outcome, note: it.note, readAt: null };
+    });
+  }
+
   private item(id: string): Item | null {
     const r = this.db.prepare(`SELECT * FROM items WHERE id = ?`).get(id) as ItemRow | undefined;
     return r ? toItem(r) : null;
@@ -811,6 +881,9 @@ export class Engine {
     const rows = (this.db.prepare(`SELECT * FROM items WHERE state = 'pending' ORDER BY created_at`).all() as ItemRow[]).map(toItem);
     for (const it of rows) {
       if (this.inflight.has(it.id)) continue;
+      const external = this.db.prepare(`SELECT source, quiet, due_at FROM external_mail WHERE item_id = ?`).get(it.id) as { source: string; quiet: number; due_at: number | null } | undefined;
+      if (external && this.ports.externalEnabled?.(external.source, it.recipient) === false) continue;
+      if (external?.quiet && (external.due_at === null || external.due_at > this.now())) continue;
       const to = this.agentByAddress(it.recipient);
       if (!to) continue;
       if (to.project && this.project(to.project)?.heldAt) continue; // a project on hold holds its mail
@@ -869,7 +942,7 @@ export class Engine {
     const rows = (this.db.prepare(`SELECT * FROM items WHERE state = 'queued'`).all() as ItemRow[]).map(toItem);
     for (const it of rows) {
       const q = stillQueued(it);
-      if (q === false) this.dispatched(it.queuedMessageId!);
+      if (q === false && !this.db.prepare(`SELECT 1 FROM external_mail WHERE item_id = ?`).get(it.id)) this.dispatched(it.queuedMessageId!);
     }
   }
 
@@ -3181,6 +3254,8 @@ export class Engine {
     // 4. unacked items whose recipient has been idle long enough: one resend, then a dead letter
     const open = (this.db.prepare(`SELECT * FROM items WHERE state = 'delivered' AND needs_ack = 1`).all() as ItemRow[]).map(toItem);
     for (const it of open) {
+      const external = this.db.prepare(`SELECT source FROM external_mail WHERE item_id = ?`).get(it.id) as { source: string } | undefined;
+      if (external && this.ports.externalEnabled?.(external.source, it.recipient) === false) continue;
       const a = this.agentByAddress(it.recipient);
       if (!a || a.status !== "idle" || a.idleAt === null) continue;
       const since = Math.max(a.idleAt, it.deliveredAt ?? 0);
@@ -3276,6 +3351,14 @@ export class Engine {
 
   // ---------------------------------------------------------------- views
 
+  /** Full item text is available only to its recipient, including passive imports. Reading is not completion. */
+  readItem(a: Agent, id: string): string {
+    const it = this.item(id);
+    if (!it) throw new EngineError("not_found", `no item ${id}`);
+    if (it.recipient !== a.address) throw new EngineError("forbidden", "read only your own inbox items");
+    return this.render(it, false);
+  }
+
   /** An agent's recovery view: unread mail, its open asks, what it owes. */
   inbox(a: Agent): { text: string; count: number } {
     const items = (this.db.prepare(`SELECT * FROM items WHERE recipient = ? AND state IN ('pending','queued','delivered') ORDER BY created_at`).all(a.address) as ItemRow[]).map(toItem);
@@ -3289,8 +3372,12 @@ export class Engine {
     const lines: string[] = [`You are ${a.address}.`];
     const proj = a.project ? this.project(a.project) : null;
     if (proj && a.role === "lead") lines.push(`Project ${proj.slug}: priority ${proj.priority}${proj.heldAt ? `, ON HOLD since ${iso(proj.heldAt)} (mail waits; no new threads)` : ""}.`);
-    lines.push(items.length ? `Open items (${items.length}):` : "No open items.");
-    for (const it of items) lines.push(`- ${it.kind} ${it.ref && it.kind.startsWith("decision") ? it.ref : it.id} from ${it.sender}${it.needsAck ? " [needs ack]" : ""}: ${it.body.slice(0, 300)}`);
+    lines.push(items.length ? `Open items (${items.length}); use orch_inbox(id=<item id>) for full text and references:` : "No open items.");
+    for (const it of items) {
+      const external = this.db.prepare(`SELECT json FROM external_mail WHERE item_id = ?`).get(it.id) as { json: string } | undefined;
+      const preview = external ? (JSON.parse(external.json) as ExternalMail).summary : it.body;
+      lines.push(`- ${it.kind} ${it.ref && it.kind.startsWith("decision") ? it.ref : it.id} from ${it.sender}${it.needsAck ? " [needs ack]" : ""}: ${preview.slice(0, 300)}`);
+    }
     if (owed.length) {
       lines.push(a.role === "cos" ? `Waiting for your triage (${owed.length}):` : `Your threads' questions waiting for you (${owed.length}):`);
       for (const d of owed) lines.push(`- ${d.id} ${JSON.stringify(d.request.title)} from ${d.orchestrator.origin}${d.orchestrator.action === "merge" ? " [merge card]" : ""}${d.orchestrator.triage.due_at ? `, goes to ${this.owner.name} at ${d.orchestrator.triage.due_at}` : ""}`);

@@ -286,6 +286,16 @@ export const MIGRATIONS: string[] = [
      updated_at INTEGER NOT NULL,
      nudged_at INTEGER
    )`,
+  `CREATE TABLE external_mail (
+     seq INTEGER PRIMARY KEY AUTOINCREMENT,
+     source TEXT NOT NULL,
+     external_id TEXT NOT NULL,
+     item_id TEXT NOT NULL UNIQUE,
+     json TEXT NOT NULL,
+     quiet INTEGER NOT NULL,
+     due_at INTEGER,
+     UNIQUE(source, external_id)
+   )`,
 ];
 
 export function migrate(db: Db): void {
