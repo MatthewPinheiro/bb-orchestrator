@@ -60,7 +60,7 @@ import { type Agent, type Decision, EngineError, OUTCOMES, projectTitle, type Ro
 import { type LeadStartPorts, loadBrief, pokemonSentence, samePath, startLead, type StartedBy } from "./core/start.ts";
 import { externalMailSchema, integrationRoutes, allowImport } from "./core/integration.ts";
 import { adoptThread, type AdoptThread } from "./core/adopt.ts";
-import { spawnSelection } from "./core/provider.ts";
+import { spawnSelection, START_DEFAULTS } from "./core/provider.ts";
 import { newProject } from "./core/new-project.ts";
 import { cosTitleOf, ownerWords, type OwnerWords } from "./core/owner.ts";
 // dreams
@@ -132,15 +132,15 @@ export default async function plugin(bb: BbPluginApi) {
     memoryTimers: { type: "string", label: "Memory check: <unit>.timer=<minutes> pairs; a timer that hasn't run for that long is stale (empty: none)", default: "" },
     // The owner's Start buttons (Projects tab)
     integrationRoutes: { type: "string", label: "External mail source → allowed recipient addresses (JSON; empty disables imports)", default: "{}" },
-    leadProvider: { type: "string", label: "Provider of the lead started from the Projects tab", default: "claude-code" },
-    leadModel: { type: "string", label: "Model of a lead started from the Projects tab", default: "claude-opus-5-5" },
-    leadReasoning: { type: "string", label: "Reasoning of a lead started from the Projects tab", default: "high" },
-    cosProvider: { type: "string", label: "Provider of the cos started from the Projects tab", default: "claude-code" },
-    cosModel: { type: "string", label: "Model of the CoS started from the Projects tab", default: "claude-opus-5-5" },
-    cosReasoning: { type: "string", label: "Reasoning of the CoS started from the Projects tab", default: "high" },
-    stewardProvider: { type: "string", label: "Provider of the steward started from the Projects tab", default: "claude-code" },
-    stewardModel: { type: "string", label: "Model of the Steward started from the Projects tab", default: "claude-sonnet-5-5" },
-    stewardReasoning: { type: "string", label: "Reasoning of the Steward started from the Projects tab", default: "medium" },
+    leadProvider: { type: "string", label: "Provider of the lead started from the Projects tab", default: START_DEFAULTS.lead.provider },
+    leadModel: { type: "string", label: "Model of a lead started from the Projects tab", default: START_DEFAULTS.lead.model },
+    leadReasoning: { type: "string", label: "Reasoning of a lead started from the Projects tab", default: START_DEFAULTS.lead.reasoning },
+    cosProvider: { type: "string", label: "Provider of the cos started from the Projects tab", default: START_DEFAULTS.cos.provider },
+    cosModel: { type: "string", label: "Model of the CoS started from the Projects tab", default: START_DEFAULTS.cos.model },
+    cosReasoning: { type: "string", label: "Reasoning of the CoS started from the Projects tab", default: START_DEFAULTS.cos.reasoning },
+    stewardProvider: { type: "string", label: "Provider of the steward started from the Projects tab", default: START_DEFAULTS.steward.provider },
+    stewardModel: { type: "string", label: "Model of the Steward started from the Projects tab", default: START_DEFAULTS.steward.model },
+    stewardReasoning: { type: "string", label: "Reasoning of the Steward started from the Projects tab", default: START_DEFAULTS.steward.reasoning },
     homeProjectId: { type: "string", label: "bb project of the CoS and the Steward (empty: the bb project of the mirror folder, created when missing)", default: "" },
     // the Cloud tab (cloud/)
     cloudConfigPath: { type: "string", label: "Cloud tab config file", description: "On the machine (~/ is its home): which AWS accounts and GCP projects are dev or prod, and their PIM groups. See cloud/config.example.json. Without it the Cloud tab stays hidden.", default: DEFAULT_CLOUD_CONFIG },
@@ -606,7 +606,7 @@ export default async function plugin(bb: BbPluginApi) {
         // a new worktree on the lead's own machine (bb needs the host for a managed worktree)
         const leadEnv = lead.environmentId ? ((await bb.sdk.environments.get({ environmentId: lead.environmentId })) as unknown as { hostId?: string | null }) : null;
         if (!leadEnv?.hostId) throw new EngineError("bad_state", "can't tell which machine the lead runs on");
-        const selection = await spawnSelection(bb.sdk.providers, { hostId: leadEnv.hostId, projectId: lead.projectId }, p);
+        const selection = await spawnSelection(bb.sdk.providers, { hostId: leadEnv.hostId, projectId: lead.projectId }, p, { defaults: {}, warn: (m) => bb.log.warn(m) });
         const t = await bb.sdk.threads.spawn({
           projectId: lead.projectId,
           environment: { type: "host", hostId: leadEnv.hostId, workspace: { type: "managed-worktree", baseBranch: p.base_branch ? { kind: "named", name: p.base_branch } : { kind: "default" } } },
@@ -1842,7 +1842,7 @@ export default async function plugin(bb: BbPluginApi) {
    * thread, which then exists.
    */
   async function spawnStarted(p: { role: Role; project: string | null; projectId: string; hostId: string; folder: string; prompt: string; title: string; provider: string; model: string; reasoning: string; by: StartedBy }): Promise<Agent> {
-    const selection = await spawnSelection(bb.sdk.providers, { hostId: p.hostId, projectId: p.projectId }, p);
+    const selection = await spawnSelection(bb.sdk.providers, { hostId: p.hostId, projectId: p.projectId }, p, { defaults: p.role === "thread" ? undefined : START_DEFAULTS[p.role], warn: (m) => bb.log.warn(m) });
     const t = await bb.sdk.threads.spawn({
       projectId: p.projectId,
       environment: { type: "host", hostId: p.hostId, workspace: { type: "unmanaged", path: p.folder } },
@@ -2136,7 +2136,7 @@ export default async function plugin(bb: BbPluginApi) {
             const { readFileSync } = await import("node:fs");
             const prompt = readFileSync(promptFile, "utf8");
             const parent = flag("parent");
-            const selection = await spawnSelection(bb.sdk.providers, { projectId }, { provider: flag("provider"), model: flag("model"), reasoning: flag("reasoning") });
+            const selection = await spawnSelection(bb.sdk.providers, { projectId }, { provider: flag("provider"), model: flag("model"), reasoning: flag("reasoning") }, { defaults: {}, warn: (m) => bb.log.warn(m) });
             const t = await bb.sdk.threads.spawn({
               projectId,
               environment: { type: "project-default" },

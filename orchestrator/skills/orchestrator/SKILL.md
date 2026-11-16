@@ -70,8 +70,11 @@ Settings (`bb plugin config orchestrator set <key> <value>`): `escalateMinutes` 
 Worker spawning accepts `provider` as well as `model`; the default provider remains
 `claude-code`. Start buttons and `orch_start_lead` use `leadProvider`, `cosProvider`
 and `stewardProvider` with their existing model/reasoning settings. All spawn paths
-validate the destination catalog and refuse unavailable selections; no model/provider
-fallback is attempted. Organization-specific routing belongs in the caller.
+validate the destination catalog and refuse an explicit selection it can't confirm;
+no model/provider fallback is attempted. A start with the defaults (a Start button
+with unchanged settings, a plan thread or CLI spawn with no provider/model/reasoning)
+is never blocked by the catalog: when it can't be read or doesn't list the default,
+the start goes ahead as before and the plugin log gets a warning. Organization-specific routing belongs in the caller.
 
 `bb orchestrator adopt <threadId> <role> --approval <reference> [--project <slug>]
 [--parent <threadId>]` registers an existing idle, unarchived thread without spawning
