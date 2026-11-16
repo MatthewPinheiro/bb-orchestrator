@@ -1,0 +1,41 @@
+{
+  "$schema": "https://getbb.app/schemas/marketplace-v2.schema.json",
+  "schemaVersion": 2,
+  "name": "bb-orchestrator",
+  "displayName": "bb-orchestrator",
+  "description": "The Orchestrator and Usage Meter plugins for bb.",
+  "plugins": [
+    {
+      "id": "orchestrator",
+      "displayName": "Orchestrator",
+      "description": "Run bb threads as a team: a Chief of Staff, a Steward, project leads and their threads, with questions and deliverables that come to you.",
+      "icon": { "url": "./icons/orchestrator.svg" },
+      "tags": ["agents", "orchestration", "workflow"],
+      "author": { "name": "alexk-17", "github": "alexk-17" },
+      "source": {
+        "git": {
+          "url": "https://github.com/alexk-17/bb-orchestrator.git",
+          "subdir": "orchestrator",
+          "range": "^1.0.0",
+          "tagPrefix": "orchestrator-"
+        }
+      }
+    },
+    {
+      "id": "usage-meter",
+      "displayName": "Usage Meter",
+      "description": "Your Claude subscription limits as two rings on a sidebar button, and a page that shows where the usage went.",
+      "icon": { "url": "./usage-meter/icon.svg" },
+      "tags": ["usage", "limits", "claude"],
+      "author": { "name": "alexk-17", "github": "alexk-17" },
+      "source": {
+        "git": {
+          "url": "https://github.com/alexk-17/bb-orchestrator.git",
+          "subdir": "usage-meter",
+          "range": "^0.3.0",
+          "tagPrefix": "usage-meter-"
+        }
+      }
+    }
+  ]
+}

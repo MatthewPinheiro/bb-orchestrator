@@ -1,0 +1,297 @@
+// The frontend contract. Reads go over bb RPC; the owner's writes go to plain HTTP routes that require a browser Origin
+// (a guard rail so an agent's `bb plugin rpc call` can't answer as the owner; curl can still fake an Origin).
+import { defineRpcContract } from "@get-bb/plugin-sdk";
+import { z } from "zod";
+import { blockSchema, pointSchema } from "./blocks.ts";
+import { STEP_STATES, WAIT_KINDS } from "./core/status.ts";
+
+export const PLUGIN_ID = "orchestrator";
+/** The owner's writes: POST JSON to `${WRITE_BASE}/<path>`. */
+export const WRITE_BASE = `/api/v1/plugins/${PLUGIN_ID}/http`;
+export const CHANGED_CHANNEL = "changed";
+
+const opt = z.object({ id: z.string(), label: z.string(), detail: z.string(), recommended: z.boolean() });
+
+const prSchema = z.object({ url: z.string().nullable(), number: z.number().nullable(), state: z.string().nullable(), attention: z.string().nullable(), checks: z.string().nullable() });
+
+export const cardSchema = z.object({
+  id: z.string(),
+  rev: z.number(),
+  project: z.string().nullable(),
+  asker: z.string(), // the address the answer goes to
+  origin: z.string(), // who first asked
+  title: z.string(),
+  question: z.string(),
+  context: z.string(),
+  options: z.array(opt), // recommended first
+  allowText: z.boolean(),
+  askedAt: z.string(),
+  escalated: z.boolean(), // "CoS didn't triage"
+  merge: z.boolean(), // a merge card
+  deferredUntil: z.string().nullable(), // set on deferred cards; null + deferred=true means "until brought back"
+  deferred: z.boolean(),
+  returnedAt: z.string().nullable(),
+  blocks: z.array(blockSchema), // typed parts drawn as components (blocks.ts)
+  prs: z.array(prSchema), // the live state of its PR blocks that pr-watch knows, by url
+  queued: z.number().optional(), // cards from the same asker held behind this one (batching); they come up once it is answered
+});
+export type Card = z.infer<typeof cardSchema>;
+
+export const presetSchema = z.object({ id: z.enum(["1h", "evening", "tomorrow", "manual"]), label: z.string(), until: z.string().nullable() });
+export type Preset = z.infer<typeof presetSchema>;
+
+// a question an agent asked through its own question tool (interactions.ts): the card draws these as options
+export const questionSchema = z.object({
+  id: z.string(),
+  prompt: z.string(),
+  shortLabel: z.string().nullable(),
+  allowFreeText: z.boolean(),
+  multiSelect: z.boolean(),
+  required: z.boolean(),
+  options: z.array(z.object({ label: z.string(), value: z.string(), description: z.string().nullable() })),
+});
+
+export const interactionSchema = z.object({
+  id: z.string(), // bb's interaction id
+  threadId: z.string(),
+  address: z.string(),
+  title: z.string(), // the thread's title
+  kind: z.string(), // what the thread waits for
+  since: z.string().nullable(),
+  questions: z.array(questionSchema), // a user_question's questions; empty for other prompts (answered in the thread)
+});
+
+export const needsYouSchema = z.object({
+  cards: z.array(cardSchema), // answerable, in order
+  deferred: z.array(cardSchema),
+  triaging: z.array(z.object({ id: z.string(), title: z.string(), origin: z.string(), project: z.string().nullable(), dueAt: z.string().nullable() })),
+  interactions: z.array(interactionSchema), // threads with an orchestrator role waiting on a native prompt
+  presets: z.array(presetSchema),
+  badge: z.number(), // only the owner's items: cards + interactions
+});
+export type NeedsYou = z.infer<typeof needsYouSchema>;
+
+export const boardSchema = z.object({
+  rows: z.array(z.object({ id: z.string(), kind: z.string(), from: z.string().nullable(), project: z.string().nullable(), title: z.string(), body: z.string(), ref: z.string().nullable(), at: z.number() })),
+  dead: z.array(z.object({ id: z.string(), recipient: z.string(), sender: z.string(), kind: z.string(), body: z.string(), note: z.string().nullable(), createdAt: z.number() })),
+  agents: z.array(z.object({ threadId: z.string(), address: z.string(), role: z.string(), project: z.string().nullable(), status: z.string(), mon: z.string().nullable() })),
+  rules: z.array(z.object({ id: z.string(), text: z.string(), project: z.string().nullable(), kinds: z.array(z.string()), expiresAt: z.number().nullable(), source: z.string(), createdAt: z.number(), revokedAt: z.number().nullable() })),
+  decisions: z.array(z.object({ id: z.string(), state: z.string(), title: z.string(), origin: z.string(), asker: z.string(), level: z.string(), answer: z.string().nullable(), ack: z.string().nullable(), updatedAt: z.string() })),
+});
+export type Board = z.infer<typeof boardSchema>;
+
+
+// A lead's structured status (core/status.ts): the project page's step bar and the Projects line.
+export const leadStatusSchema = z.object({
+  goal: z.string(),
+  steps: z.array(z.object({ title: z.string(), state: z.enum(STEP_STATES) })),
+  waitingOn: z.object({ kind: z.enum(WAIT_KINDS), ref: z.string().nullable(), label: z.string().nullable() }),
+  blockers: z.array(z.string()),
+  updatedAt: z.number(),
+  by: z.string(),
+});
+
+// Phase 2: the Projects tab (the owner sets priority and hold) and each agent's live state (its lanes; the Agents tab
+// it fed went into Projects on 2026-11-16).
+export const projectsSchema = z.array(
+  z.object({
+    slug: z.string(),
+    priority: z.enum(["urgent", "high", "normal", "low"]),
+    heldAt: z.number().nullable(),
+    archivedAt: z.number().nullable(),
+    lead: z.object({ address: z.string(), threadId: z.string(), status: z.string(), mon: z.string().nullable() }).nullable(),
+    threads: z.number(),
+    openPlans: z.number(), // plan cards not yet decided
+    status: leadStatusSchema.nullable(), // the lead's latest orch_status (core/status.ts)
+  }),
+);
+export type Projects = z.infer<typeof projectsSchema>;
+
+export const agentsSchema = z.array(
+  z.object({
+    threadId: z.string(),
+    address: z.string(),
+    role: z.string(),
+    project: z.string().nullable(),
+    priority: z.string().nullable(),
+    held: z.boolean(),
+    status: z.string(),
+    // the orchestrator's own status: "stopped" and "archived" live only here (bb's status says idle)
+    engineStatus: z.string(),
+    idleAt: z.number().nullable(), // when it went idle, while it is
+    title: z.string().nullable(),
+    lastReport: z.string().nullable(), // the title of its last orch_report
+    provider: z.string().nullable(), // bb's provider id, when there is no model yet
+    mon: z.string().nullable(), // the base Pokémon (what was picked)
+    form: z.string().nullable(), // what it is now, after any evolution
+    level: z.number(), // from XP, uncapped
+    xp: z.number(), // tokens processed by this address's turns
+    xpThis: z.number(), // XP where this level started
+    xpNext: z.number(), // XP for the next level
+    model: z.string().nullable(),
+    usedTokens: z.number().nullable(),
+    contextWindow: z.number().nullable(),
+    branch: z.string().nullable(),
+    pr: prSchema.extend({ review: z.string().nullable() }).nullable(),
+    unread: z.boolean(), // something happened since the owner last looked at the thread
+    flags: z.array(z.string()), // "unplanned"
+  }),
+);
+export type Agents = z.infer<typeof agentsSchema>;
+
+// The project page (2026-11-16): one project's history from the events log (core/history.ts), for its Timeline, Agent
+// flow and Dependencies views. Times are ms epoch; a segment's "nolog" is before the log started (start and end only).
+export const projectHistorySchema = z.object({
+  slug: z.string(),
+  now: z.number(),
+  start: z.number(),
+  logSince: z.number().nullable(),
+  rows: z.array(
+    z.object({
+      address: z.string(),
+      role: z.string(),
+      live: z.boolean(),
+      parent: z.string().nullable(),
+      holders: z.array(
+        z.object({
+          threadId: z.string(),
+          from: z.number(),
+          to: z.number().nullable(),
+          provider: z.string().nullable(),
+          segments: z.array(z.object({ from: z.number(), to: z.number(), state: z.enum(["working", "idle", "blocked", "released", "unknown", "nolog"]) })),
+        }),
+      ),
+      marks: z.array(z.object({ at: z.number(), kind: z.enum(["pr-open", "pr-draft", "pr-merged", "pr-closed", "handoff", "resolve"]), label: z.string(), url: z.string().nullable() })),
+      asks: z.array(z.object({ id: z.string(), title: z.string(), from: z.number(), to: z.number().nullable() })),
+      prs: z.array(z.object({ url: z.string(), number: z.number().nullable(), state: z.string() })),
+    }),
+  ),
+  deps: z.array(
+    z.object({
+      from: z.string(),
+      on: z.string(),
+      kind: z.enum(["card", "held", "deferred", "hold", "dead", "reply", "pr", "ci", "review"]),
+      label: z.string(),
+      since: z.number().nullable(),
+      ref: z.string().nullable(),
+      block: z.boolean(),
+    }),
+  ),
+});
+export type ProjectHistory = z.infer<typeof projectHistorySchema>;
+
+// Phase 3: Outputs, the finished artefacts leads and threads recorded for the owner. A file opens in bb's preview on its
+// host (hostId + path), a link in a new tab.
+export const outputsSchema = z.array(
+  z.object({
+    id: z.string(),
+    title: z.string(),
+    kind: z.enum(["doc", "video", "image", "report", "link"]),
+    path: z.string().nullable(),
+    url: z.string().nullable(),
+    hostId: z.string().nullable(),
+    note: z.string().nullable(),
+    project: z.string().nullable(),
+    author: z.string(), // the recording agent's address
+    at: z.number(),
+  }),
+);
+export type Outputs = z.infer<typeof outputsSchema>;
+
+// Deliverables (docs/deliverables-plan.md): a lead's finished work with proof, for the owner to approve or send back. A proof
+// file is shown through the proof route (GET `${WRITE_BASE}${PROOF_ROUTE}?id=<proof id>`), or opened in bb's preview.
+export const PROOF_ROUTE = "/proof";
+export const proofSchema = z.object({
+  id: z.string(),
+  kind: z.enum(["image", "video", "text", "doc", "pr", "link"]),
+  caption: z.string(),
+  path: z.string().nullable(),
+  url: z.string().nullable(),
+  hostId: z.string().nullable(),
+  pr: prSchema.nullable(), // a PR proof's live state, when pr-watch saw the same URL
+});
+export const deliverablesSchema = z.array(
+  z.object({
+    id: z.string(),
+    project: z.string().nullable(),
+    lead: z.string(), // the delivering lead's address
+    leadMon: z.string().nullable(),
+    title: z.string(),
+    summary: z.string(),
+    state: z.enum(["review", "approved", "changes", "withdrawn"]),
+    rev: z.number(), // the revision the owner's writes must carry
+    createdAt: z.number(),
+    updatedAt: z.number(),
+    revisions: z.array(z.object({ rev: z.number(), summary: z.string(), at: z.string(), proof: z.array(proofSchema), blocks: z.array(blockSchema), points: z.array(pointSchema), prs: z.array(prSchema) })),
+    feedback: z.array(z.object({ rev: z.number(), by: z.string(), text: z.string().nullable(), at: z.string(), outcome: z.enum(["approved", "changes"]) })),
+    withdrawn: z.object({ at: z.string(), reason: z.string().nullable() }).nullable(),
+    // the owner's next action for the lead, and the outcome and note the lead closed it with (state closed)
+    next: z
+      .object({ text: z.string(), rev: z.number(), at: z.string(), item: z.string(), state: z.enum(["open", "closed", "dead"]), outcome: z.string().nullable(), note: z.string().nullable(), closedAt: z.number().nullable() })
+      .nullable(),
+  }),
+);
+export type Deliverables = z.infer<typeof deliverablesSchema>;
+
+/** Who the page is for: the ownerName setting ("" = the page says "you") and the CoS's name. */
+export const configSchema = z.object({ ownerName: z.string(), cosTitle: z.string() });
+export type Config = z.infer<typeof configSchema>;
+
+export const rpcContract = defineRpcContract({
+  config: { input: z.null(), output: configSchema },
+  needsYou: { input: z.object({ zone: z.string().max(64) }).strict(), output: needsYouSchema },
+  board: { input: z.null(), output: boardSchema },
+  projects: { input: z.null(), output: projectsSchema },
+  agents: { input: z.null(), output: agentsSchema },
+  projectHistory: { input: z.object({ slug: z.string().min(1).max(40) }).strict(), output: projectHistorySchema },
+  outputs: { input: z.null(), output: outputsSchema },
+  deliverables: { input: z.null(), output: deliverablesSchema },
+});
+
+// ---- the write routes (POST, JSON body). Each answers { ok: true } or { ok: false, error: { kind, message } }.
+export const secretBody = z.object({ id: z.string(), rev: z.number().int(), value: z.string().min(1).max(4000), via: z.enum(["desktop", "phone"]) }).strict();
+export const answerBody = z.object({ id: z.string(), rev: z.number().int(), option: z.string().nullable(), text: z.string().max(4000).nullable(), via: z.enum(["desktop", "phone"]) }).strict();
+export const deferBody = z.object({ id: z.string(), rev: z.number().int(), preset: z.enum(["1h", "evening", "tomorrow", "manual"]), zone: z.string().max(64), via: z.enum(["desktop", "phone"]) }).strict();
+export const returnBody = z.object({ id: z.string(), rev: z.number().int() }).strict();
+export const ruleAddBody = z.object({ text: z.string().min(1).max(300), project: z.string().nullable(), kinds: z.array(z.enum(["question", "plan"])).min(1), expiresInDays: z.number().positive().nullable(), source: z.string().min(1).max(200) }).strict();
+export const ruleRevokeBody = z.object({ id: z.string() }).strict();
+export const resendBody = z.object({ id: z.string() }).strict();
+export const priorityBody = z.object({ slug: z.string(), priority: z.enum(["urgent", "high", "normal", "low"]) }).strict();
+export const holdBody = z.object({ slug: z.string(), held: z.boolean() }).strict();
+export const archiveBody = z.object({ threadId: z.string() }).strict();
+export const archiveProjectBody = z.object({ slug: z.string().min(1).max(40) }).strict();
+export const outputRemoveBody = z.object({ id: z.string() }).strict();
+export const startLeadBody = z.object({ slug: z.string().min(1).max(40) }).strict();
+export const cosMessageBody = z.object({ text: z.string().trim().min(1).max(8000) }).strict();
+export const interactionAnswerBody = z
+  .object({
+    threadId: z.string(),
+    interactionId: z.string(),
+    answers: z.record(z.string(), z.object({ selected: z.array(z.string().max(500)).max(50), freeText: z.string().max(4000).optional() }).strict()),
+  })
+  .strict();
+export const roleStartBody = z.object({ role: z.enum(["cos", "steward"]) }).strict();
+// next: what the lead does with it next ("forward this to the team"); it reaches the lead as an item they must ack
+export const approveBody = z.object({ id: z.string(), rev: z.number().int(), note: z.string().max(4000).nullable(), next: z.string().max(4000).nullable().optional() }).strict();
+export const requestChangesBody = z.object({ id: z.string(), rev: z.number().int(), text: z.string().min(1).max(4000) }).strict();
+
+export const WRITES = {
+  answer: "/answer",
+  secret: "/secret",
+  defer: "/defer",
+  return: "/return",
+  ruleAdd: "/rules/add",
+  ruleRevoke: "/rules/revoke",
+  resend: "/resend",
+  priority: "/projects/priority",
+  hold: "/projects/hold",
+  archive: "/archive",
+  archiveProject: "/projects/archive",
+  outputRemove: "/outputs/remove",
+  startLead: "/projects/start-lead",
+  roleStart: "/roles/start",
+  cosMessage: "/cos/message",
+  interactionAnswer: "/interactions/answer",
+  approve: "/deliverables/approve",
+  requestChanges: "/deliverables/changes",
+} as const;

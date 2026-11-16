@@ -1,0 +1,9 @@
+{
+  "$schema": "https://getbb.app/schemas/plugins.schema.json",
+  "schemaVersion": 1,
+  "name": "bb-orchestrator",
+  "plugins": [
+    { "name": "orchestrator", "source": "./orchestrator" },
+    { "name": "usage-meter", "source": "./usage-meter" }
+  ]
+}

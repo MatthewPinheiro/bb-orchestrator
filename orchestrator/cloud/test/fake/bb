@@ -1,0 +1,28 @@
+#!/usr/bin/env node
+// A fake `bb` for the tests: only `bb machine env list|set|unset NAME [--project id] [--note n] [--json]`. Logs each
+// argv with its stdin and the bb it was pointed at (BB_SERVER_URL, BB_HOST_DAEMON_PORT) to $CLOUD_SWITCH_FAKE_LOG, and
+// keeps the variables in $CLOUD_SWITCH_FAKE_STATE under "bb": { global: {NAME: value}, projects: {id: {NAME: value}} }.
+// Like bb, set reads the value from stdin (one trailing newline dropped) and list never shows values.
+// CLOUD_SWITCH_FAKE_BB_FAIL=1 makes every call fail, as an unreachable bb would.
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+
+const args = process.argv.slice(2);
+const stdin = args[2] === "set" ? readFileSync(0, "utf8") : "";
+appendFileSync(process.env.CLOUD_SWITCH_FAKE_LOG, `fake-bb ${JSON.stringify(args)} stdin=${JSON.stringify(stdin)} BB_SERVER_URL=${process.env.BB_SERVER_URL ?? ""} BB_HOST_DAEMON_PORT=${process.env.BB_HOST_DAEMON_PORT ?? ""}\n`);
+if (process.env.CLOUD_SWITCH_FAKE_BB_FAIL) { process.stderr.write("Error: could not reach the bb server\n"); process.exit(1); }
+if (args[0] !== "machine" || args[1] !== "env" || !args.includes("--json")) { process.stderr.write(`fake bb: unsupported call: ${args.join(" ")}\n`); process.exit(2); }
+
+const statePath = process.env.CLOUD_SWITCH_FAKE_STATE;
+const state = JSON.parse(readFileSync(statePath, "utf8"));
+const bb = (state.bb ??= { global: {}, projects: {} });
+const i = args.indexOf("--project"), project = i >= 0 ? args[i + 1] : null;
+const table = project ? (bb.projects[project] ??= {}) : bb.global;
+const rows = (t) => Object.keys(t).map((name) => ({ name, value: null, secret: true, note: "set by cloud-switch" }));
+const git = { status: "not logged in", statusMessage: "fake" };
+const [op, name] = [args[2], args[3]];
+
+if (op === "set") table[name] = stdin.replace(/\n$/, "");
+else if (op === "unset") delete table[name];
+else if (op !== "list") { process.stderr.write(`fake bb: unsupported op ${op}\n`); process.exit(2); }
+writeFileSync(statePath, JSON.stringify(state, null, 2));
+process.stdout.write(JSON.stringify({ variables: rows(table), builtInGit: git, ...(op === "list" ? { inheritedVariables: project ? rows(bb.global) : [] } : {}) }, null, 2) + "\n");

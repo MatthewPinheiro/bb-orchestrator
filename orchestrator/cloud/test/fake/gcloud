@@ -1,0 +1,98 @@
+#!/usr/bin/env node
+// A fake `gcloud` for tests and the scratch bb: only the calls cloud-switch makes. Keeps its state where gcloud would
+// ($CLOUDSDK_CONFIG, else ~/.config/gcloud): configurations/config_<name>, active_config, plus fake_accounts.json (the
+// credentialed accounts) and an application_default_credentials.json holding no secret. Logs each argv like the fake aws.
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const here = dirname(fileURLToPath(import.meta.url));
+const raw = process.argv.slice(2);
+appendFileSync(process.env.CLOUD_SWITCH_FAKE_LOG || join(here, "cloud-switch-fake-calls.log"), `fake-gcloud ${JSON.stringify(raw)}\n`);
+const dir = process.env.CLOUDSDK_CONFIG || join(process.env.HOME, ".config/gcloud");
+const cdir = join(dir, "configurations");
+mkdirSync(cdir, { recursive: true });
+const flag = (n) => raw.find((a) => a.startsWith(`--${n}=`))?.slice(n.length + 3);
+const args = raw.filter((a) => !a.startsWith("--"));
+const die = (msg, code = 1) => { process.stderr.write(`ERROR: (gcloud) ${msg}\n`); process.exit(code); };
+
+const names = () => readdirSync(cdir).filter((f) => f.startsWith("config_")).map((f) => f.slice(7));
+if (!names().length) { writeFileSync(join(cdir, "config_default"), ""); writeFileSync(join(dir, "active_config"), "default"); }
+// like gcloud: CLOUDSDK_ACTIVE_CONFIG_NAME wins over the active_config file
+const active = () => process.env.CLOUDSDK_ACTIVE_CONFIG_NAME || (existsSync(join(dir, "active_config")) ? readFileSync(join(dir, "active_config"), "utf8").trim() : "default");
+const readCfg = (n) => {
+  const out = {}; let sec = "";
+  for (const l of readFileSync(join(cdir, `config_${n}`), "utf8").split("\n")) {
+    const h = /^\[(.+)\]$/.exec(l.trim()); if (h) { sec = h[1]; out[sec] ??= {}; continue; }
+    const kv = /^(\S+)\s*=\s*(.*)$/.exec(l.trim()); if (kv && sec) out[sec][kv[1]] = kv[2];
+  }
+  return out;
+};
+const writeCfg = (n, c) => writeFileSync(join(cdir, `config_${n}`), Object.entries(c).map(([s, kv]) => `[${s}]\n${Object.entries(kv).map(([k, v]) => `${k} = ${v}`).join("\n")}\n`).join("\n"));
+const target = () => flag("configuration") ?? active();
+const accountsPath = join(dir, "fake_accounts.json");
+const accounts = () => (existsSync(accountsPath) ? JSON.parse(readFileSync(accountsPath, "utf8")) : []);
+const adc = join(dir, "application_default_credentials.json");
+// reads one line, a byte at a time, so the next gcloud in the same terminal gets the next line
+const ask = (prompt) => {
+  process.stderr.write(prompt);
+  const b = Buffer.alloc(1);
+  let line = "";
+  for (;;) {
+    let n;
+    try { n = readSync(0, b, 0, 1, null); } catch (e) { if (e.code === "EAGAIN") continue; throw e; }
+    if (!n || b[0] === 10) return line;
+    line += String.fromCharCode(b[0]);
+  }
+};
+const SUBJECT = "principal://iam.googleapis.com/locations/global/workforcePools/fake-pool/subject/user@example.com";
+const cmd = args.slice(0, 3).join(" ");
+
+if (cmd === "config configurations list") {
+  process.stdout.write(JSON.stringify(names().map((n) => {
+    const c = readCfg(n);
+    return { is_active: n === active(), name: n, properties: { core: { account: c.core?.account ?? null, project: c.core?.project ?? null }, auth: { login_config_file: c.auth?.login_config_file ?? null } } };
+  }), null, 2) + "\n");
+} else if (cmd === "config configurations create") {
+  if (names().includes(args[3])) die(`Cannot create configuration [${args[3]}], it already exists.`);
+  writeFileSync(join(cdir, `config_${args[3]}`), "");
+  process.stderr.write(`Created [${args[3]}].\n`);
+  // like gcloud: create also activates, unless --no-activate
+  if (!raw.includes("--no-activate")) { writeFileSync(join(dir, "active_config"), args[3]); process.stderr.write(`Activated [${args[3]}].\n`); }
+} else if (cmd === "config configurations activate") {
+  if (!names().includes(args[3])) die(`Cannot activate configuration [${args[3]}], it does not exist.`);
+  writeFileSync(join(dir, "active_config"), args[3]);
+  process.stderr.write(`Activated [${args[3]}].\n`);
+} else if (args[0] === "config" && args[1] === "set") {
+  const [sec, key] = args[2].includes("/") ? args[2].split("/") : ["core", args[2]];
+  const n = target(), c = readCfg(n);
+  (c[sec] ??= {})[key] = args[3];
+  writeCfg(n, c);
+  process.stderr.write(`Updated property [${sec}/${key}].\n`);
+} else if (cmd === "auth list") {
+  process.stdout.write(JSON.stringify(accounts().map((a) => ({ account: a, status: readCfg(active()).core?.account === a ? "ACTIVE" : "" }))) + "\n");
+} else if (args[0] === "info") {
+  process.stdout.write(`${dir}\n`);
+} else if (cmd === "auth login") {
+  if (!flag("login-config")) die("fake gcloud: expected --login-config");
+  process.stderr.write("Go to the following link in your browser, and complete the sign-in prompts:\n\n    https://auth.cloud.google/authorize?fake=1\n\n");
+  ask("Once finished, enter the verification code provided in your browser: ");
+  writeFileSync(accountsPath, JSON.stringify([...new Set([...accounts(), SUBJECT])]));
+  const n = target(), c = readCfg(n); (c.core ??= {}).account = SUBJECT; writeCfg(n, c);
+  process.stderr.write(`\nYou are now logged in as [${SUBJECT}].\n`);
+} else if (cmd === "auth application-default login") {
+  process.stderr.write("Go to the following link in your browser, and complete the sign-in prompts:\n\n    https://auth.cloud.google/authorize?fake=2\n\n");
+  ask("Once finished, enter the verification code provided in your browser: ");
+  writeFileSync(adc, JSON.stringify({ type: "fake_external_account_authorized_user" }));
+  process.stderr.write(`\nCredentials saved to file: [${adc}]\n`);
+} else if (cmd === "auth revoke") {
+  if (!accounts().length) die("No credentials available to revoke.");
+  writeFileSync(accountsPath, "[]");
+  process.stderr.write("Revoked credentials.\n");
+} else if (cmd === "auth application-default revoke") {
+  if (!existsSync(adc)) { process.stderr.write("Application Default Credentials have not been set up, nothing to revoke.\n"); process.exit(0); }
+  rmSync(adc);
+  process.stderr.write("Credentials revoked.\n");
+} else {
+  die(`fake gcloud: unsupported call: ${raw.join(" ")}`, 2);
+}

@@ -1,0 +1,50 @@
+{
+  "aws": {
+    "accounts": [
+      {
+        "id": "111111111111",
+        "env": "dev",
+        "pim": {
+          "Engineers": [
+            { "group": "Example PIM group", "assignment": "active", "permissions": "Dev services" }
+          ]
+        }
+      },
+      {
+        "id": "222222222222",
+        "env": "prod",
+        "pim": {
+          "Engineers-Prod": [
+            { "group": "Example PIM group (prod)", "assignment": "eligible", "approval": true, "maxDuration": "2 hours", "permissions": "Prod services" }
+          ]
+        }
+      }
+    ],
+    "configPaths": ["/etc/acme/aws/{user}/config"]
+  },
+  "gcp": {
+    "projects": [
+      {
+        "id": "acme-dev",
+        "env": "dev",
+        "configuration": "dev",
+        "pim": [
+          { "group": "Example PIM group (GCP dev)", "assignment": "eligible", "maxDuration": "8 hours", "permissions": "Editor" }
+        ]
+      },
+      {
+        "id": "acme-prod",
+        "env": "prod",
+        "configuration": "prod",
+        "pim": [
+          { "group": "Example PIM group (GCP prod)", "assignment": "eligible", "approval": true, "maxDuration": "2 hours", "permissions": "Editor" }
+        ]
+      }
+    ],
+    "loginConfig": "~/.config/gcloud/acme-login-config.json"
+  },
+  "links": [
+    { "label": "Entra PIM: My roles", "url": "https://portal.azure.com/#view/Microsoft_Azure_PIMCommon/ActivationMenuBlade/~/aadgroup" },
+    { "label": "My Apps", "url": "https://myapps.microsoft.com" }
+  ]
+}

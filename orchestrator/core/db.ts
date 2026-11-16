@@ -1,0 +1,319 @@
+// The SQL surface the engine needs. better-sqlite3 (bb.storage.database()) and node:sqlite (tests) both fit it.
+export interface Stmt {
+  run(...params: unknown[]): unknown;
+  get(...params: unknown[]): unknown;
+  all(...params: unknown[]): unknown[];
+}
+export interface Db {
+  exec(sql: string): unknown;
+  prepare(sql: string): Stmt;
+}
+
+// Append-only: never edit or reorder a shipped statement.
+export const MIGRATIONS: string[] = [
+  `CREATE TABLE IF NOT EXISTS agents (
+     thread_id TEXT PRIMARY KEY,
+     address TEXT NOT NULL UNIQUE,
+     role TEXT NOT NULL,
+     project TEXT,
+     parent_thread_id TEXT,
+     status TEXT NOT NULL DEFAULT 'unknown',
+     idle_at INTEGER,
+     created_at INTEGER NOT NULL,
+     retired_at INTEGER
+   )`,
+  `CREATE TABLE IF NOT EXISTS decisions (
+     id TEXT PRIMARY KEY,
+     state TEXT NOT NULL,
+     at_level TEXT NOT NULL,
+     asker TEXT NOT NULL,
+     origin TEXT NOT NULL,
+     project TEXT,
+     action TEXT,
+     triage_due_at INTEGER,
+     deferred_until INTEGER,
+     deferred_manual INTEGER NOT NULL DEFAULT 0,
+     json TEXT NOT NULL,
+     updated_at INTEGER NOT NULL
+   )`,
+  `CREATE TABLE IF NOT EXISTS items (
+     id TEXT PRIMARY KEY,
+     recipient TEXT NOT NULL,
+     sender TEXT NOT NULL,
+     kind TEXT NOT NULL,
+     ref TEXT,
+     body TEXT NOT NULL,
+     send_key TEXT,
+     needs_ack INTEGER NOT NULL,
+     state TEXT NOT NULL,
+     attempts INTEGER NOT NULL DEFAULT 0,
+     queued_message_id TEXT,
+     created_at INTEGER NOT NULL,
+     delivered_at INTEGER,
+     closed_at INTEGER,
+     outcome TEXT,
+     note TEXT,
+     UNIQUE (sender, send_key)
+   )`,
+  `CREATE INDEX IF NOT EXISTS items_recipient ON items (recipient, state)`,
+  `CREATE TABLE IF NOT EXISTS rules (
+     id TEXT PRIMARY KEY,
+     text TEXT NOT NULL,
+     project TEXT,
+     kinds TEXT NOT NULL,
+     expires_at INTEGER,
+     granted_by TEXT NOT NULL,
+     source TEXT NOT NULL,
+     created_at INTEGER NOT NULL,
+     revoked_at INTEGER
+   )`,
+  `CREATE TABLE IF NOT EXISTS board (
+     id TEXT PRIMARY KEY,
+     kind TEXT NOT NULL,
+     from_address TEXT,
+     project TEXT,
+     title TEXT NOT NULL,
+     body TEXT NOT NULL,
+     ref TEXT,
+     at INTEGER NOT NULL
+   )`,
+  `CREATE TABLE IF NOT EXISTS alarms (
+     id TEXT PRIMARY KEY,
+     level TEXT NOT NULL,
+     snapshot TEXT NOT NULL,
+     at INTEGER NOT NULL,
+     item_id TEXT
+   )`,
+  // An address is unique among live agents only: a retired CoS must not block the next one.
+  `CREATE TABLE agents_v2 (
+     thread_id TEXT PRIMARY KEY,
+     address TEXT NOT NULL,
+     role TEXT NOT NULL,
+     project TEXT,
+     parent_thread_id TEXT,
+     status TEXT NOT NULL DEFAULT 'unknown',
+     idle_at INTEGER,
+     created_at INTEGER NOT NULL,
+     retired_at INTEGER
+   );
+   INSERT INTO agents_v2 SELECT thread_id, address, role, project, parent_thread_id, status, idle_at, created_at, retired_at FROM agents;
+   DROP TABLE agents;
+   ALTER TABLE agents_v2 RENAME TO agents;
+   CREATE UNIQUE INDEX agents_live_address ON agents (address) WHERE retired_at IS NULL`,
+  // Phase 2 (docs/phase2-plan.md): projects with priority and hold, spawns against approved plans, PR state per
+  // environment, and each agent's bb environment.
+  `CREATE TABLE projects (
+     slug TEXT PRIMARY KEY,
+     bb_project_id TEXT,
+     priority TEXT NOT NULL DEFAULT 'normal',
+     held_at INTEGER,
+     created_at INTEGER NOT NULL
+   );
+   INSERT OR IGNORE INTO projects (slug, created_at) SELECT project, MIN(created_at) FROM agents WHERE role = 'lead' AND project IS NOT NULL GROUP BY project;
+   CREATE TABLE spawns (
+     thread_id TEXT PRIMARY KEY,
+     plan_id TEXT,
+     via TEXT NOT NULL,
+     lead TEXT,
+     created_at INTEGER NOT NULL
+   );
+   CREATE TABLE prs (
+     environment_id TEXT PRIMARY KEY,
+     thread_id TEXT NOT NULL,
+     url TEXT,
+     number INTEGER,
+     state TEXT,
+     attention TEXT,
+     checks TEXT,
+     sig TEXT NOT NULL,
+     seen_at INTEGER NOT NULL
+   );
+   ALTER TABLE agents ADD COLUMN environment_id TEXT;
+   ALTER TABLE agents ADD COLUMN flags TEXT NOT NULL DEFAULT '';
+   ALTER TABLE agents ADD COLUMN mon TEXT`,
+  // Phase 3: Outputs, the finished artefacts a lead or thread recorded for the owner (the earlier Docs record). A file is kept
+  // as its realpath and the bb host it is on (for bb's preview); a link as its URL. One of path or url, never both.
+  `CREATE TABLE outputs (
+     id TEXT PRIMARY KEY,
+     title TEXT NOT NULL,
+     kind TEXT NOT NULL,
+     path TEXT,
+     url TEXT,
+     host_id TEXT,
+     note TEXT,
+     project TEXT,
+     author TEXT NOT NULL,
+     thread_id TEXT NOT NULL,
+     at INTEGER NOT NULL
+   );
+   CREATE INDEX outputs_project ON outputs (project, at)`,
+  // Dreams (phase 3, gap 5): one nightly batch per date in the dream zone, its whole state as JSON (so a restart
+  // neither re-launches nor files a second card), and one memory check per date.
+  `CREATE TABLE dream_batches (
+     date TEXT PRIMARY KEY,
+     run TEXT NOT NULL,
+     state TEXT NOT NULL,
+     decision_id TEXT,
+     json TEXT NOT NULL,
+     updated_at INTEGER NOT NULL
+   );
+   CREATE TABLE memchecks (
+     date TEXT PRIMARY KEY,
+     problems TEXT NOT NULL,
+     posted INTEGER NOT NULL,
+     at INTEGER NOT NULL
+   )`,
+  // Deliverables (docs/deliverables-plan.md): a lead's finished work for the owner, with proof. The row's columns are what
+  // the screens sort and filter by; the json holds the revisions (each with its proof) and the owner's feedback.
+  `CREATE TABLE deliverables (
+     id TEXT PRIMARY KEY,
+     project TEXT,
+     lead TEXT NOT NULL,
+     title TEXT NOT NULL,
+     summary TEXT NOT NULL,
+     state TEXT NOT NULL,
+     rev INTEGER NOT NULL,
+     created_at INTEGER NOT NULL,
+     updated_at INTEGER NOT NULL,
+     json TEXT NOT NULL
+   );
+   CREATE INDEX deliverables_state ON deliverables (state, updated_at)`,
+  // Levels (2026-11-13): XP is the tokens an agent's turns processed. It is kept per address, so a restarted
+  // lead or a handed-over thread keeps levelling; the cursor is per bb thread (the last usage event counted).
+  `CREATE TABLE xp (
+     address TEXT PRIMARY KEY,
+     tokens INTEGER NOT NULL,
+     updated_at INTEGER NOT NULL
+   );
+   CREATE TABLE xp_cursor (
+     thread_id TEXT PRIMARY KEY,
+     seq INTEGER NOT NULL
+   )`,
+  // Requested 2026-11-13: leads evolve too and start at their base form, so each lead's final-form Pokémon becomes its
+  // line's base (Heracross, Jolteon and Rotom have no line: the kind's new pick). Its level then sets the form shown.
+  `UPDATE agents SET mon = CASE mon
+       WHEN 'Alakazam' THEN 'Abra'
+       WHEN 'Espeon' THEN 'Eevee'
+       WHEN 'Gardevoir' THEN 'Ralts'
+       WHEN 'Metagross' THEN 'Beldum'
+       WHEN 'Porygon-Z' THEN 'Porygon'
+       WHEN 'Starmie' THEN 'Staryu'
+       WHEN 'Scizor' THEN 'Scyther'
+       WHEN 'Heracross' THEN 'Venipede'
+       WHEN 'Volcarona' THEN 'Larvesta'
+       WHEN 'Dragonite' THEN 'Dratini'
+       WHEN 'Salamence' THEN 'Bagon'
+       WHEN 'Excadrill' THEN 'Drilbur'
+       WHEN 'Steelix' THEN 'Onix'
+       WHEN 'Aggron' THEN 'Aron'
+       WHEN 'Lucario' THEN 'Riolu'
+       WHEN 'Jolteon' THEN 'Shinx'
+       WHEN 'Magnezone' THEN 'Magnemite'
+       WHEN 'Rotom' THEN 'Klink'
+       WHEN 'Porygon2' THEN 'Porygon'
+       WHEN 'Garchomp' THEN 'Gible'
+       WHEN 'Tyranitar' THEN 'Larvitar'
+       WHEN 'Gyarados' THEN 'Magikarp'
+       WHEN 'Hydreigon' THEN 'Deino'
+       WHEN 'Haxorus' THEN 'Axew'
+       WHEN 'Gengar' THEN 'Gastly'
+       ELSE mon END
+   WHERE role = 'lead'`,
+  // An archived project: its agents retired, its open questions withdrawn, kept for the record. Starting its lead again
+  // brings it back.
+  `ALTER TABLE projects ADD COLUMN archived_at INTEGER`,
+  // Dead letters go to the CoS (2026-11-15): each death gets the next sequence number (the hourly wake's cursor, as
+  // the clock can repeat) and its time; only the ones the CoS escalates reach the owner's board. Those already dead
+  // are on the board today and stay there. `cursors` holds named counters (the wake's last sequence and check time).
+  `ALTER TABLE items ADD COLUMN dead_seq INTEGER;
+   ALTER TABLE items ADD COLUMN dead_at INTEGER;
+   ALTER TABLE items ADD COLUMN on_board INTEGER NOT NULL DEFAULT 0;
+   UPDATE items SET on_board = 1 WHERE state = 'dead';
+   CREATE TABLE cursors (name TEXT PRIMARY KEY, value INTEGER NOT NULL)`,
+  // A reply counts as the ack (2026-11-16): when an agent last went idle, kept through its next turn (idle_at is
+  // cleared when it turns active), so a reply can tell whether a message arrived for the turn it is in.
+  `ALTER TABLE agents ADD COLUMN last_idle_at INTEGER`,
+  // Answers that wait on a PR (2026-11-16): an ack bound to a PR and a condition. The PR notices wake its owner with
+  // the original answer once the condition holds; the tick nudges it each day it doesn't.
+  `CREATE TABLE waits (
+     id TEXT PRIMARY KEY,
+     owner TEXT NOT NULL,
+     ref TEXT NOT NULL,
+     about TEXT NOT NULL,
+     pr_url TEXT NOT NULL,
+     cond TEXT NOT NULL,
+     created_at INTEGER NOT NULL,
+     nudged_at INTEGER,
+     closed_at INTEGER,
+     outcome TEXT,
+     item_id TEXT
+   );
+   CREATE INDEX waits_open ON waits (closed_at, pr_url)`,
+  // Rules from answers (2026-11-16): a rule made from the owner's answers carries what it matches (rules.ts) and settles
+  // those cards by itself. Each offer to the CoS is kept with its evidence, so the same cards are offered once.
+  `ALTER TABLE rules ADD COLUMN match TEXT;
+   CREATE TABLE rule_offers (
+     id TEXT PRIMARY KEY,
+     grp TEXT NOT NULL,
+     evidence TEXT NOT NULL,
+     suggested TEXT NOT NULL,
+     at INTEGER NOT NULL
+   )`,
+  // The project page's history (2026-11-16): an append-only log of what changed and when. kind: spawn (value = role,
+  // ref = parent thread), status (value = the new status), pr (value = state, ref = url, note = number), handoff
+  // (thread_id = the successor, ref = the predecessor, value/note = new/old provider), retire, resolve (value = why).
+  // Rows rebuilt from older tables at the log's start have backfill = 1 (history.ts).
+  `CREATE TABLE events (
+     seq INTEGER PRIMARY KEY AUTOINCREMENT,
+     at INTEGER NOT NULL,
+     kind TEXT NOT NULL,
+     project TEXT,
+     address TEXT,
+     thread_id TEXT,
+     value TEXT,
+     ref TEXT,
+     note TEXT,
+     backfill INTEGER NOT NULL DEFAULT 0
+   );
+   CREATE INDEX events_project ON events (project, at)`,
+  // A lead's structured status (2026-11-16, status.ts): the latest orch_status per project, as JSON. nudged_at: when its
+  // lead was told it went stale (once per stale period; a new publish clears it). Each publish is also an event.
+  `CREATE TABLE lead_status (
+     project TEXT PRIMARY KEY,
+     address TEXT NOT NULL,
+     thread_id TEXT NOT NULL,
+     json TEXT NOT NULL,
+     updated_at INTEGER NOT NULL,
+     nudged_at INTEGER
+   )`,
+];
+
+export function migrate(db: Db): void {
+  db.exec(`CREATE TABLE IF NOT EXISTS _migrations (id INTEGER PRIMARY KEY)`);
+  const done = new Set((db.prepare(`SELECT id FROM _migrations`).all() as { id: number }[]).map((r) => r.id));
+  MIGRATIONS.forEach((sql, i) => {
+    if (done.has(i)) return;
+    tx(db, () => {
+      db.exec(sql);
+      db.prepare(`INSERT INTO _migrations (id) VALUES (?)`).run(i);
+    });
+  });
+}
+
+let depth = 0;
+/** One transaction (nested calls join the outer one). */
+export function tx<T>(db: Db, fn: () => T): T {
+  if (depth > 0) return fn();
+  db.exec("BEGIN IMMEDIATE");
+  depth++;
+  try {
+    const out = fn();
+    depth--;
+    db.exec("COMMIT");
+    return out;
+  } catch (e) {
+    depth--;
+    db.exec("ROLLBACK");
+    throw e;
+  }
+}

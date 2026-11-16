@@ -1,0 +1,39 @@
+#!/usr/bin/env node
+// A fake `aws` for tests and the scratch bb: only the calls cloud-switch makes, on made-up state. Logs each argv to
+// $CLOUD_SWITCH_FAKE_LOG (else cloud-switch-fake-calls.log beside it). State: $CLOUD_SWITCH_FAKE_STATE (else
+// cloud-switch-fake-state.json beside it): { "aws": { "<profile>": { "Account", "Arn" } | { "error": "<stderr>", "afterLogin"? } } }.
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const here = dirname(fileURLToPath(import.meta.url));
+const args = process.argv.slice(2);
+appendFileSync(process.env.CLOUD_SWITCH_FAKE_LOG || join(here, "cloud-switch-fake-calls.log"), `fake-aws ${JSON.stringify(args)} AWS_CONFIG_FILE=${process.env.AWS_CONFIG_FILE ?? ""}\n`);
+const statePath = process.env.CLOUD_SWITCH_FAKE_STATE || join(here, "cloud-switch-fake-state.json");
+const state = existsSync(statePath) ? JSON.parse(readFileSync(statePath, "utf8")) : { aws: {} };
+const flag = (name) => { const a = args.find((x) => x.startsWith(`--${name}=`)); if (a) return a.slice(name.length + 3); const i = args.indexOf(`--${name}`); return i >= 0 ? args[i + 1] : undefined; };
+
+if (args[0] === "sts" && args[1] === "get-caller-identity") {
+  // --profile, else AWS_PROFILE, else the default chain (on the runner: the instance role, which the fake doesn't have)
+  const p = flag("profile") ?? process.env.AWS_PROFILE ?? null;
+  const s = p ? state.aws[p] : null;
+  if (!s) { process.stderr.write("\nUnable to locate credentials. You can configure credentials by running \"aws configure\".\n"); process.exit(253); }
+  if (s.error) { process.stderr.write(`\n${s.error}\n`); process.exit(255); }
+  process.stdout.write(JSON.stringify({ UserId: "AROAFAKEFAKEFAKEFAKE:user@example.com", Account: s.Account, Arn: s.Arn }, null, 4) + "\n");
+  process.exit(0);
+}
+
+if (args[0] === "sso" && args[1] === "login") {
+  const p = flag("profile");
+  process.stdout.write("Browser will not be automatically opened.\nPlease visit the following URL:\n\nhttps://device.sso.us-east-1.amazonaws.com/\n");
+  process.stdout.write("\nThen enter the code:\n\nFAKE-CODE\n\nAlternatively, you may visit the following URL which will autofill the code upon loading:\nhttps://device.sso.us-east-1.amazonaws.com/?user_code=FAKE-CODE\n");
+  setTimeout(() => {
+    // a profile whose state says what a login gives (afterLogin) is logged in from now on
+    if (p && state.aws[p]?.afterLogin) { state.aws[p] = state.aws[p].afterLogin; writeFileSync(statePath, JSON.stringify(state, null, 2)); }
+    process.stdout.write("Successfully logged into Start URL: https://example.awsapps.com/start\n");
+    process.exit(0);
+  }, Number(process.env.CLOUD_SWITCH_FAKE_LOGIN_MS ?? 20000));
+} else {
+  process.stderr.write(`fake aws: unsupported call: ${args.join(" ")}\n`);
+  process.exit(2);
+}
