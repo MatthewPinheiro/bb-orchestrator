@@ -6,7 +6,21 @@ import { SegmentedControl } from "./affect/segmented-control-clean.tsx";
 import { MAX_PANES, panes, type Layout, type Node, type Pane } from "./layout.ts";
 import { Btn, cx } from "./ui.tsx";
 
-export type ViewDef = { id: string; label: string; count?: number | string };
+/** `counted`: the tab can carry a count, so its slot stays while there is none and a count coming or going moves no tab */
+export type ViewDef = { id: string; label: string; count?: number | string; counted?: boolean };
+
+/** A counted tab's label: its count sits in a slot that is always there, hidden while empty, at least two digits wide (paneCss). */
+function CountedLabel({ label, count }: { label: string; count?: number | string }) {
+  const text = typeof count === "number" ? count.toLocaleString("en-US") : (count ?? "");
+  return (
+    <span className="orch-tab-label">
+      {label}
+      <span key={text} className="ui-segc__count orch-tab-count" data-empty={text === "" || undefined} aria-hidden={text === "" || undefined}>
+        {text}
+      </span>
+    </span>
+  );
+}
 
 export function useWidth(ref: RefObject<HTMLElement | null>): number {
   const [w, setW] = useState(0);
@@ -151,9 +165,19 @@ function PaneView({ pane, views, render, fill, wide, onView, onFocus, onSplit, o
         if (!focused) onFocus(pane.id);
       }}
     >
-      <header className={cx("flex shrink-0 items-center gap-1", many ? "px-2 pt-2" : `${column} px-4 pt-4`)}>
+      {/* the strip's row spans the pane on every tab (tabs left, split buttons right), whatever width the tab's content
+          takes, so it never moves with the tab (2026-11-17: only the wide tabs drew it so) and fits more tabs before it
+          scrolls; the tab's content scrolls under it, in its own column */}
+      <header className={cx("flex shrink-0 items-center gap-1", many ? "px-2 pt-2" : "px-4 pt-4")}>
         <div className="min-w-0 flex-1">
-          <SegmentedControl kind="tabs" variant="tray" size="sm" value={pane.view} options={views.map((v) => ({ value: v.id, label: v.label, count: v.count }))} onChange={(id) => onView(pane.id, id)} />
+          <SegmentedControl
+            kind="tabs"
+            variant="tray"
+            size="sm"
+            value={pane.view}
+            options={views.map((v) => (v.counted ? { value: v.id, label: <CountedLabel label={v.label} count={v.count} /> } : { value: v.id, label: v.label, count: v.count }))}
+            onChange={(id) => onView(pane.id, id)}
+          />
         </div>
         {canSplit ? (
           <>
@@ -174,7 +198,7 @@ function PaneView({ pane, views, render, fill, wide, onView, onFocus, onSplit, o
       {fills ? (
         <div className="flex min-h-0 flex-1 flex-col pt-2">{render(pane.view, { id: pane.id, width })}</div>
       ) : (
-        <div className="min-h-0 flex-1 overflow-y-auto">
+        <div className="orch-pane__scroll min-h-0 flex-1 overflow-y-auto">
           <div className={cx(column, "pb-8", many ? "px-3 pt-3" : "px-4 pt-4")}>{render(pane.view, { id: pane.id, width })}</div>
         </div>
       )}
@@ -192,4 +216,10 @@ export const paneCss = /* css */ `
 [data-orch] .orch-divider--row::after { inset: 8px 2px; }
 [data-orch] .orch-divider--col::after { inset: 2px 8px; }
 [data-orch] .orch-divider:hover::after, [data-orch] .orch-divider:active::after { background: light-dark(rgba(0, 0, 0, 0.16), rgba(255, 255, 255, 0.22)); }
+/* A scrollbar coming or going moves no content: its room is always kept */
+[data-orch] .orch-pane__scroll { scrollbar-gutter: stable; }
+/* The strip's counts: at least two digits wide ("2" → "10" moves no tab), and a counted tab keeps its slot while empty */
+[data-orch] [data-pane] > header .ui-segc .ui-segc__count { min-width: calc(2ch + 6px); }
+[data-orch] .orch-tab-label { display: inline-flex; align-items: center; gap: 5px; }
+[data-orch] .orch-tab-count[data-empty] { visibility: hidden; }
 `;

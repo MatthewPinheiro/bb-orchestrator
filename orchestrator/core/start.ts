@@ -88,7 +88,7 @@ export type StartedBy = "person" | "cos";
 
 /** What startLead needs from the server: the engine's checks, the folders, bb's project lookup and the spawn. */
 export type LeadStartPorts = {
-  engine: { checkStart(role: "lead", project: string): string; monForStart(role: "lead", project: string): string | null };
+  engine: { checkStart(role: "lead", project: string): string; monForStart(role: "lead", project: string): string | null; project(slug: string): { mode: "scoping" | "active" } | null };
   /** The projects folder (the projectsDir setting). */
   projectsDir: string;
   /** A project folder the memory config names for this slug, if any. */
@@ -102,6 +102,21 @@ export type LeadStartPorts = {
   /** Spawn and register the lead; the caller binds who started it. */
   spawn(p: { slug: string; address: string; projectId: string; hostId: string; folder: string; prompt: string }): Promise<{ threadId: string; address: string; mon: string | null }>;
 };
+
+/**
+ * What a lead of a scoping project is told at its start (1.11.0), after its brief: the brief is the same for every lead,
+ * this is the one difference. Its live inbox says the same while the project stays scoping.
+ */
+export function scopingStart(slug: string, owner: string, folder: string): string {
+  return [
+    `## ${slug} is in scoping mode`,
+    `${owner} settles this project's scope with you directly, in the Scope tab: your chat with them and your cards side by side. Until scoping is done:`,
+    `- Ask ${owner} with orch_ask (questions and plan cards): your cards and deliverables reach ${owner}'s Scope pane only. The CoS gets a read-only copy, does not triage them, and no standing rule settles them. ${owner}'s chat messages are direct messages: answer each with orch_ack(id, outcome, note), as always.`,
+    `- Start no build threads. Read-only investigation is fine.`,
+    `- Write what you settle (the goal, the constraints, the first plan) into ${folder}/PROJECT.md.`,
+    `- When it is all there, propose the end: orch_ask with scoping_done={summary, project_md: "${folder}/PROJECT.md"}, a summary of the goal, constraints and first plan. The options are fixed: ${owner}'s yes makes the project active (the normal card flow from then on); a no comes back to you with their note.`,
+  ].join("\n");
+}
 
 /**
  * Start lead:<slug>: one path for the owner's Start lead button and the CoS's orch_start_lead. Refused, before any
@@ -119,7 +134,8 @@ export async function startLead(p: LeadStartPorts, slug: string) {
   if (!repo) throw new EngineError("bad_state", `${folder}/PROJECT.md names no repo: put its absolute path in backticks under "## Repos"`);
   if (!existsSync(repo.path)) throw new EngineError("bad_state", `${slug}'s repo ${repo.path} isn't on this machine`);
   const base = repo.base ?? "not named in PROJECT.md (leave base_branch out: the repo's default branch)";
-  const prompt = loadBrief(p.briefDir, "lead", { slug, address, pokemon: pokemonSentence(p.engine.monForStart("lead", slug)), folder, repo: repo.path, base, owner: p.owner });
+  const brief = loadBrief(p.briefDir, "lead", { slug, address, pokemon: pokemonSentence(p.engine.monForStart("lead", slug)), folder, repo: repo.path, base, owner: p.owner });
+  const prompt = p.engine.project(slug)?.mode === "scoping" ? `${brief.trimEnd()}\n\n${scopingStart(slug, p.owner, folder)}\n` : brief;
   const { projectId, hostId } = await p.bbProject(repo.path);
   p.engine.checkStart("lead", slug); // again: the project may have been held meanwhile
   return p.spawn({ slug, address, projectId, hostId, folder, prompt });

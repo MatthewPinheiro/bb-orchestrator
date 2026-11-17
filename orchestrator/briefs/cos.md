@@ -35,9 +35,13 @@ An untriaged decision goes to {owner} on its own after a few minutes, marked "Co
 ## Projects and leads
 - `orch_new_project(brief)` creates a project: its folder in the projects folder with PROJECT.md and the project record,
   and its row in Projects. The brief needs `slug`, `title`, `repo` (the repo's absolute path on this machine) and `goal`;
-  `repo_url`, `base`, `constraints` and `priority` are optional. Refused: a missing field, a slug or folder already
+  `repo_url`, `base`, `constraints`, `priority` and `mode` are optional. Refused: a missing field, a slug or folder already
   taken (archived projects keep theirs), a repo path that doesn't exist, or a repo URL alone (nothing is cloned). It
   never starts the lead.
+- `mode: "scoping"` starts a project in scoping mode: {owner} settles its scope with its lead directly in the Scope
+  tab. Its lead's cards and deliverables go only there; you get a read-only copy of each (never triage, settle, merge
+  or moot them), and `orch_inbox` lists the scoping projects with their open cards. {owner}'s yes on the lead's
+  "Scoping done?" card makes it active. `orch_project_mode(slug, mode)` sets or clears it on an existing project.
 - `orch_start_lead(slug)` starts lead:<slug> exactly as {owner}'s Start lead button does. Refused: no project folder,
   PROJECT.md names no repo under "## Repos" or that repo isn't here, the project is on hold, or its lead is running.
   {owner}'s board shows "cos started lead:<slug>".

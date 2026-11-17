@@ -5,8 +5,9 @@
 import { type Db, tx } from "./db.ts";
 import { MOOT_MIN_SHARED, sharedWords } from "./moot.ts";
 
-// lead-status: an orch_status publish (value = the status as JSON); the history builder doesn't draw it
-export type EventKind = "spawn" | "status" | "pr" | "handoff" | "retire" | "resolve" | "lead-status" | "direct-answer";
+// lead-status: an orch_status publish (value = the status as JSON); the history builder doesn't draw it.
+// mode (1.11.0): the project's mode changed (value = the new mode, address = its lead's, note = who, ref = the card)
+export type EventKind = "spawn" | "status" | "pr" | "handoff" | "retire" | "resolve" | "lead-status" | "direct-answer" | "mode";
 export interface EventIn {
   at: number;
   kind: EventKind;
@@ -112,7 +113,7 @@ export function backfillEvents(db: Db, now: number): boolean {
 // ---------------------------------------------------------------- the page's shape
 
 export type SegState = "working" | "idle" | "blocked" | "released" | "unknown" | "nolog";
-export type MarkKind = "pr-open" | "pr-draft" | "pr-merged" | "pr-closed" | "handoff" | "resolve";
+export type MarkKind = "pr-open" | "pr-draft" | "pr-merged" | "pr-closed" | "handoff" | "resolve" | "mode";
 export type DepKind = "card" | "held" | "deferred" | "hold" | "dead" | "reply" | "pr" | "ci" | "review";
 export interface Holder {
   threadId: string;
@@ -264,6 +265,8 @@ export function buildHistory(x: HistoryInput): ProjectHistory {
         marks.push({ at: e.at, kind: "handoff", label: `→ ${providerWord(e.value)}`, url: null });
       } else if (e.kind === "resolve") {
         marks.push(e.ref && e.note ? { at: e.at, kind: "resolve", label: `resolved: PR handed off to ${e.note}`, url: e.ref } : { at: e.at, kind: "resolve", label: "resolved", url: null });
+      } else if (e.kind === "mode") {
+        marks.push({ at: e.at, kind: "mode", label: e.value === "active" ? "scoping done: active" : "scoping", url: null });
       }
     }
     // the current PR rows of its holders (a reading older than the log, or a draft that never changed)

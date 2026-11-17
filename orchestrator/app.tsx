@@ -23,6 +23,7 @@ import { ProjectsView } from "./app/projects.tsx";
 import type { SharedRefs } from "./app/ref-text.tsx";
 import { DeliverablesView, inReview } from "./app/deliverables.tsx";
 import { OpenPrsView } from "./app/open-prs.tsx";
+import { ScopeView } from "./app/scope.tsx";
 import { pointerPressed } from "./app/store.ts";
 import { EmptyState } from "./app/affect/empty-state-clean.tsx";
 import { RENAMED_VIEWS, close, detailOf, findPane, panes, parse, pathFor, resize, setView, single, split, type Layout } from "./app/layout.ts";
@@ -41,6 +42,9 @@ const VIEWS = [
   { id: "needs-you", subPath: "needs-you", label: "Needs you" },
   { id: "chat", subPath: "chat", label: "Chat" },
   { id: "projects", subPath: "projects", label: "Projects" },
+  // 1.11.0: the projects in scoping mode, where the owner and a new project's lead settle its scope (always listed,
+  // with an empty state). Right after Projects: it is where the owner goes from a project.
+  { id: "scope", subPath: "scope", label: "Scope" },
   // Requested 2026-11-16: the owner's open PRs, which need review, and the review ask to paste in Slack
   { id: "open-prs", subPath: "open-prs", label: "Open PRs" },
   // Requested 2026-11-13: Cloud Switch moved in as a tab. Always listed (2026-11-16): without a cloud config it says what to
@@ -52,6 +56,8 @@ const VIEWS = [
   { id: "board", subPath: "board", label: "Activity" },
 ] as const;
 type ViewId = (typeof VIEWS)[number]["id"];
+/** The tabs that can carry a count (below): their count's slot stays while empty, so no tab moves as counts load or clear */
+const COUNTED = new Set<string>(["deliverables", "needs-you", "projects", "scope"]);
 
 function viewOf(subPath: string): ViewId {
   let first = subPath.split("/")[0] ?? "";
@@ -74,22 +80,30 @@ function useDeliverables() {
   return experimental_useRpcQuery({ contract: rpcContract, method: "deliverables", input: null });
 }
 
-/** The rail badge: only the owner's items (cards + interactions, and deliverables in review), null at 0. */
+function useScope() {
+  return experimental_useRpcQuery({ contract: rpcContract, method: "scope", input: null });
+}
+
+/** The rail badge: only the owner's items (cards + interactions, deliverables in review, and the Scope tab's cards), null at 0. */
 function useOrchestratorBadge(): ExperimentalBadge | null {
   const q = useNeedsYou();
   const dq = useDeliverables();
+  const sq = useScope();
   const refetch = useRef(q.refetch);
   refetch.current = q.refetch;
   const drefetch = useRef(dq.refetch);
   drefetch.current = dq.refetch;
+  const srefetch = useRef(sq.refetch);
+  srefetch.current = sq.refetch;
   useRealtime(
     CHANGED_CHANNEL,
     useCallback(() => {
       void refetch.current();
       void drefetch.current();
+      void srefetch.current();
     }, []),
   );
-  const n = (q.data?.badge ?? 0) + inReview(dq.data).length;
+  const n = (q.data?.badge ?? 0) + inReview(dq.data).length + (sq.data?.badge ?? 0);
   return n > 0 ? { count: n, label: `${n} ${n === 1 ? "item needs" : "items need"} you` } : null;
 }
 
@@ -166,25 +180,28 @@ function OrchestratorPanel({ subPath }: PluginNavPanelProps) {
   const needs = useNeedsYou();
   const board = experimental_useRpcQuery({ contract: rpcContract, method: "board", input: null });
   const config = experimental_useRpcQuery({ contract: rpcContract, method: "config", input: null });
-  const projects = experimental_useRpcQuery({ contract: rpcContract, method: "projects", input: null, enabled: shown.has("projects") });
+  // the Scope tab's chat reads its project's direct line from the projects read
+  const projects = experimental_useRpcQuery({ contract: rpcContract, method: "projects", input: null, enabled: shown.has("projects") || shown.has("scope") });
   // the Projects tab's lanes read the agents too
   const agents = experimental_useRpcQuery({ contract: rpcContract, method: "agents", input: null, enabled: shown.has("projects") });
   const deliverables = useDeliverables();
+  const scope = useScope();
   const cloud = experimental_useRpcQuery({ contract: pageContract, method: "cs.available", input: null });
   const cloudOn = cloud.data?.available === true;
   const reviewCount = inReview(deliverables.data).length;
-  const latest = useRef({ needs, board, projects, agents, shown, deliverables, config });
-  latest.current = { needs, board, projects, agents, shown, deliverables, config };
+  const latest = useRef({ needs, board, projects, agents, shown, deliverables, config, scope });
+  latest.current = { needs, board, projects, agents, shown, deliverables, config, scope };
   const refetchAll = useCallback(() => {
     const l = latest.current;
     void l.config.refetch();
     void l.deliverables.refetch();
     void l.needs.refetch();
     void l.board.refetch();
+    void l.scope.refetch();
     if (l.shown.has("projects")) {
       void l.projects.refetch();
       void l.agents.refetch();
-    }
+    } else if (l.shown.has("scope")) void l.projects.refetch();
   }, []);
   const mons = useMemo(() => new Map((board.data?.agents ?? []).map((a) => [a.address, a.mon] as const)), [board.data]);
   // each project's accent type (accent.ts), from its agents: none with the pokemon setting off
@@ -247,11 +264,14 @@ function OrchestratorPanel({ subPath }: PluginNavPanelProps) {
   const views = VIEWS.map((v) => ({
     id: v.id,
     label: v.label,
+    counted: COUNTED.has(v.id),
     count:
       v.id === "needs-you" && needs.data && needs.data.badge > 0
         ? needs.data.badge
         : v.id === "deliverables" && reviewCount > 0
           ? reviewCount
+          : v.id === "scope" && scope.data && scope.data.badge > 0
+            ? scope.data.badge // the scoping projects' unanswered cards
           : v.id === "projects" && board.data?.directUnread?.length
             ? "•" // a lead's note you haven't opened (PLAN 3.4); never a phone notification
             : undefined,
@@ -264,9 +284,15 @@ function OrchestratorPanel({ subPath }: PluginNavPanelProps) {
 
   keyCtx.current = { layout, views, setLayout, follow };
 
-  // a lane's "waits on you": Needs you in the focused pane, then that card scrolled into sight once it is drawn
+  // the scoping project the Scope tab shows, when a link elsewhere opened one of its cards
+  const [scopeFocus, setScopeFocus] = useState<string | null>(null);
+  // a lane's "waits on you": Needs you in the focused pane, then that card scrolled into sight once it is drawn. A
+  // scoping project's card waits in the Scope tab instead, with its project open there.
   const openCard = (selector: string) => {
-    navigate.toPluginPanel(PANEL_PATH, { subPath: "needs-you" });
+    const id = /data-card="([^"]+)"/.exec(selector)?.[1];
+    const scoping = id ? scope.data?.projects.find((p) => p.cards.some((c) => c.id === id)) : undefined;
+    if (scoping) setScopeFocus(scoping.slug);
+    navigate.toPluginPanel(PANEL_PATH, { subPath: scoping ? "scope" : "needs-you" });
     let tries = 0;
     const find = () => {
       const el = root.current?.querySelector<HTMLElement>(selector);
@@ -286,6 +312,8 @@ function OrchestratorPanel({ subPath }: PluginNavPanelProps) {
         return <CosChat agents={board.data?.agents} width={pane.width} />;
       case "projects":
         return <ProjectsView q={projects} refetchAll={refetchAll} agents={board.data?.agents} lanesFrom={agents.data} needs={needs.data} openCard={openCard} detail={detail} onDetail={onDetail} refs={refs} />;
+      case "scope":
+        return <ScopeView q={scope} projects={projects.data} deliverables={deliverables.data} refetchAll={refetchAll} mons={mons} accents={accents} focus={scopeFocus} />;
       case "open-prs":
         return <OpenPrsView />;
       case "board":
@@ -320,12 +348,11 @@ function OrchestratorPanel({ subPath }: PluginNavPanelProps) {
       </style>
       <VisualBlocksStyle />
       <ShortcutUi />
-      {/* the quick line to the CoS, once above the panes; not while its full chat is open */}
-      {shown.has("chat") ? null : (
-        <div className="mx-auto w-full max-w-3xl shrink-0 px-4 pt-4">
-          <CosComposer agents={board.data?.agents} refetchAll={refetchAll} compact={compact} />
-        </div>
-      )}
+      {/* the quick line to the CoS, once above the panes, on every tab (the Chat tab too, 2026-11-17): hiding it on one
+          tab moved the tab strip up there */}
+      <div className="mx-auto w-full max-w-3xl shrink-0 px-4 pt-4">
+        <CosComposer agents={board.data?.agents} refetchAll={refetchAll} compact={compact} />
+      </div>
       <div className="flex min-h-0 flex-1">
         <PaneLayout
           layout={layout}
@@ -333,7 +360,7 @@ function OrchestratorPanel({ subPath }: PluginNavPanelProps) {
           compact={compact}
           render={render}
           fill={(v) => v === "chat" || v === "cloud" || v === "gameboy"}
-          wide={(v) => v === "projects" || v === "deliverables" || v === "open-prs"}
+          wide={(v) => v === "projects" || v === "deliverables" || v === "open-prs" || v === "scope"}
           onView={(id, v) => {
             setLayout((l) => setView(l, id, v));
             follow(v);

@@ -349,6 +349,10 @@ export const MIGRATIONS: string[] = [
      at INTEGER NOT NULL
    );
    CREATE INDEX handed_off_prs_project ON handed_off_prs (project, at)`,
+  // 1.11.0: a project's mode. While scoping, its lead's cards and deliverables wait in the owner's Scope pane only (no
+  // CoS triage, no Needs you, no standing rule); the owner's yes on its "Scoping done?" card makes it active. Every
+  // project that exists today is active.
+  `ALTER TABLE projects ADD COLUMN mode TEXT NOT NULL DEFAULT 'active'`,
 ];
 
 export function migrate(db: Db): void {

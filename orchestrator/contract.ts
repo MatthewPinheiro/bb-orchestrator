@@ -34,6 +34,8 @@ export const cardSchema = z.object({
   blocks: z.array(blockSchema), // typed parts drawn as components (blocks.ts)
   prs: z.array(prSchema), // the live state of its PR blocks that pr-watch knows, by url
   queued: z.number().optional(), // cards from the same asker held behind this one (batching); they come up once it is answered
+  // a scoping lead's "Scoping done?" card (1.11.0): its summary and PROJECT.md, drawn above its options
+  scopingDone: z.object({ summary: z.string(), projectMd: z.string() }).nullable().optional(),
 });
 export type Card = z.infer<typeof cardSchema>;
 
@@ -174,6 +176,8 @@ export const projectsSchema = z.array(
     priority: z.enum(["urgent", "high", "normal", "low"]),
     heldAt: z.number().nullable(),
     archivedAt: z.number().nullable(),
+    // scoping (1.11.0): the owner settles its scope with the lead in the Scope tab; optional for an older plugin process
+    mode: z.enum(["scoping", "active"]).optional(),
     lead: z.object({ address: z.string(), threadId: z.string(), status: z.string(), mon: z.string().nullable() }).nullable(),
     threads: z.number(),
     openPlans: z.number(), // plan cards not yet decided
@@ -244,7 +248,7 @@ export const projectHistorySchema = z.object({
           segments: z.array(z.object({ from: z.number(), to: z.number(), state: z.enum(["working", "idle", "blocked", "released", "unknown", "nolog"]) })),
         }),
       ),
-      marks: z.array(z.object({ at: z.number(), kind: z.enum(["pr-open", "pr-draft", "pr-merged", "pr-closed", "handoff", "resolve"]), label: z.string(), url: z.string().nullable() })),
+      marks: z.array(z.object({ at: z.number(), kind: z.enum(["pr-open", "pr-draft", "pr-merged", "pr-closed", "handoff", "resolve", "mode"]), label: z.string(), url: z.string().nullable() })),
       asks: z.array(z.object({ id: z.string(), title: z.string(), from: z.number(), to: z.number().nullable() })),
       prs: z.array(z.object({ url: z.string(), number: z.number().nullable(), state: z.string() })),
     }),
@@ -312,9 +316,16 @@ export const deliverablesSchema = z.array(
     next: z
       .object({ text: z.string(), rev: z.number(), at: z.string(), item: z.string(), state: z.enum(["open", "closed", "dead"]), outcome: z.string().nullable(), note: z.string().nullable(), closedAt: z.number().nullable() })
       .nullable(),
+    // delivered while its project was scoping: reviewed in the Scope tab, not on Deliverables (1.11.0)
+    scope: z.boolean().optional(),
   }),
 );
 export type Deliverables = z.infer<typeof deliverablesSchema>;
+
+// The Scope tab (1.11.0): each scoping project and the cards waiting on the owner there; badge: those cards. Its
+// deliverables come from the deliverables read (scope: true).
+export const scopeSchema = z.object({ projects: z.array(z.object({ slug: z.string(), cards: z.array(cardSchema) })), badge: z.number() });
+export type Scope = z.infer<typeof scopeSchema>;
 
 // Every project in the sidebar's placing order (engine.projects()), with its accent type (none with pokemon off); the page
 // puts it in the viewer's own section order (core/project-order.ts).
@@ -337,6 +348,7 @@ export const rpcContract = defineRpcContract({
   searchCards: { input: z.object({ q: z.string().max(80) }).strict(), output: cardHitsSchema },
   outputs: { input: z.null(), output: outputsSchema },
   deliverables: { input: z.null(), output: deliverablesSchema },
+  scope: { input: z.null(), output: scopeSchema },
   projectOrder: { input: z.null(), output: projectOrderSchema },
   // the chat log's read (1.10.0): one project's direct messages, newest first, only when the chat is open
   directHistory: { input: z.object({ slug: z.string().min(1).max(40), before: z.number().nullable().optional(), limit: z.number().int().min(1).max(100).optional() }).strict(), output: z.object({ messages: z.array(directMessageSchema), more: z.boolean() }) },

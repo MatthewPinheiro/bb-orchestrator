@@ -50,6 +50,10 @@ export interface Opt {
 export type Priority = "urgent" | "high" | "normal" | "low";
 export const PRIORITIES: readonly Priority[] = ["urgent", "high", "normal", "low"];
 
+/** A project's mode (1.11.0): scoping while the owner and its lead settle what it is; active is the normal flow. */
+export type ProjectMode = "scoping" | "active";
+export const PROJECT_MODES: readonly ProjectMode[] = ["scoping", "active"];
+
 export interface HistoryEntry {
   at: string;
   rev: number;
@@ -132,6 +136,10 @@ export interface Decision {
     rule_proposal?: { text: string; project: string | null; match: RuleMatch; evidence: string[]; rule_id: string | null } | null;
     /** Held off the owner's Needs you behind an earlier card from the same asker and project, until `until` at most. */
     held?: { behind: string; at: string; until: string } | null;
+    /** Filed while its project was scoping: it waits in the owner's Scope pane, never in triage or Needs you. */
+    scope?: boolean;
+    /** A "Scoping done?" card: the lead's summary and its PROJECT.md. Option 1 (yes) makes the project active. */
+    scoping_done?: { summary: string; project_md: string } | null;
   };
 }
 
@@ -231,6 +239,8 @@ export interface Deliverable {
   withdrawn: { at: string; reason: string | null } | null;
   /** The owner approved it with a next action for the lead: what to do, and the needs-ack item that carries it. */
   next?: { text: string; rev: number; at: string; item: string } | null;
+  /** Delivered while its project was scoping: reviewed in the owner's Scope pane, not on Deliverables. */
+  scope?: boolean;
 }
 
 /** A next action as it stands: the lead's item, open until they close it with an outcome and a note. */

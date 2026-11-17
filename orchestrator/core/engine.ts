@@ -68,7 +68,9 @@ import {
   OUTCOMES,
   type Priority,
   PRIORITIES,
+  PROJECT_MODES,
   PROJECT_RE,
+  type ProjectMode,
   type Proof,
   PROOF_KINDS,
   type ProofKind,
@@ -211,6 +213,7 @@ export interface ProjectRow {
   archivedAt: number | null;
   createdAt: number;
   monType: MonType | null; // its Pokémon type (mons.ts TYPES), whatever the setting
+  mode: ProjectMode; // scoping: its lead's cards and deliverables go only to the owner's Scope pane (1.11.0)
 }
 
 /** One environment's PR as bb's PR status reports it (bb--github-pr-status `pullRequests`). */
@@ -331,7 +334,17 @@ export interface AskInput {
   key?: string | null;
   /** Typed parts the screens draw as components (blocks.ts). */
   blocks?: Block[];
+  /** "Scoping done?" (1.11.0): a scoping project's lead proposes the end, with its summary and PROJECT.md. */
+  scopingDone?: { summary: string; projectMd: string } | null;
 }
+
+/** The "Scoping done?" card's options, fixed so the owner's yes can't be misread: option 1 makes the project active. */
+export const SCOPING_DONE_OPTIONS = [
+  { label: "Yes, scoping is done", detail: "The project becomes active: the normal card flow from now on" },
+  { label: "Not yet", detail: "It stays scoping; say in the note what is missing" },
+] as const;
+/** The summary's cap: the goal, the constraints and the first plan, as a plan's thread list. */
+export const SCOPING_SUMMARY_MAX = 1600;
 
 export interface BoardRow {
   id: string;
@@ -1993,7 +2006,10 @@ export class Engine {
   ask(by: Agent, input: AskInput): Decision {
     if (by.role === "cos") throw new EngineError("forbidden", `the CoS asks ${this.owner.name} through triage(ask_person)`);
     const t = this.now();
-    const options = this.options(input.options, 2);
+    // a scoping project's lead files into the owner's Scope pane; its threads still ask it, as always
+    const scoping = by.role === "lead" && this.isScoping(by.project);
+    const done = input.scopingDone ? this.scopingDone(by, scoping, input) : null;
+    const options = this.options(done ? SCOPING_DONE_OPTIONS.map((o) => ({ ...o })) : input.options, 2);
     const kind = input.kind ?? "question";
     const tooLong = cardRefusal({ question: input.question, context: input.context, options, kind });
     if (tooLong) throw new EngineError("invalid", tooLong);
@@ -2013,6 +2029,10 @@ export class Engine {
       if (input.key) {
         const dup = this.db.prepare(`SELECT id FROM decisions WHERE asker = ? AND json_extract(json, '$.request_key') = ? AND state IN ('open','asked')`).get(asker, input.key) as { id: string } | undefined;
         if (dup) return this.mustDecision(dup.id);
+      }
+      if (done) {
+        const open = this.db.prepare(`SELECT id FROM decisions WHERE project = ? AND state IN ('open','asked') AND json_extract(json, '$.orchestrator.scoping_done') IS NOT NULL`).get(by.project) as { id: string } | undefined;
+        if (open) throw new EngineError("bad_state", `${open.id} already asks ${this.owner.name} whether scoping is done: wait for that answer`);
       }
       const d: Decision = {
         schema: 1,
@@ -2053,15 +2073,34 @@ export class Engine {
           triage: { filed_at: null, due_at: null, triaged_at: null, by: null, escalated_at: null },
           forwarded_by: null,
           plan,
+          ...(done ? { scoping_done: done } : {}),
         },
       };
       if (atCos) this.gate(d);
       this.save(d, "add", by.address, null, null);
+      if (scoping) {
+        this.fileInScope(d, by.address);
+        return this.mustDecision(d.id);
+      }
       if (this.ruleSettles(d)) return this.mustDecision(d.id);
       if (atCos) this.fileWithCos(d, by.address);
       else this.put({ recipient: `lead:${by.project}`, sender: by.address, kind: "decision.new", ref: d.id, body: this.describe(d, "lead"), needsAck: false });
       return this.mustDecision(d.id);
     });
+  }
+
+  /** A "Scoping done?" card's checks: a scoping project's lead, a plain question, a summary and its PROJECT.md. */
+  private scopingDone(by: Agent, scoping: boolean, input: AskInput): { summary: string; project_md: string } {
+    const s = input.scopingDone!;
+    if (by.role !== "lead") throw new EngineError("forbidden", "only a lead proposes the end of its project's scoping");
+    if (!scoping) throw new EngineError("bad_state", `${by.project} isn't scoping: "Scoping done?" is only for a project in scoping mode`);
+    if ((input.kind ?? "question") !== "question" || input.action) throw new EngineError("invalid", `"Scoping done?" is a plain question: no plan, no merge card`);
+    const summary = String(s.summary ?? "").trim();
+    if (!summary) throw new EngineError("invalid", "scoping_done needs summary: the goal, the constraints and the first plan, as written to PROJECT.md");
+    if (summary.length > SCOPING_SUMMARY_MAX) throw new EngineError("invalid", `scoping_done's summary is ${summary.length} characters; the cap is ${SCOPING_SUMMARY_MAX}. Keep the goal, the constraints and the first plan; the rest is in PROJECT.md`);
+    const md = String(s.projectMd ?? "").trim();
+    if (!isAbsolute(md) || !/(^|\/)PROJECT\.md$/.test(md)) throw new EngineError("invalid", "scoping_done needs project_md: the absolute path of the PROJECT.md you wrote the summary to");
+    return { summary, project_md: md };
   }
 
   private describe(d: Decision, forWhom: "lead" | "cos"): string {
@@ -2111,7 +2150,8 @@ export class Engine {
       d.reply_to.labels = { "orchestrator.address": by.address };
       if (note) d.request.context = `${d.request.context}\n\nLead's note: ${note}`.trim().slice(0, 8192);
       this.gate(d);
-      if (!this.ruleSettles(d)) this.fileWithCos(d, by.address);
+      if (this.isScoping(by.project)) this.fileInScope(d, by.address); // the lead's card now: the Scope pane, like its own
+      else if (!this.ruleSettles(d)) this.fileWithCos(d, by.address);
       return this.mustDecision(id);
     });
   }
@@ -2139,7 +2179,7 @@ export class Engine {
    * both match are left to the people (they might disagree).
    */
   private ruleSettles(d: Decision): boolean {
-    if (d.state !== "open") return false;
+    if (d.state !== "open" || d.orchestrator.scope) return false; // a scoping card is the owner's to answer, in the pane
     const hits = this.liveRules(d.project).flatMap((r) => {
       if (!r.match || !r.kinds.includes(d.kind)) return [];
       const m = matchRule(r.match, d);
@@ -2301,6 +2341,7 @@ export class Engine {
       const p = this.mustDecision(into);
       if (p.id === d.id) throw new EngineError("invalid", "a decision can't merge into itself");
       if (!["open", "asked"].includes(p.state) || p.orchestrator.at_level === "lead") throw new EngineError("bad_state", `${into} is ${p.state} at ${p.orchestrator.at_level}`);
+      if (p.orchestrator.scope) throw new EngineError("forbidden", `${into} waits in ${this.owner.name}'s Scope pane (${p.project} is scoping): your copy is read-only`);
       // a merged card takes its parent's answer: a plan's go or a merge card's yes must come from the owner on that card itself
       if (d.kind === "plan" || p.kind === "plan") throw new EngineError("forbidden", `a plan card is never merged: ${this.owner.name} approves each plan on its own card`);
       if (d.orchestrator.action === "merge" || p.orchestrator.action === "merge") throw new EngineError("forbidden", `a merge card is never merged: ${this.owner.name} answers each PR's card in person`);
@@ -2404,7 +2445,7 @@ export class Engine {
       o.asker.startsWith("lead:")
         ? (this.db.prepare(`SELECT json FROM decisions WHERE state = 'asked' AND at_level = 'person' AND asker = ? AND project IS ? AND id != ? ORDER BY id`).all(o.asker, d.project, d.id) as { json: string }[])
             .map((r) => JSON.parse(r.json) as Decision)
-            .find((p) => !p.deferred && !p.orchestrator.held && p.ask && t - Date.parse(p.ask.at) < HOLD_MS)
+            .find((p) => !p.orchestrator.scope && !p.deferred && !p.orchestrator.held && p.ask && t - Date.parse(p.ask.at) < HOLD_MS)
         : undefined;
     if (!leader) {
       this.ports.cardUp?.(d);
@@ -2519,6 +2560,7 @@ export class Engine {
     return tx(this.db, () => {
       const d = this.mustDecision(id);
       if (d.orchestrator.at_level === "lead") throw new EngineError("bad_state", `${id} is with ${d.orchestrator.asker}'s lead, not on ${this.owner.name}'s Needs you`);
+      if (d.orchestrator.scope) throw new EngineError("forbidden", `${id} waits in ${this.owner.name}'s Scope pane (${d.project} is scoping), not on Needs you: your copy is read-only`);
       if (d.state !== "open" && d.state !== "asked") throw new EngineError("bad_state", `${id} is ${d.state}${d.withdrawn?.moot ? " (already moot)" : ""}: only an open card can be moot`);
       this.mootOne(d, why, by.address);
       for (const mid of d.merged) {
@@ -2582,6 +2624,8 @@ export class Engine {
       this.save(d, "answer", "person", wasDeferred ? "answered while deferred" : proposal?.rule_id ? `rule ${proposal.rule_id} added` : null, rev);
       this.relay(d);
       this.copyAnswerToCos(d, `option ${opt ? `${opt.id} ${JSON.stringify(opt.label)}` : "none"}${t ? `, note: ${JSON.stringify(t)}` : ""}`);
+      // "Scoping done?": only option 1 is the yes; "Not yet" or a note alone keeps scoping (the note went to the lead)
+      if (d.orchestrator.scoping_done && d.project && opt?.id === "1") this.setMode(d.project, "active", "person", d.id);
       if (proposal?.rule_id) this.put({ recipient: "cos", sender: "person", kind: "notice", ref: d.id, body: `Rule ${proposal.rule_id} is live: ${JSON.stringify(proposal.text)}. It settles the cards it matches by itself; you hear about each one.`, key: `rule-live:${d.id}`, needsAck: false });
       this.offerRule(d);
       this.releaseHeld();
@@ -2646,7 +2690,7 @@ export class Engine {
       d.deferred = null;
       d.returned = { at: iso(this.now()), by, why: by === "engine" ? "time" : "brought back", source: by === "person" ? "bb-orchestrator" : null };
       this.save(d, "return", by, null, rev);
-      if (by === "engine") this.ports.cardUp?.(d);
+      if (by === "engine" && !d.orchestrator.scope) this.ports.cardUp?.(d);
       return this.mustDecision(id);
     });
   }
@@ -2908,8 +2952,8 @@ export class Engine {
   }
 
   project(slug: string): ProjectRow | null {
-    const r = this.db.prepare(`SELECT * FROM projects WHERE slug = ?`).get(slug) as { slug: string; bb_project_id: string | null; priority: string; held_at: number | null; archived_at: number | null; created_at: number; mon_type: string | null } | undefined;
-    return r ? { slug: r.slug, bbProjectId: r.bb_project_id, priority: r.priority as Priority, heldAt: r.held_at, archivedAt: r.archived_at, createdAt: r.created_at, monType: (typeFamily(r.mon_type)?.type ?? null) } : null;
+    const r = this.db.prepare(`SELECT * FROM projects WHERE slug = ?`).get(slug) as { slug: string; bb_project_id: string | null; priority: string; held_at: number | null; archived_at: number | null; created_at: number; mon_type: string | null; mode: string | null } | undefined;
+    return r ? { slug: r.slug, bbProjectId: r.bb_project_id, priority: r.priority as Priority, heldAt: r.held_at, archivedAt: r.archived_at, createdAt: r.created_at, monType: (typeFamily(r.mon_type)?.type ?? null), mode: r.mode === "scoping" ? "scoping" : "active" } : null;
   }
 
   projects(): ProjectRow[] {
@@ -2923,14 +2967,134 @@ export class Engine {
    * A new project's row (orch_new_project), with its priority and one board notice. Refused when the slug already has
    * a row, archived or not: a new project never takes over an old one's history.
    */
-  createProject(slug: string, priority: Priority, by: string, title: string, body: string): void {
+  createProject(slug: string, priority: Priority, by: string, title: string, body: string, mode: ProjectMode = "active"): void {
     if (!PROJECT_RE.test(slug)) throw new EngineError("invalid", `bad project slug ${slug}`);
     if (!PRIORITIES.includes(priority)) throw new EngineError("invalid", `priority is one of ${PRIORITIES.join(", ")}`);
+    if (!PROJECT_MODES.includes(mode)) throw new EngineError("invalid", `mode is one of ${PROJECT_MODES.join(", ")}`);
     tx(this.db, () => {
       if (this.project(slug)) throw new EngineError("conflict", `${slug} is already a project`);
-      this.db.prepare(`INSERT INTO projects (slug, bb_project_id, priority, created_at) VALUES (?, NULL, ?, ?)`).run(slug, priority, this.now());
+      this.db.prepare(`INSERT INTO projects (slug, bb_project_id, priority, created_at, mode) VALUES (?, NULL, ?, ?, ?)`).run(slug, priority, this.now(), mode);
+      if (mode === "scoping") this.event({ kind: "mode", project: slug, address: `lead:${slug}`, threadId: null, value: mode, note: by });
       this.boardAdd("notice", by, slug, title, body, null);
     });
+  }
+
+  // ---------------------------------------------------------------- scoping mode (1.11.0)
+  // While a project is scoping, the owner works its scope out with its lead directly, in the Scope tab: the lead's cards
+  // (questions, plans) and deliverables go only there. They skip the CoS's triage and Needs you, no standing rule settles
+  // them, and the CoS gets a read-only copy of each. The lead proposes the end with a "Scoping done?" card; the owner's
+  // yes (or the CoS's orch_project_mode) makes the project active, and what still waits in the pane moves to the
+  // normal places then, so nothing is stranded in neither.
+
+  /** Whether the project's lead files into the Scope pane now. */
+  isScoping(project: string | null): boolean {
+    return !!project && this.project(project)?.mode === "scoping";
+  }
+
+  /**
+   * Set a project's mode (the CoS's orch_project_mode, or the owner's yes on "Scoping done?" with `card`). A timeline event
+   * and a board notice record it; the lead is told what changed, and the CoS gets a copy unless it made the change. Going
+   * active releases the pane: its open cards go to Needs you and its deliverables in review to Deliverables, and an
+   * open "Scoping done?" card that didn't make the change is withdrawn (nothing left to decide). Same mode: a no-op.
+   */
+  setMode(slug: string, mode: ProjectMode, by: string, card: string | null = null): ProjectRow {
+    if (!PROJECT_MODES.includes(mode)) throw new EngineError("invalid", `mode is one of ${PROJECT_MODES.join(", ")}`);
+    return tx(this.db, () => {
+      const p = this.project(slug);
+      if (!p) throw new EngineError("not_found", `no project ${slug}`);
+      if (p.archivedAt) throw new EngineError("bad_state", `${slug} is archived`);
+      if (p.mode === mode) return p;
+      this.db.prepare(`UPDATE projects SET mode = ? WHERE slug = ?`).run(mode, slug);
+      this.event({ kind: "mode", project: slug, address: `lead:${slug}`, threadId: null, value: mode, note: by, ref: card });
+      const o = this.owner;
+      const who = by === "person" ? o.Name : by;
+      let moved = 0;
+      if (mode === "active") {
+        const open = (this.db.prepare(`SELECT json FROM decisions WHERE project = ? AND state = 'asked' AND json_extract(json, '$.orchestrator.scope') = 1 ORDER BY id`).all(slug) as { json: string }[]).map((r) => JSON.parse(r.json) as Decision);
+        for (const d of open) {
+          if (d.id === card) continue;
+          if (d.orchestrator.scoping_done) {
+            d.state = "withdrawn";
+            d.withdrawn = { by, at: iso(this.now()), reason: `${slug} is active now (${who} ended scoping)` };
+            this.save(d, "withdraw", by, "scoping ended", null);
+            continue;
+          }
+          d.orchestrator.scope = false;
+          this.save(d, "notify", "engine", "scoping ended: to Needs you", null);
+          this.upOrHold(d);
+          moved++;
+        }
+        for (const v of this.db.prepare(`SELECT json FROM deliverables WHERE project = ? AND state = 'review' AND json_extract(json, '$.scope') = 1`).all(slug) as { json: string }[]) {
+          const d = JSON.parse(v.json) as Deliverable;
+          delete d.scope;
+          this.saveDeliverable(d);
+          this.ports.delivered?.(d);
+          moved++;
+        }
+      }
+      const what =
+        mode === "scoping"
+          ? `${slug} is scoping: its lead's cards and deliverables go only to ${o.name}'s Scope pane, and no standing rule settles them.`
+          : `${slug} is active: scoping is done and its cards go the normal way (CoS triage, Needs you).${moved ? ` ${moved} still open moved from the Scope pane.` : ""}`;
+      this.boardAdd("notice", by, slug, `${slug}: ${mode === "scoping" ? "scoping" : "scoping done, active"}`, what, card);
+      if (this.liveAt(`lead:${slug}`))
+        this.put({
+          recipient: `lead:${slug}`,
+          sender: by === "person" ? "person" : by,
+          kind: "notice",
+          ref: card,
+          body:
+            mode === "scoping"
+              ? `${who} put ${slug} in scoping mode. Work its scope out with ${o.name} directly: your cards and deliverables go only to ${o.name}'s Scope pane (no CoS triage, no standing rule). Start no build threads until scoping is done; read-only investigation is fine. When the goal, constraints and first plan are in PROJECT.md, file orch_ask with scoping_done {summary, project_md}.`
+              : `${who} ended scoping: ${slug} is active. Your cards go the normal way again (CoS triage, Needs you); threads start from a plan card ${o.name} approves.`,
+          key: `mode:${slug}:${mode}:${this.now()}`,
+          needsAck: false,
+        });
+      if (by !== "cos" && this.agentByAddress("cos"))
+        this.put({ recipient: "cos", sender: by === "person" ? "person" : by, kind: "copy", ref: card, body: `${who} set ${slug} to ${mode}. ${what}`, key: `mode-copy:${slug}:${mode}:${this.now()}`, needsAck: false });
+      this.ports.changed();
+      return this.project(slug)!;
+    });
+  }
+
+  /** A card from a scoping project's lead: straight to the owner in its Scope pane, and a read-only copy to the CoS. */
+  private fileInScope(d: Decision, by: string): void {
+    this.putAsk(d, by, d.request.title, d.request.question, d.request.context, d.request.options, d.kind !== "plan");
+    d.orchestrator.scope = true;
+    this.save(d, "ask", "engine", "scoping: in the owner's Scope pane", null);
+    if (!this.agentByAddress("cos")) return;
+    const o = this.owner;
+    const done = d.orchestrator.scoping_done;
+    this.put({
+      recipient: "cos",
+      sender: by,
+      kind: "copy",
+      ref: d.id,
+      body: `${by} asked ${d.id} ${JSON.stringify(d.request.title)}${d.kind === "plan" ? " (a plan card)" : ""} while ${d.project} is scoping: it went straight to ${o.name}'s Scope pane, not to your triage. Read-only: don't triage, settle, merge or moot it; ${o.name} answers it there with the lead. Question: ${JSON.stringify(d.request.question)}${done ? ` It proposes ending scoping (${done.project_md}): ${JSON.stringify(done.summary.slice(0, 600))}` : ""}`,
+      key: `scope-copy:${d.id}`,
+      needsAck: false,
+    });
+  }
+
+  /** What waits on the owner in each scoping project's Scope pane: its open cards and its deliverables in review. */
+  scopeView(): { slug: string; cards: Decision[]; deliverables: Deliverable[] }[] {
+    const slugs = (this.db.prepare(`SELECT slug FROM projects WHERE mode = 'scoping' AND archived_at IS NULL ORDER BY slug`).all() as { slug: string }[]).map((r) => r.slug);
+    return slugs.map((slug) => ({
+      slug,
+      cards: (this.db.prepare(`SELECT json FROM decisions WHERE project = ? AND state = 'asked' AND json_extract(json, '$.orchestrator.scope') = 1 ORDER BY id`).all(slug) as { json: string }[]).map((r) => JSON.parse(r.json) as Decision),
+      deliverables: (this.db.prepare(`SELECT json FROM deliverables WHERE project = ? AND state = 'review' AND json_extract(json, '$.scope') = 1 ORDER BY updated_at DESC`).all(slug) as { json: string }[]).map((r) => JSON.parse(r.json) as Deliverable),
+    }));
+  }
+
+  /** The scoping projects as the CoS reads them (orch_inbox, orch_needs_you): lines, or none while nothing scopes. */
+  private scopeLines(): string[] {
+    const v = this.scopeView();
+    if (!v.length) return [];
+    const o = this.owner;
+    return [
+      `Scoping with ${o.name} directly (${v.length}): their cards wait in ${o.name}'s Scope pane, not your triage; you get read-only copies (don't triage, settle, merge or moot them):`,
+      ...v.map((p) => `- ${p.slug}: ${p.cards.length} open card${p.cards.length === 1 ? "" : "s"}${p.deliverables.length ? `, ${p.deliverables.length} deliverable${p.deliverables.length === 1 ? "" : "s"} in review` : ""}${p.cards.some((d) => d.orchestrator.scoping_done) ? " (incl. \"Scoping done?\")" : ""}`),
+    ];
   }
 
   setPriority(slug: string, priority: Priority): void {
@@ -3637,6 +3801,8 @@ export class Engine {
     const points = parsePoints(input.points);
     return tx(this.db, () => {
       const t = this.now();
+      // scoping (1.11.0): reviewed in the owner's Scope pane, not on Deliverables; no push, a read-only copy to the CoS
+      const scoping = this.isScoping(by.project);
       let d: Deliverable;
       if (input.revises) {
         d = this.mustDeliverable(input.revises);
@@ -3647,6 +3813,8 @@ export class Engine {
         d.summary = summary;
         d.state = "review";
         d.revisions.push({ rev: d.rev, summary, proof, at: iso(t), blocks, ...points });
+        if (scoping) d.scope = true;
+        else delete d.scope;
         this.saveDeliverable(d);
         // The owner's request is answered by the new revision: its item would otherwise be resent and dead-lettered
         this.closeItems(`recipient = ? AND kind = 'deliverable.changes' AND ref = ?`, [by.address, d.id], "done", `re-delivered as rev ${d.rev}`);
@@ -3665,11 +3833,22 @@ export class Engine {
           revisions: [{ rev: 1, summary, proof, at: iso(t), blocks, ...points }],
           feedback: [],
           withdrawn: null,
+          ...(scoping ? { scope: true } : {}),
         };
         this.saveDeliverable(d);
         this.boardAdd("deliverable", by.address, by.project, `Delivered: ${title}`, summary, d.id);
       }
-      this.ports.delivered?.(d);
+      if (!scoping) this.ports.delivered?.(d);
+      else if (this.agentByAddress("cos"))
+        this.put({
+          recipient: "cos",
+          sender: by.address,
+          kind: "copy",
+          ref: d.id,
+          body: `${by.address} delivered ${d.id} ${JSON.stringify(d.title)} (rev ${d.rev}) while ${d.project} is scoping: it is in ${this.owner.name}'s Scope pane, not Deliverables. Read-only copy: ${this.owner.name} reviews it there. ${JSON.stringify(summary.slice(0, 300))}`,
+          key: `scope-copy:${d.id}:${d.rev}`,
+          needsAck: false,
+        });
       return d;
     });
   }
@@ -3791,7 +3970,7 @@ export class Engine {
         const fb = d.feedback.at(-1);
         const note = fb ? `; ${this.owner.name} ${fb.outcome === "approved" ? "approved" : "asked for changes to"} rev ${fb.rev} ${fb.at}${fb.text ? `: ${JSON.stringify(fb.text.slice(0, 400))}` : ""}` : "";
         const withdrawn = d.withdrawn ? `; withdrawn ${d.withdrawn.at}${d.withdrawn.reason ? `: ${JSON.stringify(d.withdrawn.reason.slice(0, 200))}` : ""}` : "";
-        lines.push(`- ${d.id} ${JSON.stringify(d.title)} by ${d.lead}, rev ${d.rev}, ${label[d.state]}; delivered ${iso(d.createdAt)}, updated ${iso(d.updatedAt)}${note}${withdrawn}`);
+        lines.push(`- ${d.id} ${JSON.stringify(d.title)} by ${d.lead}, rev ${d.rev}, ${label[d.state]}${d.scope && d.state === "review" ? ` [scoping: in ${this.owner.name}'s Scope pane]` : ""}; delivered ${iso(d.createdAt)}, updated ${iso(d.updatedAt)}${note}${withdrawn}`);
         const next = this.deliverableNext(d);
         if (next) {
           const how =
@@ -4001,7 +4180,10 @@ export class Engine {
           : [];
     const lines: string[] = [`You are ${a.address}.`];
     const proj = a.project ? this.project(a.project) : null;
-    if (proj && a.role === "lead") lines.push(`Project ${proj.slug}: priority ${proj.priority}${proj.heldAt ? `, ON HOLD since ${iso(proj.heldAt)} (mail waits; no new threads)` : ""}.`);
+    if (proj && a.role === "lead")
+      lines.push(
+        `Project ${proj.slug}: priority ${proj.priority}${proj.heldAt ? `, ON HOLD since ${iso(proj.heldAt)} (mail waits; no new threads)` : ""}${proj.mode === "scoping" ? `, SCOPING with ${this.owner.name}: your cards and deliverables go only to ${this.owner.name}'s Scope pane (no CoS triage, no standing rule); ask ${this.owner.name} there, start no build threads (read-only investigation is fine), and when the goal, constraints and first plan are in PROJECT.md, propose the end with orch_ask(scoping_done={summary, project_md})` : ""}.`,
+      );
     lines.push(items.length ? `Open items (${items.length}); use orch_inbox(id=<item id>) for full text and references:` : "No open items.");
     for (const it of items) {
       const preview = this.importPreview(it.id, 300) ?? it.body.slice(0, 300);
@@ -4023,6 +4205,7 @@ export class Engine {
       lines.push(a.role === "cos" ? `Waiting for your triage (${owed.length}):` : `Your threads' questions waiting for you (${owed.length}):`);
       for (const d of owed) lines.push(`- ${d.id} ${JSON.stringify(d.request.title)} from ${d.orchestrator.origin}${d.orchestrator.action === "merge" ? " [merge card]" : ""}${d.orchestrator.triage.due_at ? `, goes to ${this.owner.name} at ${d.orchestrator.triage.due_at}` : ""}`);
     }
+    if (a.role === "cos") lines.push(...this.scopeLines());
     if (mine.length) {
       lines.push(`Your own decisions (${mine.length}):`);
       for (const d of mine) lines.push(`- ${d.id} ${JSON.stringify(d.request.title)}: ${d.state}${d.state === "answered" ? ` (${d.answer?.label ?? d.answer?.text})${d.orchestrator.asker === a.address ? " — ack it" : ""}` : ""}`);
@@ -4044,7 +4227,8 @@ export class Engine {
 
   /** Needs you: what waits on the owner. */
   needsYou(): { cards: Decision[]; deferred: Decision[]; triaging: Decision[]; held: Decision[] } {
-    const all = (this.db.prepare(`SELECT json FROM decisions WHERE state IN ('open','asked') AND at_level != 'lead'`).all() as { json: string }[]).map((r) => JSON.parse(r.json) as Decision);
+    // a scoping project's cards wait in the Scope pane (scopeView), never here
+    const all = (this.db.prepare(`SELECT json FROM decisions WHERE state IN ('open','asked') AND at_level != 'lead'`).all() as { json: string }[]).map((r) => JSON.parse(r.json) as Decision).filter((d) => !d.orchestrator.scope);
     const asked = all.filter((d) => d.state === "asked");
     const held = asked.filter((d) => d.orchestrator.held && !d.deferred);
     const cards = asked
@@ -4099,6 +4283,7 @@ export class Engine {
     const held = v.held.filter(inProject);
     if (held.length) lines.push(`Held behind an earlier card from the same asker (${held.length}):`);
     for (const d of held) lines.push(`- ${head(d)}: behind ${d.orchestrator.held!.behind}, goes up by ${d.orchestrator.held!.until}`);
+    lines.push(...this.scopeLines().filter((l) => !opts.project || !l.startsWith("- ") || l.startsWith(`- ${opts.project}:`)));
     lines.push(answered.length ? `Answered by ${this.owner.name} since ${iso(opts.since)} (${answered.length}):` : `No answers from ${this.owner.name} since ${iso(opts.since)}.`);
     const more = (n: number) => (n > RECENT_MAX ? [`- …and ${n - RECENT_MAX} older (widen with since and limit, or narrow with project)`] : []);
     for (const d of answered.slice(0, RECENT_MAX)) lines.push(`- ${head(d)}: answered ${since(d.answer!.at)} ago: ${choice(d)}; ${d.state === "acked" ? `acked by ${d.ack!.by} (${d.ack!.outcome})` : "not acked yet"}`);

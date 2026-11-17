@@ -43,7 +43,7 @@ const lane = (address: string, x: Partial<Lane> & { role?: string; pr?: Pr } = {
 const words = (cs: ChipSpec[]) => cs.map((c) => c.word);
 
 test("every project state has a chip with an icon and a word: colour is never the only signal (Pokémon off, colour-blind)", () => {
-  const states: Exclude<RowState, "you">[] = ["blocked", "moving", "waiting", "quiet", "held", "nolead"];
+  const states: (Exclude<RowState, "you"> | "scoping")[] = ["blocked", "moving", "waiting", "quiet", "held", "nolead", "scoping"];
   assert.deepEqual(Object.keys(STATE_CHIP).sort(), [...states].sort(), "a RowState without a chip would draw nothing");
   for (const s of states) {
     const c = STATE_CHIP[s];
@@ -52,6 +52,16 @@ test("every project state has a chip with an icon and a word: colour is never th
   // two states that share a tone must still differ in icon and word
   const seen = new Set(states.map((s) => `${STATE_CHIP[s].icon}|${STATE_CHIP[s].word}`));
   assert.equal(seen.size, states.length);
+});
+
+test("a scoping project reads Scoping on its row and in its detail head, whatever its motion; a hold still reads On hold", () => {
+  // the owner must see at a glance which projects are still being scoped with them (the Scope tab), not "Waiting"
+  const p = project("kite", { mode: "scoping", motion: "moving" });
+  assert.equal(projectState(p, []), "scoping");
+  assert.deepEqual(listRow(p, [], NOW, false).chip, STATE_CHIP.scoping);
+  assert.equal(STATE_CHIP.scoping.word, "Scoping");
+  assert.equal(projectState({ ...p, heldAt: NOW - 1 }, []), "held");
+  assert.notEqual(projectState(project("otter", { mode: "active", motion: "moving" }), []), "scoping");
 });
 
 test("needing the owner is a number beside the state, not a state: a blocked project that also needs the owner still reads Blocked", () => {

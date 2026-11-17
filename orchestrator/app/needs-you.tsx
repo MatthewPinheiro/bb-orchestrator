@@ -43,7 +43,7 @@ export const ZONE: string = (() => {
   }
 })();
 
-function via(): "phone" | "desktop" {
+export function via(): "phone" | "desktop" {
   try {
     return window.matchMedia("(pointer: coarse)").matches ? "phone" : "desktop";
   } catch {
@@ -51,7 +51,7 @@ function via(): "phone" | "desktop" {
   }
 }
 
-type List = "cards" | "deferred";
+export type List = "cards" | "deferred";
 
 /** The view without the cards a write took (this id at this rev), for the lists the write moved them out of. */
 function visible(v: NeedsYou): NeedsYou {
@@ -64,7 +64,7 @@ function visible(v: NeedsYou): NeedsYou {
 }
 
 /** Arming: when each card last appeared, moved or changed rev. */
-function useArming(root: RefObject<HTMLDivElement | null>) {
+export function useArming(root: RefObject<HTMLDivElement | null>) {
   const seen = useRef(new Map<string, Seen>());
   const [, setTick] = useState(0);
   const rerender = useCallback(() => setTick((t) => t + 1), []);
@@ -120,7 +120,7 @@ function useArming(root: RefObject<HTMLDivElement | null>) {
   };
 }
 
-type Act = {
+export type Act = {
   answer: (card: Card, list: List, option: string | null, note: string) => void;
   defer: (card: Card, preset: Preset["id"]) => void;
   bringBack: (card: Card) => void;
@@ -128,7 +128,8 @@ type Act = {
   secret: (card: Card, list: List, value: string) => void;
 };
 
-function CardView({ card, list, presets, isArmed, act, mon, monType = null }: { card: Card; list: List; presets: Preset[]; isArmed: boolean; act: Act; mon: string | null; monType?: string | null }) {
+/** One card, answerable in place: Needs you's cards, and the Scope tab's (with no defer presets there). */
+export function CardView({ card, list, presets, isArmed, act, mon, monType = null }: { card: Card; list: List; presets: Preset[]; isArmed: boolean; act: Act; mon: string | null; monType?: string | null }) {
   const [note, setNote] = useState("");
   const [unticked, setUnticked] = useState<Map<number, Set<number>>>(() => new Map());
   const toggle = (block: number, item: number) =>
@@ -197,6 +198,17 @@ function CardView({ card, list, presets, isArmed, act, mon, monType = null }: { 
           {/* a PR or merge card leads with its PR: the chip, its live state and the one-line verdict (2026-11-14) */}
           <Blocks blocks={card.blocks} prs={card.prs} only={order.lead} />
           <p className="ui-dic__detail !mt-2 whitespace-pre-wrap">{card.question}</p>
+          {/* "Scoping done?" (1.11.0): the lead's summary and the PROJECT.md it is written in, above the fixed options */}
+          {card.scopingDone ? (
+            <div data-scoping-done="" className="mt-2 rounded-md p-3 text-sm" style={{ boxShadow: "inset 0 0 0 1px var(--orch-line)" }}>
+              <div className="min-w-0 [overflow-wrap:anywhere]">
+                <Markdown content={card.scopingDone.summary} />
+              </div>
+              <p className="orch-muted m-0 mt-1 text-xs [overflow-wrap:anywhere]">
+                Written in <span className="orch-mono">{card.scopingDone.projectMd}</span>
+              </p>
+            </div>
+          ) : null}
           {/* no prose on the card (2026-11-14): at most one decision line; the context and the decisions open from More */}
           {order.line ? (
             <p data-card-line="" className="orch-muted m-0 mt-1 truncate text-sm" title={order.line}>

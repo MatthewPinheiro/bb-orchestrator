@@ -6,7 +6,7 @@
 import { existsSync, mkdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { randomBytes } from "node:crypto";
-import { EngineError, PRIORITIES, type Priority, PROJECT_RE } from "./model.ts";
+import { EngineError, PRIORITIES, type Priority, PROJECT_MODES, type ProjectMode, PROJECT_RE } from "./model.ts";
 import { SLUG } from "./memory.ts";
 import { primaryRepo } from "./start.ts";
 
@@ -20,6 +20,7 @@ export type ProjectBriefIn = {
   goal?: unknown;
   constraints?: unknown;
   priority?: unknown;
+  mode?: unknown;
 };
 
 export type ProjectBrief = {
@@ -31,12 +32,14 @@ export type ProjectBrief = {
   goal: string;
   constraints: string[];
   priority: Priority;
+  /** scoping: the owner settles its scope with its lead first, in the Scope tab (1.11.0). */
+  mode: ProjectMode;
 };
 
 export type NewProjectPorts = {
   engine: {
     project(slug: string): unknown;
-    createProject(slug: string, priority: Priority, by: string, title: string, body: string): void;
+    createProject(slug: string, priority: Priority, by: string, title: string, body: string, mode: ProjectMode): void;
   };
   /** The projects folder (the projectsDir setting). */
   root: string;
@@ -105,7 +108,9 @@ export function checkBrief(b: ProjectBriefIn): ProjectBrief {
 
   const priority = (text(b.priority) ?? "normal") as Priority;
   if (!PRIORITIES.includes(priority)) throw bad(`priority is one of ${PRIORITIES.join(", ")}`);
-  return { slug, title, repo: path, repoUrl, base, goal, constraints, priority };
+  const mode = (text(b.mode) ?? "active") as ProjectMode;
+  if (!PROJECT_MODES.includes(mode)) throw bad(`mode is one of ${PROJECT_MODES.join(", ")} (default active)`);
+  return { slug, title, repo: path, repoUrl, base, goal, constraints, priority, mode };
 }
 
 /** PROJECT.md for a new project, in the headings the existing ones use. */
@@ -122,7 +127,7 @@ export function projectMd(b: ProjectBrief, day: string): string {
     "",
     ...(b.constraints.length ? ["## Limits", ...b.constraints.map((c) => `- ${c}`), ""] : []),
     "## Decisions",
-    `- ${day}: created by the CoS with orch_new_project; priority ${b.priority}.`,
+    `- ${day}: created by the CoS with orch_new_project; priority ${b.priority}.${b.mode === "scoping" ? " It starts in scoping mode: the lead and the owner settle its goal, constraints and first plan here before any build thread." : ""}`,
     "",
   ].join("\n");
 }
@@ -139,7 +144,7 @@ export function projectRecordJson(b: ProjectBrief, folder: string, nowIso: strin
  * built beside the projects folder's entries under a temporary name and renamed into place, and the row is created
  * with its board notice.
  */
-export function newProject(p: NewProjectPorts, raw: ProjectBriefIn): { slug: string; folder: string; files: string[]; priority: Priority } {
+export function newProject(p: NewProjectPorts, raw: ProjectBriefIn): { slug: string; folder: string; files: string[]; priority: Priority; mode: ProjectMode } {
   const b = checkBrief(raw);
   if (!RECORD_RE.test(p.record)) throw new EngineError("bad_state", `the projectRecord setting ${p.record} isn't a .json file name`);
   const folder = join(p.root, b.slug);
@@ -166,6 +171,6 @@ export function newProject(p: NewProjectPorts, raw: ProjectBriefIn): { slug: str
     throw e;
   }
   const files = [join(folder, "PROJECT.md"), join(folder, p.record)];
-  p.engine.createProject(b.slug, b.priority, p.by, `${p.by} created project ${b.slug}`, `${b.title}. Repo ${b.repo}${b.base ? ` (base ${b.base})` : ""}, priority ${b.priority}. Folder ${folder}. No lead yet: orch_start_lead starts it.`);
-  return { slug: b.slug, folder, files, priority: b.priority };
+  p.engine.createProject(b.slug, b.priority, p.by, `${p.by} created project ${b.slug}`, `${b.title}. Repo ${b.repo}${b.base ? ` (base ${b.base})` : ""}, priority ${b.priority}${b.mode === "scoping" ? ", in scoping mode (the Scope tab)" : ""}. Folder ${folder}. No lead yet: orch_start_lead starts it.`, b.mode);
+  return { slug: b.slug, folder, files, priority: b.priority, mode: b.mode };
 }

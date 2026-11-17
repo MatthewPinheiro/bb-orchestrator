@@ -17,7 +17,7 @@ type ProjectPr = NonNullable<Project["prs"]>[number];
 export type Tone = "need" | "blocked" | "warn" | "good" | "info" | "quiet";
 export type IconName =
   | "you" | "blocked" | "wait" | "moving" | "quiet" | "held" | "nolead" | "pr" | "check" | "x" | "draft" | "eye" | "merged"
-  | "doc" | "page" | "link" | "box" | "report" | "pin" | "unpin" | "more" | "said" | "live" | "plus" | "chev" | "copy" | "open";
+  | "doc" | "page" | "link" | "box" | "report" | "pin" | "unpin" | "more" | "said" | "live" | "plus" | "chev" | "copy" | "open" | "scope";
 
 /** One chip: never a colour alone, always an icon and a word. */
 export interface ChipSpec {
@@ -26,8 +26,11 @@ export interface ChipSpec {
   word: string;
 }
 
-/** A project's own state, without "needs you": what waits on the owner is a number beside it, not a state. */
-export type ProjectState = Exclude<RowState, "you">;
+/**
+ * A project's own state, without "needs you": what waits on the owner is a number beside it, not a state. "scoping"
+ * (1.11.0): the owner and its lead are still settling what it is, in the Scope tab.
+ */
+export type ProjectState = Exclude<RowState, "you"> | "scoping";
 export const STATE_CHIP: Record<ProjectState, ChipSpec> = {
   blocked: { tone: "blocked", icon: "blocked", word: "Blocked" },
   moving: { tone: "good", icon: "moving", word: "Moving" },
@@ -35,10 +38,13 @@ export const STATE_CHIP: Record<ProjectState, ChipSpec> = {
   quiet: { tone: "quiet", icon: "quiet", word: "Quiet" },
   held: { tone: "quiet", icon: "held", word: "On hold" },
   nolead: { tone: "quiet", icon: "nolead", word: "No lead" },
+  scoping: { tone: "info", icon: "scope", word: "Scoping" },
 };
 
 /** The project's state as motion: blocked when the lead says so, else moving while a lane works, else waiting. */
 export function projectState(p: Project, lanes: Lane[] | undefined): ProjectState {
+  // scoping says what the project is for now, over its motion; a hold still wins (nothing moves while held)
+  if (p.mode === "scoping" && p.heldAt === null) return "scoping";
   const st = stateOf(p, lanes);
   if (st !== "you") return st;
   if (blockersOf(p).length) return "blocked";

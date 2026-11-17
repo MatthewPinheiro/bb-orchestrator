@@ -77,10 +77,11 @@ const PAGE = 30;
  * explicit act that marks the replies seen (markSeen), never a render. The log reads its own history (directHistory),
  * so the Projects read stays light; "Older" pages back with a before-cursor.
  */
-export function ChatLog({ project, now, cos, busy, refetchAll, onPick }: { project: Project; now: number; cos: string; busy: boolean; refetchAll: () => void; onPick: () => void }) {
+export function ChatLog({ project, now, cos, busy, refetchAll, onPick, startOpen = false }: { project: Project; now: number; cos: string; busy: boolean; refetchAll: () => void; onPick: () => void; startOpen?: boolean }) {
   const slug = project.slug;
-  // starts open while a reply is unread: opening the project (an explicit act, projects.tsx) marks it seen, so it must show
-  const [open, setOpen] = useState(() => openChats.has(slug) || !!project.direct?.unread);
+  // starts open while a reply is unread: opening the project (an explicit act, projects.tsx) marks it seen, so it must show.
+  // The Scope tab (1.11.0) opens it always: the chat is what the owner came there for.
+  const [open, setOpen] = useState(() => startOpen || openChats.has(slug) || !!project.direct?.unread);
   const toggle = () => {
     const next = !open;
     if (next) {

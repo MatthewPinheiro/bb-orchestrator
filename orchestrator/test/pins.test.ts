@@ -159,12 +159,12 @@ test("the pins reach the page with the project's book: one read, refreshed on th
   assert.deepEqual(s.e.projectBook("orchestrator").pins, []);
 });
 
-test("project_pins, then 1.10.0's handed_off_prs, are appended last, so a database from before pins gains both and keeps its rows", () => {
+test("project_pins, then 1.10.0's handed_off_prs, are appended in order, so a database from before pins gains both and keeps its rows", () => {
   const last = MIGRATIONS.length - 1;
   const pins = MIGRATIONS.findIndex((m) => /^CREATE TABLE project_pins \(/.test(m));
   assert.match(MIGRATIONS[pins - 1]!, /^CREATE INDEX events_project_kind/, "appended after the book's indexes, never inserted before them");
-  assert.match(MIGRATIONS[last]!, /^CREATE TABLE handed_off_prs \(/, "the next table goes after project_pins, never before it");
-  assert.equal(last, pins + 1);
+  // later releases append after it (1.11.0's project mode: test/scoping.test.ts)
+  assert.match(MIGRATIONS[pins + 1]!, /^CREATE TABLE handed_off_prs \(/, "the next table goes after project_pins, never before it");
   const db = new DatabaseSync(":memory:");
   db.exec(`CREATE TABLE _migrations (id INTEGER PRIMARY KEY)`);
   MIGRATIONS.slice(0, pins).forEach((sql, i) => {

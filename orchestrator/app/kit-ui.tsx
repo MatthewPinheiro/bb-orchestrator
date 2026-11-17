@@ -101,6 +101,7 @@ const P: Record<IconName, string> = {
   chev: '<path d="M6 3.5L10.5 8 6 12.5"/>',
   copy: '<rect x="5.5" y="5.5" width="8" height="8" rx="1"/><path d="M3.5 10.5h-1v-8h8v1"/>',
   open: '<rect x="1.5" y="2.5" width="13" height="11" rx="1.5"/><path d="M8.5 2.5v11"/>',
+  scope: '<circle cx="8" cy="8" r="6"/><circle cx="8" cy="8" r="2.5"/><path d="M8 1v2.5M8 12.5V15M1 8h2.5M12.5 8H15"/>',
 };
 
 /** A neutral 12 px icon. With `label` it is announced; without, it is decoration beside a word. */

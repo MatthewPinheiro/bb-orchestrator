@@ -56,7 +56,9 @@ export function CosComposer({ agents, refetchAll, compact = false }: { agents: B
             maxRows={6}
             maxLength={8000}
             disabled={!cos}
-            placeholder={cos ? (compact ? PLACEHOLDER.compact : PLACEHOLDER.full) : "No Chief of Staff is running: start it from the Projects tab"}
+            // the usual hint while the agents load: "No Chief of Staff" only once the read says so (it wrapped to two lines
+            // on the phone-width page, so the bar changed height as the page loaded)
+            placeholder={cos || !agents ? (compact ? PLACEHOLDER.compact : PLACEHOLDER.full) : "No Chief of Staff is running: start it from the Projects tab"}
           />
         </div>
         <Btn data-cos-send="" disabled={busy || !cos || text.trim() === ""} onClick={() => void send()}>

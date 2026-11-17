@@ -38,8 +38,11 @@ type Query = { data: Deliverables | undefined; error: { message: string } | null
 const TEXT_LINES = 200;
 export const proofSrc = (id: string) => `${WRITE_BASE}${PROOF_ROUTE}?id=${encodeURIComponent(id)}`;
 
-/** In review, newest first: what the Deliverables tab and the badges count. */
-export const inReview = (all: Deliverables | undefined): Deliverable[] => (all ?? []).filter((d) => d.state === "review").sort((a, b) => b.updatedAt - a.updatedAt);
+/** In review, newest first: what the Deliverables tab and the badges count. A scoping project's wait in the Scope tab instead. */
+export const inReview = (all: Deliverables | undefined): Deliverable[] => (all ?? []).filter((d) => d.state === "review" && !d.scope).sort((a, b) => b.updatedAt - a.updatedAt);
+
+/** In review in a scoping project's Scope pane (1.11.0): not on Deliverables until the project is active. */
+export const inScope = (d: Deliverable) => d.state === "review" && !!d.scope;
 
 /** A Markdown proof (a .md or .markdown file) is rendered the way bb renders a chat message, not shown as its source. */
 const isMarkdown = (p: { path?: string | null; caption: string }) => /\.(md|markdown)$/i.test(p.path ?? "");
@@ -315,7 +318,7 @@ function Settled({ d }: { d: Deliverable }) {
   );
 }
 
-function DeliverableCard({ d, refetchAll, outputs, outputsAfter }: { d: Deliverable; refetchAll: () => void; outputs: Output[]; outputsAfter: () => void }) {
+export function DeliverableCard({ d, refetchAll, outputs, outputsAfter }: { d: Deliverable; refetchAll: () => void; outputs: Output[]; outputsAfter: () => void }) {
   const latest = d.revisions.find((r) => r.rev === d.rev) ?? d.revisions[d.revisions.length - 1];
   const proof = latest?.proof ?? [];
   const media = proof.filter((p) => p.kind === "image" || p.kind === "video");
@@ -506,7 +509,9 @@ export function DeliverablesView({ q, refetchAll, files = false }: { q: Query; r
     return true;
   });
   if (!q.data) return <ReadState q={q} what="the deliverables" />;
-  const tab = deliverablesTab(q.data, outputs.data ?? [], view, sorted);
+  // a scoping project's deliverables in review are reviewed in the Scope tab; once decided they file here as usual
+  const all = q.data.filter((d) => !inScope(d));
+  const tab = deliverablesTab(all, outputs.data ?? [], view, sorted);
   const review = tab.review;
   const filesState = { loaded: outputs.data !== undefined, error: outputs.error?.message ?? null };
   const empty = <EmptyState title="Nothing to review" text="Leads deliver finished work here with proof (orch_deliver). You approve it or send it back." />;
@@ -521,8 +526,8 @@ export function DeliverablesView({ q, refetchAll, files = false }: { q: Query; r
       </div>
     );
   // wide: the directory (in review on top, then the project folders) beside the picked deliverable
-  const shown = shownDeliverable(q.data, picked);
-  const shownOutputs = shown ? (fold(q.data, outputs.data ?? []).byDeliverable.get(shown.id) ?? []) : [];
+  const shown = shownDeliverable(all, picked);
+  const shownOutputs = shown ? (fold(all, outputs.data ?? []).byDeliverable.get(shown.id) ?? []) : [];
   return (
     <div ref={setRoot} data-deliverables-width={width}>
       <div className="orch-dlv pb-8" data-layout="list-detail">

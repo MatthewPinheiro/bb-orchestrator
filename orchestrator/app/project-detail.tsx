@@ -200,6 +200,9 @@ function Mark({ m, x, cy }: { m: Row["marks"][number]; x: number; cy: number }) 
       <path d={`M ${x - 3.5} ${cy - 3.5} L ${x + 3.5} ${cy + 3.5} M ${x + 3.5} ${cy - 3.5} L ${x - 3.5} ${cy + 3.5}`} strokeWidth={2} style={stroke(KIND_TONES.inactive)} />
     ) : m.kind === "handoff" ? (
       <path d={`M ${x} ${cy - 7} L ${x} ${cy + 7} M ${x - 3} ${cy - 4} L ${x} ${cy - 7} L ${x + 3} ${cy - 4}`} strokeWidth={2} fill="none" style={stroke(HANDOFF)} />
+    ) : m.kind === "mode" ? (
+      // scoping started or ended (1.11.0): a ring, filled once the project is active
+      <circle cx={x} cy={cy} r={4} strokeWidth={1.75} style={{ ...stroke(HANDOFF), ...(m.label.startsWith("scoping done") ? fill(HANDOFF) : { fill: "Canvas" }) }} />
     ) : (
       <path d={`M ${x - 4} ${cy} L ${x - 1} ${cy + 3} L ${x + 4} ${cy - 3}`} strokeWidth={2} fill="none" style={stroke(RESOLVED)} />
     );

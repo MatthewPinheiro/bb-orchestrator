@@ -73,6 +73,11 @@ from the app's Needs you page, and write to a lead only from its Projects row (a
   taken slug or folder and never starts the lead. `orch_start_lead(slug)` runs the owner's Start lead checks (project
   folder, a repo under `## Repos` that exists here, not on hold, no live lead) and the board shows "cos started
   lead:<slug>".
+- **A project can start in scoping mode** (`orch_new_project` with `mode: "scoping"`, or `orch_project_mode(slug, mode)`
+  from the CoS). While it scopes, its lead's cards and deliverables wait in the owner's Scope tab only: no CoS triage,
+  no Needs you, no standing rule; the CoS gets read-only copies. The lead starts no build threads (read-only
+  investigation is fine), and ends it with `orch_ask(scoping_done={summary, project_md})`; the owner's yes makes the
+  project active.
 - **A lead publishes its status** with `orch_status` when it starts, at each step change and whenever what it waits on
   changes: goal, numbered steps (at most one `current`), `waiting_on` and blockers. It is the step bar on the project
   page; after 2 h without one it shows as stale, and the lead is reminded once per change in its project since then.

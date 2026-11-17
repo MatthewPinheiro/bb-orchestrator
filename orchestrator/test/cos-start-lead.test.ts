@@ -468,3 +468,89 @@ test("operator adopts existing parented lead and worker through the CLI without 
   assert.equal(s.metadata.length, 4);
   assert.match((await s.cli(["status"])).stdout, /T-worker parent=T-lead/);
 });
+
+// ---------------------------------------------------------------- scoping mode (1.11.0)
+// A new project can start in scoping mode, where the owner settles its scope with the lead directly. The CoS must be
+// able to say so when it creates the project and to change it later; the lead must be told at its start, or it starts
+// build threads before the owner has agreed what to build; and every new parameter stays optional, so an agent on an
+// older schema (or a JSON-string argument) still reaches the tool.
+
+test("orch_new_project with mode scoping creates a scoping project; without it, the project is active", async () => {
+  const s = await server();
+  s.engine.register("T-cos", "cos", null);
+  const scoping = await s.call("orch_new_project", { brief: { slug: "kite", title: "Kite", repo: s.repo, goal: "Export invoices.", mode: "scoping" } }, "T-cos");
+  assert.ok(scoping.ok, scoping.text);
+  assert.match(scoping.text, /^Created kite \(priority normal, scoping mode\)/);
+  assert.equal(s.engine.project("kite")?.mode, "scoping");
+  assert.match(readFileSync(join(s.projects, "kite", "PROJECT.md"), "utf8"), /It starts in scoping mode/);
+  const plain = await s.call("orch_new_project", { brief: JSON.stringify({ slug: "otter", title: "Otter", repo: s.repo, goal: "Ship otter." }) }, "T-cos");
+  assert.ok(plain.ok, plain.text);
+  assert.equal(s.engine.project("otter")?.mode, "active", "no mode: active, as every project before");
+  assert.doesNotMatch(readFileSync(join(s.projects, "otter", "PROJECT.md"), "utf8"), /scoping/);
+  const bad = await s.call("orch_new_project", { brief: { slug: "wren", title: "Wren", repo: s.repo, goal: "g", mode: "draft" } }, "T-cos");
+  assert.deepEqual(bad, { ok: false, text: "invalid: mode is one of scoping, active (default active)" });
+  assert.ok(!existsSync(join(s.projects, "wren")), "a refused mode leaves nothing behind");
+});
+
+test("a scoping project's lead is told at its start; an active project's start brief is unchanged", async () => {
+  const s = await server();
+  s.engine.register("T-cos", "cos", null);
+  assert.ok((await s.call("orch_new_project", { brief: { slug: "kite", title: "Kite", repo: s.repo, goal: "g", mode: "scoping" } }, "T-cos")).ok);
+  assert.ok((await s.call("orch_new_project", { brief: { slug: "otter", title: "Otter", repo: s.repo, goal: "g" } }, "T-cos")).ok);
+  assert.ok((await s.call("orch_start_lead", { slug: "kite" }, "T-cos")).ok);
+  assert.ok((await s.button("otter")).ok);
+  const [kite, otter] = s.spawns;
+  assert.match(kite!.prompt, /## kite is in scoping mode/);
+  assert.match(kite!.prompt, /Start no build threads\. Read-only investigation is fine\./);
+  assert.match(kite!.prompt, new RegExp(`scoping_done=\\{summary, project_md: "${join(s.projects, "kite").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/PROJECT\\.md"\\}`));
+  assert.doesNotMatch(otter!.prompt, /scoping/);
+  assert.equal(kite!.prompt.slice(0, kite!.prompt.indexOf("## kite is in scoping mode")).trimEnd().replaceAll("kite", "X"), otter!.prompt.trimEnd().replaceAll("otter", "X"), "the same brief, plus the scoping part");
+  // its live instructions say it too, for as long as it stays scoping
+  assert.match(s.instructions("T-1") ?? "", /SCOPING with the owner/);
+  assert.doesNotMatch(s.instructions("T-2") ?? "", /SCOPING/);
+});
+
+test("orch_project_mode: the CoS sets and clears scoping; nobody else can; its parameters are optional", async () => {
+  const s = await server();
+  s.engine.register("T-cos", "cos", null);
+  s.engine.register("T-lead", "lead", "otter");
+  assert.deepEqual(await s.call("orch_project_mode", { slug: "otter", mode: "scoping" }, "T-lead"), { ok: false, text: "forbidden: CoS only" });
+  assert.deepEqual(await s.call("orch_project_mode", {}, "T-cos"), { ok: false, text: "invalid: give slug and mode (scoping | active)" });
+  assert.deepEqual(await s.call("orch_project_mode", { slug: "otter", mode: "paused" }, "T-cos"), { ok: false, text: "invalid: mode is one of scoping, active" });
+  assert.match((await s.call("orch_project_mode", { slug: "nope", mode: "scoping" }, "T-cos")).text, /^not_found/);
+  const set = await s.call("orch_project_mode", { slug: "otter", mode: "scoping" }, "T-cos");
+  assert.ok(set.ok, set.text);
+  assert.match(set.text, /^otter is scoping now/);
+  assert.equal(s.engine.project("otter")?.mode, "scoping");
+  assert.match((await s.call("orch_project_mode", { slug: "otter", mode: "scoping" }, "T-cos")).text, /^otter is already scoping; nothing changed/);
+  const q = { title: "Which format?", question: "Markdown or HTML?", options: [{ label: "Markdown" }, { label: "HTML" }] };
+  assert.match((await s.call("orch_ask", q, "T-lead")).text, /in the owner's Scope pane \(otter is scoping/);
+  // a thread's question the lead files up goes there too, and the lead is told where it went
+  s.engine.register("T-t1", "thread", "otter", "T-lead");
+  const asked = await s.call("orch_ask", { ...q, title: "Thread asks?" }, "T-t1");
+  const tid = /Filed (d-\S+)/.exec(asked.text)![1]!;
+  assert.match((await s.call("orch_forward", { id: tid }, "T-lead")).text, new RegExp(`^Filed ${tid} in the owner's Scope pane`));
+  assert.match((await s.call("orch_project_mode", { slug: "otter", mode: "active" }, "T-cos")).text, /^otter is active now/);
+  assert.match((await s.call("orch_ask", { ...q, title: "Which format now?" }, "T-lead")).text, /with the CoS/);
+  const js = z.toJSONSchema(s.tools.get("orch_project_mode")!.parameters as never, { io: "input" }) as { required?: string[] };
+  assert.deepEqual(js.required ?? [], [], "every parameter is optional");
+});
+
+test("orch_ask scoping_done: an object or its JSON string; its PROJECT.md must exist; the new parameter is optional", async () => {
+  const s = await server();
+  s.engine.register("T-cos", "cos", null);
+  assert.ok((await s.call("orch_new_project", { brief: { slug: "kite", title: "Kite", repo: s.repo, goal: "g", mode: "scoping" } }, "T-cos")).ok);
+  s.engine.register("T-kite", "lead", "kite");
+  const md = join(s.projects, "kite", "PROJECT.md");
+  const q = { title: "Scoping done?", question: "Is kite scoped?", options: [{ label: "a" }, { label: "b" }] };
+  const missing = await s.call("orch_ask", { ...q, scoping_done: { summary: "Goal, limits, plan.", project_md: join(s.projects, "kite", "NOPE", "PROJECT.md") } }, "T-kite");
+  assert.match(missing.text, /^not_found: scoping_done\.project_md .* doesn't exist/);
+  const r = await s.call("orch_ask", { ...q, scoping_done: JSON.stringify({ summary: "Goal, limits, plan.", project_md: md }) }, "T-kite");
+  assert.ok(r.ok, r.text);
+  const id = /Filed (d-\S+)/.exec(r.text)![1]!;
+  const d = s.engine.decision(id)!;
+  assert.deepEqual(d.orchestrator.scoping_done, { summary: "Goal, limits, plan.", project_md: md });
+  assert.equal(d.request.options[0]!.label, "Yes, scoping is done", "the options are the fixed ones");
+  const js = z.toJSONSchema(s.tools.get("orch_ask")!.parameters as never, { io: "input" }) as { required?: string[] };
+  assert.ok(!(js.required ?? []).includes("scoping_done"));
+});
