@@ -1,6 +1,7 @@
 // affectUI registry change-summary-clean (https://www.affectui.com/r/change-summary-clean.json), MIT, (c) affectUI
 "use client";
 
+import { styleHref } from "../style-href.ts";
 import type { ReactNode } from "react";
 
 /*
@@ -32,7 +33,7 @@ export type ChangeSummaryProps = {
 export function ChangeSummary({ title = "What's changed", period, icon, changes, className }: ChangeSummaryProps) {
   return (
     <>
-      <style href="ui-change-summary-clean" precedence="default">
+      <style href={styleHref("ui-change-summary-clean", css)} precedence="default">
         {css}
       </style>
       <section className={["ui-csc", className].filter(Boolean).join(" ")} aria-label={title}>

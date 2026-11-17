@@ -1,4 +1,5 @@
 // The cheat sheet (?), the bottom-of-page note, and the selection's look. All drawn fixed or as outlines, so no card moves.
+import { styleHref } from "./style-href.ts";
 import { useEffect, useRef } from "react";
 import { KEYMAP } from "./keys.ts";
 import { keyState, emitKeys, useKeys } from "./key-state.ts";
@@ -23,7 +24,7 @@ export function ShortcutUi() {
   });
   return (
     <>
-      <style href="orch-keys" precedence="default">
+      <style href={styleHref("orch-keys", keysCss)} precedence="default">
         {keysCss}
       </style>
       {keyState.note ? (

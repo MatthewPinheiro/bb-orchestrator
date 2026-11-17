@@ -273,3 +273,38 @@ test("the base's and the branch's remote copies are found past bb's page of remo
   h.prs.E1 = { outcome: "available", pullRequest: { url: "https://github.com/o/r/pull/9", number: 9, state: "closed", attention: "closed", checks: { state: "passing" } } };
   assert.match(await h.call("orch_resolve", { to: "thread:demo:1" }), /closed without merging and it has reported; worktree clean: its branch is pushed \(origin\/feat\)/);
 });
+
+// 2026-11-17 (the owner, via a lead): "we should be allow to close threads with open prs we just need to track them". A
+// thread whose open PR someone else now owns resolves with handed_off; the PR is kept on the project page, not lost.
+test("an open PR handed off to someone else resolves, and the project lists it under Handed off", async () => {
+  const h = await host();
+  h.remotes.push("origin/feat");
+  h.git.E1 = (input: { mergeBaseBranch?: string }) => (input.mergeBaseBranch === "origin/feat" ? status([], 0, "origin/feat") : status([], 3));
+  h.prs.E1 = { outcome: "available", pullRequest: { url: "https://github.com/o/r/pull/9", number: 9, state: "open", attention: "none", checks: { state: "passing" } } };
+  // the JSON-string form older agents send
+  const out = await h.call("orch_resolve", { to: "thread:demo:1", handed_off: JSON.stringify({ pr: "https://github.com/o/r/pull/9", owner: "Chris", note: "he has the review" }) });
+  assert.match(out, /Resolved thread:demo:1 \(its open PR is handed off to Chris/);
+  assert.match(out, /PROJECT\.md 'Open PRs handed off'/);
+  assert.deepEqual(h.rec.archived, ["T-w"]);
+  assert.deepEqual(h.pre.handedOffPrs().get("demo")?.map((x) => [x.pr, x.owner, x.note, x.thread]), [["https://github.com/o/r/pull/9", "Chris", "he has the review", "thread:demo:1"]]);
+});
+
+test("an open PR without handed_off is still refused", async () => {
+  const h = await host();
+  h.remotes.push("origin/feat");
+  h.git.E1 = (input: { mergeBaseBranch?: string }) => (input.mergeBaseBranch === "origin/feat" ? status([], 0, "origin/feat") : status([], 3));
+  h.prs.E1 = { outcome: "available", pullRequest: { url: "https://github.com/o/r/pull/9", number: 9, state: "open", attention: "none", checks: { state: "passing" } } };
+  assert.match(await h.call("orch_resolve", { to: "thread:demo:1" }), /hasn't read its last report/);
+  assert.deepEqual(h.rec.archived, []);
+  assert.equal(h.pre.handedOffPrs().size, 0);
+});
+
+test("handed_off never excuses a dirty worktree: the work would be lost with the thread", async () => {
+  const h = await host();
+  h.git.E1 = status(["src/a.ts"], 2);
+  const out = await h.call("orch_resolve", { to: "thread:demo:1", handed_off: { pr: "https://github.com/o/r/pull/9", owner: "Chris" } });
+  assert.match(out, /isn't clean: uncommitted changes in 1 file\(s\): src\/a\.ts/);
+  assert.deepEqual(h.rec.archived, []);
+  assert.equal(h.roleOf("T-w"), true);
+  assert.equal(h.pre.handedOffPrs().size, 0);
+});

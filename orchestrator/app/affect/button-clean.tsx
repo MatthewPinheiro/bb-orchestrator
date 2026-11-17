@@ -1,6 +1,7 @@
 // affectUI components/button-clean.tsx @ f002d8a58cbb7e19cff7a8b4c8982b420b9e8c7e, MIT, (c) affectUI
 "use client";
 
+import { styleHref } from "../style-href.ts";
 import {
   isValidElement,
   useEffect,
@@ -87,7 +88,7 @@ export function Button({
   return (
     <>
       {/* React 19 hoists this into <head> once, no matter how many buttons render */}
-      <style href="ui-button-clean" precedence="default">
+      <style href={styleHref("ui-button-clean", css)} precedence="default">
         {css}
       </style>
       <button

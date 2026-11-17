@@ -1,6 +1,7 @@
 // Small shared pieces, built on the vendored affectUI items (app/affect): buttons, badges for kinds, avatars for roles,
 // card sections and time formatting. Colours for roles and kinds come from palette.ts, fed into affectUI's own CSS
 // variables, so the look is affectUI's and the colour code stays ours.
+import { styleHref } from "./style-href.ts";
 import type { ButtonHTMLAttributes, CSSProperties, ReactNode } from "react";
 import { Avatar } from "./affect/avatar-clean.tsx";
 import { Badge } from "./affect/badge-clean.tsx";
@@ -50,7 +51,7 @@ const LOOK = `
 `;
 export function Look() {
   return (
-    <style href="orch-look" precedence="default">
+    <style href={styleHref("orch-look", LOOK)} precedence="default">
       {LOOK}
     </style>
   );

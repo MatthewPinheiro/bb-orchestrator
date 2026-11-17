@@ -24,8 +24,11 @@ import { useViewKeys } from "./key-view.ts";
 import { age } from "./lanes.ts";
 import { Btn, Kind, PageError, ReadState, Who, cx, when } from "./ui.tsx";
 import { FoldedOutputs } from "./files.tsx";
-import { START, deliverablesTab, type View } from "./past.ts";
-import { DeliverablesTree } from "./past-view.tsx";
+import { START, deliverablesTab, fold, shownDeliverable, type View } from "./past.ts";
+import { DeliverablesTree, STATE_WORD } from "./past-view.tsx";
+import { useElementWidth } from "./panes.tsx";
+import { isWide } from "./source.ts";
+import { styleHref } from "./style-href.ts";
 
 type Deliverable = Deliverables[number];
 type Proof = Deliverable["revisions"][number]["proof"][number];
@@ -290,6 +293,28 @@ export function History({ d }: { d: Deliverable }) {
   );
 }
 
+/** "in review · rev 2" while it waits for the owner; afterwards its state (the wide tab's detail shows past ones too). */
+function StateChip({ d }: { d: Deliverable }) {
+  if (d.state !== "review") return <Kind of={d.state}>{STATE_WORD[d.state]}</Kind>;
+  return <Kind of="review">{d.rev > 1 ? `in review · rev ${d.rev}` : "in review"}</Kind>;
+}
+
+/** Where a past deliverable's review controls were: why it was withdrawn, and the owner's next action and its outcome. */
+function Settled({ d }: { d: Deliverable }) {
+  if (!d.withdrawn && !d.next) return null;
+  return (
+    <div className="mt-3" data-settled={d.id}>
+      {d.withdrawn ? (
+        <p className="orch-muted m-0 text-xs [overflow-wrap:anywhere]">
+          Withdrawn {when(d.withdrawn.at)}
+          {d.withdrawn.reason ? `: ${d.withdrawn.reason}` : ""}
+        </p>
+      ) : null}
+      {d.next ? <NextLine n={d.next} /> : null}
+    </div>
+  );
+}
+
 function DeliverableCard({ d, refetchAll, outputs, outputsAfter }: { d: Deliverable; refetchAll: () => void; outputs: Output[]; outputsAfter: () => void }) {
   const latest = d.revisions.find((r) => r.rev === d.rev) ?? d.revisions[d.revisions.length - 1];
   const proof = latest?.proof ?? [];
@@ -298,8 +323,8 @@ function DeliverableCard({ d, refetchAll, outputs, outputsAfter }: { d: Delivera
   const short = latest ? lessText(latest) : null;
   if (short && latest) return <ShortCard d={d} rev={latest} layout={short} media={media} rest={rest} refetchAll={refetchAll} outputs={outputs} outputsAfter={outputsAfter} />;
   return (
-    <Card as="article" data-deliverable={d.id}>
-      <CardHeader title={d.title} titleAs="h3" description={d.project ?? "No project"} action={<Kind of="review">{d.rev > 1 ? `in review · rev ${d.rev}` : "in review"}</Kind>} />
+    <Card as="article" data-deliverable={d.state === "review" ? d.id : undefined} data-shown={d.id}>
+      <CardHeader title={d.title} titleAs="h3" description={d.project ?? "No project"} action={<StateChip d={d} />} />
       <CardContent>
         <div className="orch-muted flex flex-wrap items-center gap-2 text-xs">
           <MonSprite mon={d.leadMon} address={d.lead} size={28} />
@@ -324,7 +349,7 @@ function DeliverableCard({ d, refetchAll, outputs, outputsAfter }: { d: Delivera
             ))}
           </div>
         ) : null}
-        <Review d={d} refetchAll={refetchAll} />
+        {d.state === "review" ? <Review d={d} refetchAll={refetchAll} /> : <Settled d={d} />}
         <History d={d} />
         <FoldedOutputs outputs={outputs} after={outputsAfter} />
       </CardContent>
@@ -359,7 +384,7 @@ function ShortCard({ d, rev, layout, media, rest, refetchAll, outputs, outputsAf
           </div>
         );
       case "review":
-        return <Review key={p} d={d} refetchAll={refetchAll} />;
+        return d.state === "review" ? <Review key={p} d={d} refetchAll={refetchAll} /> : <Settled key={p} d={d} />;
       case "details":
         // no open attribute: Details starts closed, and React never closes it again on a re-render
         return (
@@ -380,8 +405,8 @@ function ShortCard({ d, rev, layout, media, rest, refetchAll, outputs, outputsAf
     }
   };
   return (
-    <Card as="article" data-deliverable={d.id} data-layout="short">
-      <CardHeader title={d.title} titleAs="h3" description={d.project ?? "No project"} action={<Kind of="review">{d.rev > 1 ? `in review · rev ${d.rev}` : "in review"}</Kind>} />
+    <Card as="article" data-deliverable={d.state === "review" ? d.id : undefined} data-shown={d.id} data-layout="short">
+      <CardHeader title={d.title} titleAs="h3" description={d.project ?? "No project"} action={<StateChip d={d} />} />
       <CardContent>
         <div className="orch-muted flex flex-wrap items-center gap-2 text-xs">
           <MonSprite mon={d.leadMon} address={d.lead} size={28} />
@@ -428,7 +453,18 @@ function useSidebarOrder(place: ProjectOrder | undefined): ProjectOrder {
  */
 export function DeliverablesView({ q, refetchAll, files = false }: { q: Query; refetchAll: () => void; files?: boolean }) {
   useGate();
-  const root = useRef<HTMLDivElement>(null);
+  const root = useRef<HTMLDivElement | null>(null);
+  // the pane's own width, not the window's: the board can sit in a split pane (Projects measures the same way)
+  const [width, measure] = useElementWidth();
+  const setRoot = useCallback(
+    (el: HTMLDivElement | null) => {
+      root.current = el;
+      measure(el);
+    },
+    [measure],
+  );
+  const wide = isWide(width);
+  const [picked, setPicked] = useState<string | null>(null);
   const outputs = experimental_useRpcQuery({ contract: rpcContract, method: "outputs", input: null });
   // the sidebar's project order and accents, for the tree's folders
   const order = experimental_useRpcQuery({ contract: rpcContract, method: "projectOrder", input: null });
@@ -472,15 +508,70 @@ export function DeliverablesView({ q, refetchAll, files = false }: { q: Query; r
   if (!q.data) return <ReadState q={q} what="the deliverables" />;
   const tab = deliverablesTab(q.data, outputs.data ?? [], view, sorted);
   const review = tab.review;
+  const filesState = { loaded: outputs.data !== undefined, error: outputs.error?.message ?? null };
+  const empty = <EmptyState title="Nothing to review" text="Leads deliver finished work here with proof (orch_deliver). You approve it or send it back." />;
+  if (!wide)
+    return (
+      <div ref={setRoot} data-deliverables-width={width}>
+        <div className="flex flex-col gap-4 pb-8" data-layout="column" style={{ maxWidth: 768, marginInline: "auto" }}>
+          <ReadState q={q} what="the deliverables" />
+          {review.length === 0 ? empty : review.map((r) => <DeliverableCard key={r.d.id} d={r.d} refetchAll={refetchAll} outputs={r.outputs} outputsAfter={refetchOutputs} />)}
+          <DeliverablesTree tab={tab} view={view} setView={setView} files={filesState} outputsAfter={refetchOutputs} />
+        </div>
+      </div>
+    );
+  // wide: the directory (in review on top, then the project folders) beside the picked deliverable
+  const shown = shownDeliverable(q.data, picked);
+  const shownOutputs = shown ? (fold(q.data, outputs.data ?? []).byDeliverable.get(shown.id) ?? []) : [];
   return (
-    <div ref={root} className="flex flex-col gap-4 pb-8">
-      <ReadState q={q} what="the deliverables" />
-      {review.length === 0 ? (
-        <EmptyState title="Nothing to review" text="Leads deliver finished work here with proof (orch_deliver). You approve it or send it back." />
-      ) : (
-        review.map((r) => <DeliverableCard key={r.d.id} d={r.d} refetchAll={refetchAll} outputs={r.outputs} outputsAfter={refetchOutputs} />)
-      )}
-      <DeliverablesTree tab={tab} view={view} setView={setView} files={{ loaded: outputs.data !== undefined, error: outputs.error?.message ?? null }} outputsAfter={refetchOutputs} />
+    <div ref={setRoot} data-deliverables-width={width}>
+      <div className="orch-dlv pb-8" data-layout="list-detail">
+        <ReadState q={q} what="the deliverables" />
+        <div className="orch-dlv__body">
+          <nav className="orch-dlv__list" aria-label="Deliverables">
+            <section aria-label="In review">
+              <h2 className="orch-dlv__h">In review · {review.length}</h2>
+              {review.length === 0 ? (
+                <p className="orch-muted m-0 text-sm">Nothing to review.</p>
+              ) : (
+                <ul className="orch-dlv__rows" role="list">
+                  {review.map(({ d }) => (
+                    <li key={d.id}>
+                      <button type="button" className="orch-dlv__row" data-review-row={d.id} aria-current={shown?.id === d.id || undefined} onClick={() => setPicked(d.id)}>
+                        <span className="orch-dlv__t">{d.title}</span>
+                        <span className="orch-dlv__m">
+                          {d.project ?? "No project"} · {d.lead} · {age(d.updatedAt, Date.now())} ago{d.rev > 1 ? ` · rev ${d.rev}` : ""}
+                        </span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+            <DeliverablesTree tab={tab} view={view} setView={setView} files={filesState} outputsAfter={refetchOutputs} pick={{ id: shown?.id ?? null, on: setPicked }} />
+          </nav>
+          <div className="orch-dlv__detail" data-detail={shown?.id ?? ""}>
+            {shown ? <DeliverableCard key={shown.id} d={shown} refetchAll={refetchAll} outputs={shownOutputs} outputsAfter={refetchOutputs} /> : empty}
+          </div>
+        </div>
+      </div>
+      <style href={styleHref("orch-dlv", dlvCss)} precedence="default">
+        {dlvCss}
+      </style>
     </div>
   );
 }
+
+// The wide tab, in the spirit of the Projects tab's list | detail: sizes 16/14/12, weights 400/600, selection a tint.
+const dlvCss = /* css */ `
+[data-orch] .orch-dlv__body { display: grid; grid-template-columns: minmax(340px, 420px) minmax(0, 1fr); gap: 24px; align-items: start; }
+[data-orch] .orch-dlv__list { display: flex; flex-direction: column; gap: 24px; min-width: 0; }
+[data-orch] .orch-dlv__h { margin: 0 0 8px; font-size: 16px; line-height: 24px; font-weight: 600; }
+[data-orch] .orch-dlv__rows { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; }
+[data-orch] .orch-dlv__row { display: grid; gap: 2px; width: 100%; padding: 8px; border: 0; border-radius: 6px; background: none; font: inherit; text-align: start; color: var(--orch-ink); cursor: pointer; }
+[data-orch] .orch-dlv__row:hover { background: var(--orch-wash); }
+[data-orch] .orch-dlv__row[aria-current] { background: light-dark(rgba(0, 0, 0, 0.07), rgba(255, 255, 255, 0.1)); }
+[data-orch] .orch-dlv__t { font-size: 14px; line-height: 20px; font-weight: 600; overflow-wrap: anywhere; }
+[data-orch] .orch-dlv__m { font-size: 12px; line-height: 16px; color: var(--orch-muted); overflow-wrap: anywhere; }
+[data-orch] .orch-dlv__detail { min-width: 0; }
+`;

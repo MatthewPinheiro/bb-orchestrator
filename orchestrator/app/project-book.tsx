@@ -5,7 +5,7 @@
 // shows once: a wait on it folds into its row (kit.ts prRows). Every line keeps its age and its source.
 // Decided, Done, the merges, the blockers' start and the pins are read for this project only (core/book.ts, pins.ts),
 // refreshed on the same change signal as the list, so the two sides never disagree.
-import { Fragment, useCallback, useContext, useLayoutEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
+import { Fragment, useCallback, useContext, useLayoutEffect, useRef, useState, type CSSProperties, type MouseEvent, type ReactNode } from "react";
 import type { z } from "zod";
 import { experimental_useRpcQuery, useBbNavigate, useRealtime } from "@get-bb/plugin-sdk/app";
 import { CHANGED_CHANNEL, WRITES, rpcContract, type NeedsYou, type ProjectBook as Book, type Projects, type pinBody } from "../contract.ts";
@@ -37,18 +37,19 @@ export const bookCss = /* css */ `
 [data-orch] .orch-cc .k-goal .k-side { display: flex; align-items: center; gap: 8px; flex: none; }
 [data-orch] .orch-cc .k-row a.k-ref, [data-orch] .orch-cc .k-row button.k-ref { flex: none; }
 [data-orch] .orch-cc .k-t > a.ref, [data-orch] .orch-cc .k-t > button.ref { font-weight: inherit; }
-[data-orch] .orch-cc .k-update { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 8px 16px; padding: 4px 8px; font-size: 14px; line-height: 20px; min-width: 0; }
-[data-orch] .orch-cc .k-update .k-lbl { font-weight: 600; }
+[data-orch] .orch-cc .k-update { display: flex; flex-direction: column; gap: 12px; padding: 4px 8px; font-size: 14px; line-height: 20px; min-width: 0; }
+[data-orch] .orch-cc .k-update .k-sec { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+[data-orch] .orch-cc .k-update .k-lbl { margin: 0; font-size: 12px; line-height: 16px; font-weight: 600; color: var(--orch-muted); }
 [data-orch] .orch-cc .k-update ul { margin: 0; padding-left: 20px; list-style: disc outside; display: flex; flex-direction: column; gap: 4px; }
-[data-orch] .orch-cc .k-update li { display: list-item; margin: 0; }
+[data-orch] .orch-cc .k-update li { display: list-item; margin: 0; list-style: disc outside; }
+[data-orch] .orch-cc .k-update li::marker { color: var(--orch-muted); }
 [data-orch] .orch-cc .k-update .k-clamp { overflow-wrap: anywhere; min-width: 0; }
-[data-orch] .orch-cc .k-update .k-clamp[data-clamped="true"] .k-txt { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+[data-orch] .orch-cc .k-update .k-clamp[data-clamped="true"] .k-txt { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: var(--k-lines, 2); overflow: hidden; }
 [data-orch] .orch-cc .k-update .k-clamp .k-more { margin-left: 0; font-size: 12px; line-height: 16px; }
 [data-orch] .orch-cc .k-update code { font-family: var(--font-mono, ui-monospace, monospace); font-size: 12px; padding: 0 4px; border-radius: 4px; background: var(--orch-subtle, rgba(127, 127, 127, 0.12)); }
-[data-orch] .orch-cc .k-update [data-empty-needs] { color: var(--orch-muted); }
-@container orchcc (max-width: 480px) {
-  [data-orch] .orch-cc .k-update { grid-template-columns: minmax(0, 1fr); gap: 4px; }
-}
+[data-orch] .orch-cc .k-update .k-needs { padding: 8px 12px; border-radius: 8px; background: color-mix(in srgb, var(--k-need) 8%, transparent); }
+[data-orch] .orch-cc .k-update .k-needs .k-lbl { color: var(--k-need); }
+[data-orch] .orch-cc .k-update [data-empty-needs] { font-size: 12px; line-height: 16px; color: var(--orch-muted); }
 @container orchcc (max-width: 760px) {
   [data-orch] .orch-cc .k-attn, [data-orch] .orch-cc .k-cols { grid-template-columns: minmax(0, 1fr); }
   [data-orch] .orch-cc .k-goal { flex-direction: column; gap: 8px; }
@@ -164,8 +165,8 @@ function MdText({ text }: { text: string }) {
   return <>{out}</>;
 }
 
-/** A field at most two lines tall, with "more" when the words run past them. */
-function Clamped({ text, ...data }: { text: string; [d: `data-${string}`]: string | undefined }) {
+/** A field at most `lines` lines tall (two by default), with "more" when the words run past them. */
+function Clamped({ text, lines = 2, ...data }: { text: string; lines?: number; [d: `data-${string}`]: string | undefined }) {
   const ref = useRef<HTMLSpanElement>(null);
   const [open, setOpen] = useState(false);
   const [over, setOver] = useState(false);
@@ -180,7 +181,7 @@ function Clamped({ text, ...data }: { text: string; [d: `data-${string}`]: strin
     return () => ro.disconnect();
   }, [text]);
   return (
-    <div className="k-clamp" data-clamped={open ? "false" : "true"} {...data}>
+    <div className="k-clamp" data-clamped={open ? "false" : "true"} style={{ "--k-lines": lines } as CSSProperties} {...data}>
       <span className="k-txt" ref={ref}>
         <MdText text={text} />
       </span>
@@ -196,34 +197,40 @@ function Clamped({ text, ...data }: { text: string; [d: `data-${string}`]: strin
 /** Needs that says nothing: empty, "nothing", "none" or "n/a", drawn muted. */
 const saysNothing = (s: string) => /^\s*(?:nothing|none|n\/a|-)?\s*[.!]?\s*$/i.test(s);
 
-/** The Lead status card: the lead's last update (what it worked on, where it is, what it needs). None until the first. */
+/** The Lead status card: the lead's last update (what it worked on, where it is, what it needs). None until the first.
+ *  Muted headings over the content: a bulleted "Working on", one line for "Where it's at", and Needs as a callout,
+ *  or a quiet "Needs nothing" when it says nothing. */
 function LeadUpdate({ p, now }: { p: Project; now: number }) {
   const u = p.status?.update;
   if (!u) return null;
   return (
     <SectionCard name="lead-update" title="Lead status" sub={`updated ${age(u.updateAt, now)} ago`}>
       <div className="k-update" data-lead-update="">
-        <div className="k-lbl">Working on</div>
-        <ul>
-          {u.workingOn.map((b, i) => (
-            <li key={i}>
-              <Clamped text={b} data-update-bullet="" />
-            </li>
-          ))}
-        </ul>
+        <section className="k-sec" data-update-sec="working">
+          <h4 className="k-lbl">Working on</h4>
+          <ul>
+            {u.workingOn.map((b, i) => (
+              <li key={i}>
+                <Clamped text={b} data-update-bullet="" />
+              </li>
+            ))}
+          </ul>
+        </section>
         {u.at ? (
-          <>
-            <div className="k-lbl">Where it's at</div>
-            <Clamped text={u.at} data-update-at="" />
-          </>
+          <section className="k-sec" data-update-sec="at">
+            <h4 className="k-lbl">Where it's at</h4>
+            <Clamped text={u.at} lines={1} data-update-at="" />
+          </section>
         ) : null}
-        <div className="k-lbl">Needs</div>
         {saysNothing(u.needs) ? (
           <div data-update-needs="" data-empty-needs="">
-            {u.needs.trim() || "Nothing"}
+            Needs nothing
           </div>
         ) : (
-          <Clamped text={u.needs} data-update-needs="" />
+          <section className="k-sec k-needs" data-update-sec="needs" role="note">
+            <h4 className="k-lbl">Needs</h4>
+            <Clamped text={u.needs} data-update-needs="" />
+          </section>
         )}
       </div>
     </SectionCard>
@@ -397,6 +404,24 @@ export function ProjectBook({
       ))}
     </SectionCard>
   );
+  // open PRs whose threads were resolved because someone else owns them now (orch_resolve handed_off); hidden when none
+  const handed = p.handedOff ?? [];
+  const handedCard = handed.length ? (
+    <SectionCard name="handed-off" title="Handed off" count={handed.length}>
+      {handed.map((h) => (
+        <div key={`${h.pr}|${h.at}`} className="k-row" data-handed-off={h.pr}>
+          <span className="k-t" title={[h.pr, `${h.owner} has it`, h.note ?? "", `from ${h.thread}`].filter(Boolean).join("\n")}>
+            <OpenRef open={{ url: h.pr }} title={h.pr} data="pr" className="k-ref">
+              #{h.pr.match(/\/pull\/(\d+)/)?.[1] ?? "PR"}
+            </OpenRef>
+            <span> {h.owner}</span>
+            {h.note ? <span className="q"> · {h.note}</span> : null}
+          </span>
+          <Age spec={ageSpec(h.at, now, "live", Infinity)} />
+        </div>
+      ))}
+    </SectionCard>
+  ) : null;
   const doneRows = book?.done ?? [];
   const decidedRows = book?.decided ?? [];
   const recordRows = record === "done" ? doneRows : decidedRows;
@@ -480,7 +505,12 @@ export function ProjectBook({
     </SectionCard>
   );
 
-  const sections: Record<DetailSection, ReactNode> = { needs: needCard ?? clear, blocked: blockedCard, now: nowCard, waits: waitsCard, prs: prCard, record: recordCard };
+  const sections: Record<DetailSection, ReactNode> = { needs: needCard ?? clear, blocked: blockedCard, now: nowCard, waits: waitsCard, prs: (
+      <>
+        {prCard}
+        {handedCard}
+      </>
+    ), record: recordCard };
   const place = (keys: readonly DetailSection[]) => keys.map((k) => <Fragment key={k}>{sections[k]}</Fragment>);
   return (
     <div className="k-detail" data-book={p.slug}>

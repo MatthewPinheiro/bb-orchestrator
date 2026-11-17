@@ -1,6 +1,7 @@
 // affectUI components/badge-clean.tsx @ f002d8a58cbb7e19cff7a8b4c8982b420b9e8c7e, MIT, (c) affectUI
 "use client";
 
+import { styleHref } from "../style-href.ts";
 import { createElement, type ComponentPropsWithRef, type ReactNode } from "react";
 
 /*
@@ -45,7 +46,7 @@ export function Badge({ tone = "neutral", size = "sm", dot, live, icon, count, m
   return (
     <>
       {/* React 19 hoists this into <head> once, no matter how many badges render */}
-      <style href="ui-badge-clean" precedence="default">
+      <style href={styleHref("ui-badge-clean", css)} precedence="default">
         {css}
       </style>
       <span

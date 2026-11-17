@@ -3,6 +3,7 @@
 // (app/store.ts). The server publishes CHANGED_CHANNEL on every change, and the reads refetch on it: Needs you and the
 // Board always (the badge, and the Board's agents give Needs you its sprites), Projects only while shown
 // (its agents read asks bb about every agent's thread).
+import { styleHref } from "./app/style-href.ts";
 import { VisualBlocksStyle } from "./app/visual-blocks.tsx";
 import { CloudView } from "./cloud/app.tsx";
 import { GameView } from "./gameboy/app.tsx";
@@ -314,7 +315,7 @@ function OrchestratorPanel({ subPath }: PluginNavPanelProps) {
     <IdentityContext.Provider value={config.data ?? DEFAULT_IDENTITY}>
     <div ref={root} data-orch="" data-view={findPane(layout, layout.focus)?.view} onPointerDownCapture={pointerPressed} className="flex h-full min-h-0 flex-1 flex-col">
       <Look />
-      <style href="orch-panes" precedence="default">
+      <style href={styleHref("orch-panes", paneCss)} precedence="default">
         {paneCss}
       </style>
       <VisualBlocksStyle />
@@ -332,7 +333,7 @@ function OrchestratorPanel({ subPath }: PluginNavPanelProps) {
           compact={compact}
           render={render}
           fill={(v) => v === "chat" || v === "cloud" || v === "gameboy"}
-          wide={(v) => v === "projects"}
+          wide={(v) => v === "projects" || v === "deliverables" || v === "open-prs"}
           onView={(id, v) => {
             setLayout((l) => setView(l, id, v));
             follow(v);

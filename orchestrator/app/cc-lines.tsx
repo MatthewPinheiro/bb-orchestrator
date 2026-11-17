@@ -3,6 +3,7 @@
 // green (moving), red (blocked), amber (a wait older than 4 h). Every line starts on one left edge; dots hang in a 16 px
 // gutter. On a narrow panel (a phone) every line wraps and nothing is cut; on a wide one a shortened line carries its
 // full text as a title.
+import { styleHref } from "./style-href.ts";
 import type { SummaryWait } from "../contract.ts";
 import { waitLine } from "./command-center.ts";
 import { RefText } from "./ref-text.tsx";
@@ -129,7 +130,7 @@ export function AllWaits({ waits, now, cos }: { waits: SummaryWait[]; now: numbe
   if (!waits.length) return null;
   return (
     <section data-all-waits={waits.length} className={cx("orch-cc", "flex flex-col gap-1")}>
-      <style href="orch-cc" precedence="default">
+      <style href={styleHref("orch-cc", ccCss)} precedence="default">
         {ccCss}
       </style>
       {waits.map((w, i) => (

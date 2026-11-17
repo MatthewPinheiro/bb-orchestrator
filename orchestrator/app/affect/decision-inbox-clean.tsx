@@ -2,6 +2,7 @@
 // Changed for the orchestrator (marked "orchestrator:"): css, AlertIcon and DoneIcon are exported; DecisionInbox itself is unused.
 "use client";
 
+import { styleHref } from "../style-href.ts";
 import { useState } from "react";
 
 /*
@@ -59,7 +60,7 @@ export function DecisionInbox({ decisions, onDecide, className }: DecisionInboxP
 
   return (
     <>
-      <style href="ui-decision-inbox-clean" precedence="default">
+      <style href={styleHref("ui-decision-inbox-clean", css)} precedence="default">
         {css}
       </style>
       <section className={["ui-dic", className].filter(Boolean).join(" ")} data-clear={open === 0 || undefined}>

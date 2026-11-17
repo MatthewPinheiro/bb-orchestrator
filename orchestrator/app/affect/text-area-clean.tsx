@@ -2,6 +2,7 @@
 // Changed for the orchestrator: the height fit also reruns when the placeholder changes (an empty field is as tall as its placeholder).
 "use client";
 
+import { styleHref } from "../style-href.ts";
 import { useEffect, useId, useLayoutEffect, useRef, useState, type ComponentPropsWithRef, type ReactNode } from "react";
 
 /*
@@ -159,7 +160,7 @@ export function TextArea({
       data-expandable={expandable || undefined}
     >
       {/* React 19 hoists this into <head> once, no matter how many fields render */}
-      <style href="ui-text-area-clean" precedence="default">
+      <style href={styleHref("ui-text-area-clean", css)} precedence="default">
         {css}
       </style>
       {label != null && (

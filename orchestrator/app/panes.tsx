@@ -20,6 +20,22 @@ export function useWidth(ref: RefObject<HTMLElement | null>): number {
   return w;
 }
 
+/**
+ * The tab's own width. Observed through a callback ref: the tab first renders its loading state without this element,
+ * so an effect keyed on a ref object would never see it, and narrow-panel items (Ask for status, Start lead in ⋯) never showed.
+ */
+export function useElementWidth(): [number, (el: HTMLElement | null) => void] {
+  const [el, setEl] = useState<HTMLElement | null>(null);
+  const [w, setW] = useState(0);
+  useEffect(() => {
+    if (!el) return;
+    const ro = new ResizeObserver(([e]) => setW(Math.round(e!.contentRect.width)));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [el]);
+  return [w, setEl];
+}
+
 type Props = {
   layout: Layout;
   views: ViewDef[];

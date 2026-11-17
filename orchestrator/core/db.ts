@@ -336,6 +336,19 @@ export const MIGRATIONS: string[] = [
      unpinned_at INTEGER
    );
    CREATE INDEX project_pins_live ON project_pins (project, unpinned_at, position)`,
+  // 1.10.0: a thread resolved while its PR stays open because someone else now owns it (orch_resolve handed_off)
+  `CREATE TABLE handed_off_prs (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     project TEXT,
+     thread_address TEXT NOT NULL,
+     thread_id TEXT NOT NULL,
+     pr TEXT NOT NULL,
+     owner TEXT NOT NULL,
+     note TEXT,
+     by_address TEXT NOT NULL,
+     at INTEGER NOT NULL
+   );
+   CREATE INDEX handed_off_prs_project ON handed_off_prs (project, at)`,
 ];
 
 export function migrate(db: Db): void {

@@ -1,6 +1,7 @@
 // affectUI components/card-clean.tsx @ f002d8a58cbb7e19cff7a8b4c8982b420b9e8c7e, MIT, (c) affectUI
 "use client";
 
+import { styleHref } from "../style-href.ts";
 import type { ComponentPropsWithRef, ElementType, ReactNode } from "react";
 
 /*
@@ -30,7 +31,7 @@ export function Card({ as = "div", interactive, selected, className, children, .
   return (
     <>
       {/* React 19 hoists this into <head> once, no matter how many cards render */}
-      <style href="ui-card-clean" precedence="default">
+      <style href={styleHref("ui-card-clean", css)} precedence="default">
         {css}
       </style>
       <Tag

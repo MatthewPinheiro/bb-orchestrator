@@ -1,6 +1,7 @@
 // An agent's Pokémon (mons.ts): the animated sprite, or the still one under prefers-reduced-motion (picked by the
 // browser through <picture>, so no JS reads the setting). A fixed box from the first paint, so a sprite that loads late
 // moves nothing (Needs you arms cards by position). An unknown mon or an image that fails falls back to the role avatar.
+import { styleHref } from "./style-href.ts";
 import { useState, type CSSProperties } from "react";
 import { isShiny, monByName, monSprite } from "../mons.ts";
 import { Avatar, type AvatarSize } from "./affect/avatar-clean.tsx";
@@ -34,7 +35,7 @@ export function MonSprite({ mon, address, size = 32, boost = true }: { mon: stri
 
   return (
     <span className="orch-mon" style={style} title={label} data-mon={m?.name ?? ""}>
-      <style href="orch-mon" precedence="default">
+      <style href={styleHref("orch-mon", MON_CSS)} precedence="default">
         {MON_CSS}
       </style>
       {m && moving && still && failed !== moving ? (

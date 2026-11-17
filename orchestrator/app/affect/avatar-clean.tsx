@@ -1,6 +1,7 @@
 // affectUI components/avatar-clean.tsx @ f002d8a58cbb7e19cff7a8b4c8982b420b9e8c7e, MIT, (c) affectUI
 "use client";
 
+import { styleHref } from "../style-href.ts";
 import {
   Children,
   cloneElement,
@@ -73,7 +74,7 @@ export function Avatar({
   return (
     <>
       {/* React 19 hoists this into <head> once, no matter how many avatars render */}
-      <style href="ui-avatar-clean" precedence="default">
+      <style href={styleHref("ui-avatar-clean", css)} precedence="default">
         {css}
       </style>
       <span
@@ -136,7 +137,7 @@ export function AvatarGroup({ max = 4, size = 32, total, className, children, ..
 
   return (
     <>
-      <style href="ui-avatar-clean" precedence="default">
+      <style href={styleHref("ui-avatar-clean", css)} precedence="default">
         {css}
       </style>
       <div role="group" className={["ui-avtc__group", className].filter(Boolean).join(" ")} data-size={scale} {...rest}>

@@ -1,6 +1,7 @@
 // affectUI components/text-field-clean.tsx @ f002d8a58cbb7e19cff7a8b4c8982b420b9e8c7e, MIT, (c) affectUI
 "use client";
 
+import { styleHref } from "../style-href.ts";
 import { useEffect, useId, useRef, useState, type ComponentPropsWithRef, type ReactNode } from "react";
 
 /*
@@ -131,7 +132,7 @@ export function TextField({
       data-readonly={readOnly || undefined}
     >
       {/* React 19 hoists this into <head> once, no matter how many fields render */}
-      <style href="ui-text-field-clean" precedence="default">
+      <style href={styleHref("ui-text-field-clean", css)} precedence="default">
         {css}
       </style>
       {label != null && (

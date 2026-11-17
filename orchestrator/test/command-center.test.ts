@@ -5,7 +5,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Projects, SummaryWait } from "../contract.ts";
-import { attentionOrder, directShown, directState, followUpOf, isQuiet, leadHead, matches, outOfDateLine, pickWaits, quietWords, seenUpTo, stateOf, threadSprites, waitLine } from "../app/command-center.ts";
+import { attentionOrder, chatOrder, chatPreview, directShown, directState, followUpOf, isQuiet, leadHead, matches, outOfDateLine, pickWaits, quietWords, seenUpTo, stateOf, threadSprites, waitLine } from "../app/command-center.ts";
 import type { Lane } from "../app/lanes.ts";
 
 const NOW = Date.parse("2026-11-16T12:00:00Z");
@@ -149,4 +149,20 @@ test("a quiet row with a status still names the latest finished thing and its ag
   const odd = { ...done, summary: { ...done.summary!, statusOutOfDate: true } };
   assert.equal(quietLine(odd, NOW), "step 1 of 1: Build · Shipped the export · 2h ago · status out of date: asked the lead to refresh");
   assert.equal(quietLine(project("n"), NOW), "idle", "no status, nothing finished, no idle time");
+});
+
+// The chat log (1.10.0, the owner: "this back and forth with the lead direct needs a way to show the chatlog elsewhere or
+// better"): a conversation reads top to bottom with the newest by the input, never cut; the collapsed line says what
+// was last said, and the dot only when the lead's reply is unread.
+test("the chat reads oldest first with every word, and the collapsed line shows the last exchange, dot only when unread", () => {
+  const long = "## Plan\n\n- first a long line that the old row cut with an ellipsis, " + "word ".repeat(80) + "\n- second";
+  const a = msg({ id: "i-a", text: "Ship it?", at: NOW - 3 * H, state: "closed", outcome: "done", note: long, answeredAt: NOW - 2 * H });
+  const b = msg({ id: "i-b", text: "And the docs?", at: NOW - H, followUp: "i-a" });
+  const order = chatOrder([b, a, b]);
+  assert.deepEqual(order.map((m) => m.id), ["i-a", "i-b"], "oldest at the top, each message once");
+  assert.equal(order[0]!.note, long, "the lead's reply is whole: no ellipsis, the markdown kept");
+  assert.deepEqual(chatPreview({ messages: [b, a], unread: false }), { you: "And the docs?", lead: null, unread: false });
+  const answered = { ...b, state: "closed", outcome: "done", note: "Docs  are\nin", answeredAt: NOW, unread: true };
+  assert.deepEqual(chatPreview({ messages: [answered, a], unread: true }), { you: "And the docs?", lead: "Docs are in", unread: true });
+  assert.equal(chatPreview(null), null);
 });

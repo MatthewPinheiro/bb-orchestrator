@@ -2,6 +2,7 @@
 // Changed for the orchestrator (marked "orchestrator:"): Array.from over two NodeLists; DropdownMenuItem.data spread on the row.
 "use client";
 
+import { styleHref } from "../style-href.ts";
 import {
   createElement,
   Fragment,
@@ -219,7 +220,7 @@ export function DropdownMenu({
   return (
     <span ref={anchor} className={["ui-dmc", className].filter(Boolean).join(" ")} onKeyDown={onKeyDown} onBlur={onBlur}>
       {/* React 19 hoists this into <head> once, no matter how many menus render */}
-      <style href="ui-dropdown-menu-clean" precedence="default">
+      <style href={styleHref("ui-dropdown-menu-clean", css)} precedence="default">
         {css}
       </style>
       {trigger({ open, toggle, triggerProps })}

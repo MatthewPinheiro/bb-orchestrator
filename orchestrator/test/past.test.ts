@@ -10,7 +10,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Deliverables, Outputs } from "../contract.ts";
-import { ALL_PROJECTS, FILTERS, START, deliverablesTab, flatten, fold, folderKeys, openByDefault, treeKey, type Folder, type ProjectNode, type View } from "../app/past.ts";
+import { ALL_PROJECTS, FILTERS, START, deliverablesTab, flatten, fold, folderKeys, openByDefault, shownDeliverable, treeKey, type Folder, type ProjectNode, type View } from "../app/past.ts";
 import { RENAMED_VIEWS, panes, parse } from "../app/layout.ts";
 import { manualSectionOrder, sidebarOrder } from "../core/project-order.ts";
 
@@ -232,3 +232,18 @@ test("a saved pane on the old Outputs tab opens Deliverables instead of throwing
   assert.equal(RENAMED_VIEWS.agents, "projects", "the earlier rename still holds");
 });
 
+
+test("wide Deliverables: what waits for the owner shows first; a pick stays while it exists; nothing to show is null", () => {
+  const old = del({ id: "v-old", state: "approved", updatedAt: 100 });
+  const newer = del({ id: "v-new", state: "changes", updatedAt: 300 });
+  const waiting = del({ id: "v-wait", state: "review", updatedAt: 200 });
+  // in review beats a newer past one: the owner's next action is what the detail opens on
+  assert.equal(shownDeliverable([old, newer, waiting], null)?.id, "v-wait");
+  // nothing in review: the newest
+  assert.equal(shownDeliverable([old, newer], null)?.id, "v-new");
+  // the owner's pick holds, even after it leaves review (approving it doesn't jump the detail away)
+  assert.equal(shownDeliverable([old, newer, waiting], "v-old")?.id, "v-old");
+  // a pick that's gone falls back instead of showing nothing
+  assert.equal(shownDeliverable([old, waiting], "v-gone")?.id, "v-wait");
+  assert.equal(shownDeliverable([], null), null);
+});

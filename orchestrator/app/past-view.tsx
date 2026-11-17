@@ -4,6 +4,7 @@
 // Files folder with the project's outputs that never became proof. The rows and their order come from past.ts.
 // Expanding is remembered per viewer (localStorage) when nothing narrows the tree; under a filter or search the folders on
 // the way to a match open by themselves, and toggles last until the filter changes.
+import { styleHref } from "./style-href.ts";
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { Markdown, useBbNavigate } from "@get-bb/plugin-sdk/app";
 import type { Deliverables } from "../contract.ts";
@@ -22,7 +23,7 @@ import { Btn, Muted, PageError, when } from "./ui.tsx";
 
 type Deliverable = Deliverables[number];
 
-const STATE_WORD: Record<Deliverable["state"], string> = { review: "in review", approved: "approved", changes: "changes requested", withdrawn: "withdrawn" };
+export const STATE_WORD: Record<Deliverable["state"], string> = { review: "in review", approved: "approved", changes: "changes requested", withdrawn: "withdrawn" };
 const PROOF_ICON = { image: "image", video: "video", text: "report", doc: "doc", pr: "link", link: "link" } as const;
 const OPEN_KEY = "orchestrator.deliverables.tree.v1";
 const OPEN_MAX = 1500;
@@ -250,7 +251,8 @@ const treeCss = /* css */ `
 [data-orch] .orch-tree2__all { display: flex; gap: 4px; margin-inline-start: -10px; }
 [data-orch] .orch-tree2 { display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; }
 [data-orch] .orch-tree2__row { display: flex; align-items: flex-start; gap: 8px; min-height: 36px; padding: 8px 8px 8px 0; border-radius: 6px; outline: none; }
-[data-orch] .orch-tree2__row[aria-expanded] { cursor: pointer; }
+[data-orch] .orch-tree2__row[aria-expanded], [data-orch] .orch-tree2__row[aria-selected] { cursor: pointer; }
+[data-orch] .orch-tree2__row[data-picked], [data-orch] .orch-tree2__row[data-picked]:hover { background: light-dark(rgba(0, 0, 0, 0.07), rgba(255, 255, 255, 0.1)); }
 [data-orch] .orch-tree2__row:hover { background: var(--orch-wash); }
 [data-orch] .orch-tree2__row:focus-visible { box-shadow: inset 0 0 0 2px var(--orch-accent, #4f7cff); }
 [data-orch] .orch-tree2__chev { flex: none; width: 12px; height: 12px; margin-top: 4px; color: var(--orch-muted); transition: transform 160ms ease; }
@@ -284,14 +286,17 @@ const treeCss = /* css */ `
 }
 `;
 
-/** The filters, the search, Expand all / Collapse all, and the tree. `files`: the outputs read's state. */
-export function DeliverablesTree({ tab, view, setView, files, outputsAfter }: { tab: Tab; view: View; setView: (f: (v: View) => View) => void; files: { loaded: boolean; error: string | null }; outputsAfter: () => void }) {
+/**
+ * The filters, the search, Expand all / Collapse all, and the tree. `files`: the outputs read's state. `pick` (the wide
+ * tab's master-detail): a deliverable's row selects it for the detail beside the list instead of opening in place.
+ */
+export function DeliverablesTree({ tab, view, setView, files, outputsAfter, pick }: { tab: Tab; view: View; setView: (f: (v: View) => View) => void; files: { loaded: boolean; error: string | null }; outputsAfter: () => void; pick?: { id: string | null; on: (id: string) => void } }) {
   const narrow = narrowed(view);
   const [stored, setStored] = useState<Record<string, boolean>>(loadOpen);
   const [session, setSession] = useState<Record<string, boolean>>({});
   const viewKey = JSON.stringify(view);
   useEffect(() => setSession({}), [viewKey]); // a new filter or search opens its own matches again
-  const isOpen = (n: Folder) => (narrow ? session : stored)[n.key] ?? openByDefault(n, narrow);
+  const isOpen = (n: Folder) => (pick && n.t === "deliverable" ? false : ((narrow ? session : stored)[n.key] ?? openByDefault(n, narrow)));
   const rows = flatten(tab.tree, isOpen);
   const setOpen = (patch: Record<string, boolean>) => {
     if (narrow) setSession((m) => ({ ...m, ...patch }));
@@ -306,7 +311,7 @@ export function DeliverablesTree({ tab, view, setView, files, outputsAfter }: { 
         return next;
       });
   };
-  const toggle = (r: Row) => setOpen({ [r.node.key]: !r.open });
+  const toggle = (r: Row) => (pick && r.node.t === "deliverable" ? pick.on(r.node.d.id) : setOpen({ [r.node.key]: !r.open }));
 
   // a link elsewhere asked for a deliverable (reveal.ts): every filter off, its project folder open, then it scrolls
   const want = useRef<string | null>(null);
@@ -326,6 +331,7 @@ export function DeliverablesTree({ tab, view, setView, files, outputsAfter }: { 
     const folder = id ? tab.tree.find((p) => p.children.some((c) => c.key === `d:${id}`)) : undefined;
     if (!folder) return; // not loaded yet: kept until the tree has it
     want.current = null;
+    if (id && pick) pick.on(id);
     setView(() => START);
     setStored((m) => {
       const next = { ...m, [folder.key]: true };
@@ -425,19 +431,21 @@ export function DeliverablesTree({ tab, view, setView, files, outputsAfter }: { 
       ) : (
         <div ref={treeRef} role="tree" aria-label={heading} className="orch-tree2" onKeyDown={onKeyDown}>
           {rows.map((r) => (
-            <TreeItem key={r.node.key} r={r} focusable={r.node.key === focusKey} onFocus={() => setFocus(r.node.key)} onToggle={() => toggle(r)} after={outputsAfter} />
+            <TreeItem key={r.node.key} r={r} focusable={r.node.key === focusKey} onFocus={() => setFocus(r.node.key)} onToggle={() => toggle(r)} after={outputsAfter} picked={pick ? r.node.t === "deliverable" && r.node.d.id === pick.id : undefined} />
           ))}
         </div>
       )}
-      <style href="orch-past" precedence="default">
+      <style href={styleHref("orch-past", treeCss)} precedence="default">
         {treeCss}
       </style>
     </section>
   );
 }
 
-function TreeItem({ r, focusable, onFocus, onToggle, after }: { r: Row; focusable: boolean; onFocus: () => void; onToggle: () => void; after: () => void }) {
-  const folder = isFolder(r.node);
+/** `picked`: set in the wide tab only, where a deliverable's row selects it (its detail sits beside the list). */
+function TreeItem({ r, focusable, onFocus, onToggle, after, picked }: { r: Row; focusable: boolean; onFocus: () => void; onToggle: () => void; after: () => void; picked?: boolean }) {
+  const pickRow = picked !== undefined && r.node.t === "deliverable";
+  const folder = isFolder(r.node) && !pickRow;
   return (
     <>
       <div
@@ -447,19 +455,21 @@ function TreeItem({ r, focusable, onFocus, onToggle, after }: { r: Row; focusabl
         {...dataOf(r.node)}
         aria-level={r.level + 1}
         aria-expanded={folder ? !!r.open : undefined}
+        aria-selected={pickRow ? picked : undefined}
+        data-picked={pickRow && picked ? "" : undefined}
         tabIndex={focusable ? 0 : -1}
         className="orch-tree2__row"
         style={{ paddingInlineStart: 8 + r.level * 16 }}
         onFocus={(e) => e.target === e.currentTarget && onFocus()}
         onClick={(e) => {
           // a folder opens or closes on a click anywhere on its row, except on a control inside it
-          if (folder && !(e.target as HTMLElement).closest("a,button,input,select,textarea,summary")) onToggle();
+          if ((folder || pickRow) && !(e.target as HTMLElement).closest("a,button,input,select,textarea,summary")) onToggle();
         }}
       >
-        <Chevron open={r.open} />
+        <Chevron open={pickRow ? null : r.open} />
         {rowBody(r, after)}
       </div>
-      {r.node.t === "deliverable" && r.open ? <DeliverableDetail d={r.node.d} level={r.level} /> : null}
+      {r.node.t === "deliverable" && r.open && !pickRow ? <DeliverableDetail d={r.node.d} level={r.level} /> : null}
     </>
   );
 }

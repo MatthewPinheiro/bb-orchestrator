@@ -3,6 +3,7 @@
 // Summary card: one card with hairline shadows, a 44px heading row (icon, title, a quiet note on the right), rows under
 // 0.5px lines, a small tinted mark, quiet gray text. Statuses are affectUI Badges in its six tones. The diagram's boxes
 // are drawn as the same cards in miniature.
+import { styleHref } from "./style-href.ts";
 import type { ReactNode } from "react";
 import type { Block, Point } from "../blocks.ts";
 import { Badge } from "./affect/badge-clean.tsx";
@@ -301,10 +302,10 @@ export function Diagram({ b }: { b: B<"diagram"> }) {
 export function VisualBlocksStyle() {
   return (
     <>
-      <style href="ui-change-summary-clean" precedence="default">
+      <style href={styleHref("ui-change-summary-clean", changeSummaryCss)} precedence="default">
         {changeSummaryCss}
       </style>
-      <style href="orch-visual-blocks" precedence="default">
+      <style href={styleHref("orch-visual-blocks", visualCss)} precedence="default">
         {visualCss}
       </style>
     </>

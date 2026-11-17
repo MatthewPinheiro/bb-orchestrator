@@ -181,6 +181,21 @@ export function directShown(d: Project["direct"], now: number): DirectMessage[] 
   return [...fresh, ...rest.slice(0, Math.max(0, DIRECT_ROW - fresh.length))].sort((a, b) => b.at - a.at);
 }
 
+/** The chat log (1.10.0): every message once, oldest first, so the newest sits by the input. */
+export function chatOrder(ms: readonly DirectMessage[]): DirectMessage[] {
+  const byId = new Map<string, DirectMessage>();
+  for (const m of ms) byId.set(m.id, m);
+  return [...byId.values()].sort((a, b) => a.at - b.at || (a.id < b.id ? -1 : 1));
+}
+
+/** The collapsed chat's one line: the last exchange (the owner's latest message and the lead's note on it), and the dot. */
+export function chatPreview(d: Project["direct"]): { you: string; lead: string | null; unread: boolean } | null {
+  const last = d?.messages.reduce<DirectMessage | null>((x, m) => (!x || m.at > x.at ? m : x), null);
+  if (!d || !last) return null;
+  const line = (s: string) => s.replace(/\s+/g, " ").trim();
+  return { you: line(last.text), lead: last.note ? line(last.note) : null, unread: d.unread };
+}
+
 /** The newest answer the row shows unread: opening the thread marks answers up to it seen, and no further. */
 export function seenUpTo(d: Project["direct"]): number | null {
   const at = (d?.messages ?? []).filter((m) => m.unread && m.answeredAt !== null).map((m) => m.answeredAt!);

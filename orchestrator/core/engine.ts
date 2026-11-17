@@ -277,6 +277,41 @@ function parseBlocks(blocks: unknown): Block[] {
 }
 
 /** A deliverable's points, checked here too; none given keeps the revision in the old layout. */
+/** An owner.message item as the page shows it. `unread`: answers after the owner last opened the line, by item id. */
+function directMessageOf(it: Item, unread: Map<string, number>): DirectLine["messages"][number] {
+  return {
+    id: it.id, text: it.body, at: it.createdAt, followUp: it.ref, state: it.state,
+    outcome: it.state === "closed" ? it.outcome : null, note: it.state === "closed" ? it.note : null,
+    // an unread answer's time is its event's, the exact value the seen cursor is compared with (closed_at is
+    // stamped a moment earlier on a live clock, so a cursor capped at it would never pass the answer)
+    answeredAt: it.state === "closed" ? (unread.get(it.id) ?? it.closedAt) : null,
+    unread: it.state === "closed" && unread.has(it.id),
+  };
+}
+
+/** orch_resolve's handed_off: the open PR's link, who has it now, and an optional note. */
+export interface HandedOffIn {
+  pr: string;
+  owner: string;
+  note?: string | null;
+}
+export interface HandedOff {
+  pr: string;
+  owner: string;
+  note: string | null;
+  at: number;
+  thread: string;
+}
+function handedOffOf(h: HandedOffIn): { pr: string; owner: string; note: string | null } {
+  const pr = h.pr.trim();
+  if (!/^https:\/\/\S+\/pull\/\d+\/?$/.test(pr)) throw new EngineError("invalid", "handed_off.pr is the open PR's https link (…/pull/<n>)");
+  const owner = h.owner.trim();
+  if (!owner || owner.length > 40 || /\n/.test(owner)) throw new EngineError("invalid", "handed_off.owner is who has the PR now, one line of at most 40 characters");
+  const note = h.note?.trim() || null;
+  if (note && note.length > 200) throw new EngineError("invalid", "handed_off.note is at most 200 characters");
+  return { pr, owner, note };
+}
+
 function parsePoints(points: unknown): { points?: Point[] } {
   if (points === undefined || points === null) return {};
   const r = pointsSchema.safeParse(points);
@@ -1533,19 +1568,24 @@ export class Engine {
       for (const id of unread.keys()) if (!items.some((it) => it.id === id)) { const it = this.item(id); if (it) items.push(it); }
       if (!items.length) continue;
       items.sort((x, y) => y.createdAt - x.createdAt);
-      out.set(slug, {
-        messages: items.map((it) => ({
-          id: it.id, text: it.body, at: it.createdAt, followUp: it.ref, state: it.state,
-          outcome: it.state === "closed" ? it.outcome : null, note: it.state === "closed" ? it.note : null,
-          // an unread answer's time is its event's, the exact value the seen cursor is compared with (closed_at is
-          // stamped a moment earlier on a live clock, so a cursor capped at it would never pass the answer)
-          answeredAt: it.state === "closed" ? (unread.get(it.id) ?? it.closedAt) : null,
-          unread: it.state === "closed" && unread.has(it.id),
-        })),
-        unread: unread.size > 0,
-      });
+      out.set(slug, { messages: items.map((it) => directMessageOf(it, unread)), unread: unread.size > 0 });
     }
     return out;
+  }
+
+  /**
+   * One project's direct messages, newest first, for the chat log (1.10.0): read only when the owner opens it, so the
+   * Projects read stays at DIRECT_SHOWN per row. `before`: only messages created before it (the "Older" cursor).
+   */
+  directHistory(slug: string, before: number | null, limit: number): { messages: DirectLine["messages"]; more: boolean } {
+    if (!this.project(slug)) throw new EngineError("not_found", `no project ${slug}`);
+    const n = Math.max(1, Math.min(100, Math.floor(limit)));
+    const rows = this.db
+      .prepare(`SELECT * FROM items WHERE recipient = ? AND kind = 'owner.message' AND created_at < ? ORDER BY created_at DESC, id DESC LIMIT ?`)
+      .all(`lead:${slug}`, before ?? Number.MAX_SAFE_INTEGER, n + 1) as ItemRow[];
+    const answers = this.db.prepare(`SELECT ref, MAX(at) AS at FROM events WHERE project = ? AND at > ? AND kind = 'direct-answer' GROUP BY ref`);
+    const unread = new Map((answers.all(slug, this.directSeen(slug)) as { ref: string; at: number }[]).map((r) => [r.ref, r.at]));
+    return { messages: rows.slice(0, n).map(toItem).map((it) => directMessageOf(it, unread)), more: rows.length > n };
   }
 
   /** When the owner last looked at a project's direct thread (opened its composer): answers after it are new. */
@@ -3266,10 +3306,11 @@ export class Engine {
   /**
    * A lead resolves one of its threads: allowed once its worktree is clean (`worktree`: nothing uncommitted, its branch
    * in its base branch or pushed), and its PR is merged, its branch is in its base branch (a local merge, no PR), its
-   * PR was closed without merging and it has reported, or the owner has read the thread since its last report. The role is retired; the caller then archives the thread
+   * PR was closed without merging and it has reported, its open PR is handed off to someone else (`handedOff`, recorded
+   * for the project page), or the owner has read the thread since its last report. The role is retired; the caller then archives the thread
    * and its handoff predecessors (requested 2026-11-14: resolve = retire + archive).
    */
-  resolve(lead: Agent, to: string, facts: { prMerged: boolean; prClosed?: boolean; lastReadAt: number | null; worktree?: Verdict }): string {
+  resolve(lead: Agent, to: string, facts: { prMerged: boolean; prClosed?: boolean; lastReadAt: number | null; worktree?: Verdict; handedOff?: HandedOffIn | null }): string {
     if (lead.role !== "lead") throw new EngineError("forbidden", "only a lead resolves threads");
     const t = this.agentByAddress(to);
     if (!t) {
@@ -3287,6 +3328,7 @@ export class Engine {
     const w = facts.worktree;
     if (!w) throw new EngineError("bad_state", `${to}'s worktree state is unknown`);
     if (!w.clean) throw new EngineError("bad_state", `${to}'s worktree isn't clean: ${w.why}. Have the thread commit and merge or push, then resolve`);
+    const off = facts.handedOff ? handedOffOf(facts.handedOff) : null;
     let why: string;
     if (facts.prMerged) why = "its PR is merged";
     else if (w.inBase) {
@@ -3297,6 +3339,9 @@ export class Engine {
       // closed without merging (dropped, or landed another way): the thread's report says which; nothing waits on the PR
       if (this.lastReportAt(to) === null) throw new EngineError("bad_state", `${to}'s PR was closed and it has no report: it reports with orch_report first`);
       why = "its PR was closed without merging and it has reported";
+    } else if (off) {
+      // the PR stays open, but it is someone else's now (2026-11-17): the project page lists it under Handed off
+      why = `its open PR is handed off to ${off.owner}`;
     } else {
       const rep = this.lastReportAt(to);
       if (rep === null) throw new EngineError("bad_state", `${to} has no merged PR and no report: it reports with orch_report first`);
@@ -3305,10 +3350,22 @@ export class Engine {
     }
     tx(this.db, () => {
       this.retire(t.threadId);
-      this.event({ kind: "resolve", project: t.project, address: t.address, threadId: t.threadId, value: why });
+      this.event({ kind: "resolve", project: t.project, address: t.address, threadId: t.threadId, value: why, ...(off ? { ref: off.pr, note: off.owner } : {}) });
+      if (off)
+        this.db
+          .prepare(`INSERT INTO handed_off_prs (project, thread_address, thread_id, pr, owner, note, by_address, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+          .run(t.project, t.address, t.threadId, off.pr, off.owner, off.note, lead.address, this.now());
       this.boardAdd("resolved", lead.address, lead.project, `${to} resolved: ${why}`, `Its worktree is clean (${w.why}); the thread is archived.`, t.threadId);
     });
     return `Resolved ${to} (${why === w.why ? why : `${why}; worktree clean: ${w.why}`}).`;
+  }
+
+  /** Open PRs whose threads were resolved as handed off, newest first, per project (the project page's Handed off list). */
+  handedOffPrs(): Map<string, HandedOff[]> {
+    const rows = this.db.prepare(`SELECT project, thread_address, pr, owner, note, at FROM handed_off_prs WHERE project IS NOT NULL ORDER BY at DESC, id DESC`).all() as { project: string; thread_address: string; pr: string; owner: string; note: string | null; at: number }[];
+    const out = new Map<string, HandedOff[]>();
+    for (const r of rows) out.set(r.project, [...(out.get(r.project) ?? []), { pr: r.pr, owner: r.owner, note: r.note, at: r.at, thread: r.thread_address }]);
+    return out;
   }
 
   /**

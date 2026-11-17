@@ -226,6 +226,23 @@ export function prChips(pr: { draft: boolean; review: string; approved: boolean;
   ];
 }
 
+/** The wide Open PRs table's sortable columns. Ascending puts what needs a hand first: changes requested, CI failing. */
+export type PrSort = "updated" | "project" | "review" | "ci";
+const REVIEW_RANK = (pr: { approved: boolean; review: string }) => (pr.review === "changes requested" ? 0 : pr.approved ? 2 : 1);
+const CI_RANK: Record<Ci, number> = { fail: 0, pending: 1, none: 2, pass: 3 };
+export function sortPrs<T extends { approved: boolean; review: string; ci: Ci; project: string | null; updatedAt: string; url: string }>(prs: readonly T[], key: PrSort, desc: boolean): T[] {
+  const by = (a: T, b: T): number =>
+    key === "updated"
+      ? Date.parse(a.updatedAt) - Date.parse(b.updatedAt)
+      : key === "project"
+        ? (a.project === null ? 1 : 0) - (b.project === null ? 1 : 0) || (a.project ?? "").localeCompare(b.project ?? "")
+        : key === "review"
+          ? REVIEW_RANK(a) - REVIEW_RANK(b)
+          : CI_RANK[a.ci] - CI_RANK[b.ci];
+  // ties keep the newest first, whatever the direction
+  return [...prs].sort((a, b) => (desc ? -by(a, b) : by(a, b)) || Date.parse(b.updatedAt) - Date.parse(a.updatedAt) || a.url.localeCompare(b.url));
+}
+
 /** The row's PR link words: "repo#123" (repo without its owner), never a bare #number. */
 export const prRef = (pr: { repo: string; number: number }): string => `${pr.repo.split("/").pop() || pr.repo}#${pr.number}`;
 

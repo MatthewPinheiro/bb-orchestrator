@@ -9,6 +9,7 @@
 //   request finished and SETTLE_MS passed since both the response and the last release. Then the list moves, and the
 //   card that moves into the slot is armed afresh, so the second click of a double-click can't answer it.
 // - Arming gates options, "Send my answer" (the Other field) and the defer presets; Bring back answers nothing and is under the page lock only.
+import { styleHref } from "./style-href.ts";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { Markdown, useBbNavigate } from "@get-bb/plugin-sdk/app";
 import { WRITES, type Card, type NeedsYou, type Preset, type answerBody, type deferBody, type interactionAnswerBody, type returnBody, type secretBody } from "../contract.ts";
@@ -371,10 +372,10 @@ export function NeedsYouView({ q, refetchAll, mons, threads, accents }: { q: Que
   const prompts = view.interactions.filter((i) => i.questions.length === 0);
   return (
     <div ref={root} className="flex flex-col gap-4 pb-8">
-      <style href="ui-decision-inbox-clean" precedence="default">
+      <style href={styleHref("ui-decision-inbox-clean", inboxCss)} precedence="default">
         {inboxCss}
       </style>
-      <style href="orch-answer" precedence="default">
+      <style href={styleHref("orch-answer", answerCss)} precedence="default">
         {answerCss}
       </style>
       {/* affectUI's decision inbox: a heading row with the count, then one row per card */}

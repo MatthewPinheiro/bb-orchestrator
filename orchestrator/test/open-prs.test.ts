@@ -327,3 +327,14 @@ test("chip colours follow the state: green good, amber act, red broken, grey run
     }
   }
 });
+
+test("the wide table's sort: ascending puts what needs a hand first, and ties keep the newest on top", async () => {
+  const { sortPrs } = await import("../core/open-prs.ts");
+  const pr = (url: string, x: Partial<{ approved: boolean; review: string; ci: "pass" | "pending" | "fail" | "none"; project: string | null; updatedAt: string }>) => ({ url, approved: false, review: "review required", ci: "pass" as const, project: "alpha", updatedAt: "2026-11-17T10:00:00Z", ...x });
+  const prs = [pr("a", { ci: "pass", updatedAt: "2026-11-17T09:00:00Z" }), pr("b", { ci: "fail" }), pr("c", { ci: "pending", review: "changes requested", project: null }), pr("d", { approved: true, review: "approved", updatedAt: "2026-11-17T11:00:00Z" })];
+  assert.deepEqual(sortPrs(prs, "ci", false).map((p) => p.url), ["b", "c", "d", "a"]); // failing CI first; d and a both pass, d newer
+  assert.deepEqual(sortPrs(prs, "review", false).map((p) => p.url)[0], "c"); // changes requested first
+  assert.deepEqual(sortPrs(prs, "review", false).map((p) => p.url).at(-1), "d"); // approved last
+  assert.deepEqual(sortPrs(prs, "updated", true).map((p) => p.url), ["d", "b", "c", "a"]);
+  assert.equal(sortPrs(prs, "project", false).at(-1)!.url, "c"); // no project sorts last
+});

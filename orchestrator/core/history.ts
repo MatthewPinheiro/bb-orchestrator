@@ -263,7 +263,7 @@ export function buildHistory(x: HistoryInput): ProjectHistory {
       } else if (e.kind === "handoff") {
         marks.push({ at: e.at, kind: "handoff", label: `→ ${providerWord(e.value)}`, url: null });
       } else if (e.kind === "resolve") {
-        marks.push({ at: e.at, kind: "resolve", label: "resolved", url: null });
+        marks.push(e.ref && e.note ? { at: e.at, kind: "resolve", label: `resolved: PR handed off to ${e.note}`, url: e.ref } : { at: e.at, kind: "resolve", label: "resolved", url: null });
       }
     }
     // the current PR rows of its holders (a reading older than the log, or a draft that never changed)

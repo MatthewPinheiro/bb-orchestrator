@@ -183,6 +183,8 @@ export const projectsSchema = z.array(
     direct: directLineSchema.nullish(), // the owner's direct messages to its lead; none before the first
     // the PRs the plugin has read for this project's threads: a PR number in its text links only to one of these
     prs: z.array(z.object({ number: z.number(), url: z.string(), state: z.string(), checks: z.string().nullable(), review: z.string().nullable(), attention: z.string().nullable() })).optional(),
+    // open PRs whose threads were resolved as handed off (orch_resolve handed_off), newest first
+    handedOff: z.array(z.object({ pr: z.string(), owner: z.string(), note: z.string().nullable(), at: z.number(), thread: z.string() })).optional(),
   }),
 );
 export type Projects = z.infer<typeof projectsSchema>;
@@ -336,6 +338,8 @@ export const rpcContract = defineRpcContract({
   outputs: { input: z.null(), output: outputsSchema },
   deliverables: { input: z.null(), output: deliverablesSchema },
   projectOrder: { input: z.null(), output: projectOrderSchema },
+  // the chat log's read (1.10.0): one project's direct messages, newest first, only when the chat is open
+  directHistory: { input: z.object({ slug: z.string().min(1).max(40), before: z.number().nullable().optional(), limit: z.number().int().min(1).max(100).optional() }).strict(), output: z.object({ messages: z.array(directMessageSchema), more: z.boolean() }) },
 });
 
 // ---- the write routes (POST, JSON body). Each answers { ok: true } or { ok: false, error: { kind, message } }.

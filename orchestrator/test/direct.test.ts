@@ -289,3 +289,22 @@ test("3.4: on a live clock the answer's close and its record differ by a moment;
   s.e.markDirectSeen("kite", m.answeredAt!);
   assert.equal(s.e.directLines().get("kite")!.unread, false);
 });
+
+// The chat log reads its own history (1.10.0) so the Projects read stays at a few messages per row: newest first in
+// pages, "Older" continues from the oldest shown with nothing skipped or repeated, and only this project's messages.
+test("the chat's history pages back through every message with a before-cursor, one project only", () => {
+  const s = setup();
+  const ids: string[] = [];
+  for (let i = 0; i < 5; i++) {
+    s.advance(60_000);
+    ids.push(s.e.ownerMessage("kite", `m${i}`).id);
+  }
+  s.e.ownerMessage("otter", "elsewhere");
+  const first = s.e.directHistory("kite", null, 3);
+  assert.deepEqual(first.messages.map((m) => m.text), ["m4", "m3", "m2"]);
+  assert.equal(first.more, true);
+  const older = s.e.directHistory("kite", first.messages.at(-1)!.at, 3);
+  assert.deepEqual(older.messages.map((m) => m.text), ["m1", "m0"]);
+  assert.equal(older.more, false);
+  assert.throws(() => s.e.directHistory("nope", null, 3), /no project/);
+});

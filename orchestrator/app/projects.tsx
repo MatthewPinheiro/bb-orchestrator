@@ -8,6 +8,8 @@
 //
 // The Agents tab went on 2026-11-16: what only it showed (unread, level, context window) is on the thread cards now,
 // and a live thread's branch on its project's Flow view.
+import { styleHref } from "./style-href.ts";
+import { useElementWidth } from "./panes.tsx";
 import { useEffect, useState, type MouseEvent } from "react";
 import type { z } from "zod";
 import { useBbNavigate } from "@get-bb/plugin-sdk/app";
@@ -15,7 +17,7 @@ import { WRITES, type Agents, type Board, type NeedsYou, type Projects, type arc
 import { ASK_STATUS_TEXT, FILTERS, FILTER_WORD, attentionOrder, isQuiet, leadHead, matches, statusStale, waitLine, type Filter } from "./command-center.ts";
 import { ccCss } from "./cc-lines.tsx";
 import { ProjectRefs, RefsContext, refCss, type SharedRefs } from "./ref-text.tsx";
-import { Composer, DirectLines, directCss, markSeen } from "./direct-line.tsx";
+import { ChatLog, Composer, directCss, markSeen } from "./direct-line.tsx";
 import { useMinute } from "./status-bar.tsx";
 import { DropdownMenu } from "./affect/dropdown-menu-clean.tsx";
 import { EmptyState } from "./affect/empty-state-clean.tsx";
@@ -46,22 +48,6 @@ function PriorityDot({ p }: { p: Priority }) {
 
 /** Opens Needs you on the owner's card (or an agent's own prompt): the view, then that card scrolled into sight. */
 export type OpenCard = (selector: string) => void;
-
-/**
- * The tab's own width. Observed through a callback ref: the tab first renders its loading state without this element,
- * so an effect keyed on a ref object would never see it, and narrow-panel items (Ask for status, Start lead in ⋯) never showed.
- */
-function useElementWidth(): [number, (el: HTMLElement | null) => void] {
-  const [el, setEl] = useState<HTMLElement | null>(null);
-  const [w, setW] = useState(0);
-  useEffect(() => {
-    if (!el) return;
-    const ro = new ResizeObserver(([e]) => setW(Math.round(e!.contentRect.width)));
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [el]);
-  return [w, setEl];
-}
 
 /**
  * A click on the row's own surface opens the project's page; one on its buttons, links, menus or the archive prompt
@@ -379,6 +365,7 @@ function DetailPanel({ project, lanes, busy, refetchAll, openCard, onOpen, onPic
         </div>
         {project.lead ? (
           <div className="direct" data-direct-line={project.slug}>
+            <ChatLog project={project} now={now} cos={cosTitle} busy={busy} refetchAll={refetchAll} onPick={onPick} />
             <Composer
               compact
               project={project}
@@ -405,7 +392,6 @@ function DetailPanel({ project, lanes, busy, refetchAll, openCard, onOpen, onPic
           ownerName={ownerOnScreen(ownerName).name}
           openCard={openCard}
           askStatus={askStatus}
-          top={project.lead ? <DirectLines project={project} now={now} cos={cosTitle} busy={busy} refetchAll={refetchAll} /> : null}
           pinning={pinning}
           setPinning={setPinning}
           busy={busy}
@@ -559,31 +545,31 @@ export function ProjectsView({
     <div ref={root} data-projects-width={width}>
     <div className={cx("orch-cc tab pb-8", !wide && "narrow-book")} data-projects-tab="" data-layout={wide ? "list-detail" : "column"} style={wide ? undefined : { maxWidth: 1000, marginInline: "auto" }}>
       {/* a changed block gets a new href: React keeps a style by its href, so a window open across an update would keep the old rules */}
-      <style href="orch-cc" precedence="default">
+      <style href={styleHref("orch-cc", ccCss)} precedence="default">
         {ccCss}
       </style>
-      <style href="orch-cc-refs" precedence="default">
+      <style href={styleHref("orch-cc-refs", refCss)} precedence="default">
         {refCss}
       </style>
-      <style href="orch-cc-direct-2" precedence="default">
+      <style href={styleHref("orch-cc-direct", directCss)} precedence="default">
         {directCss}
       </style>
-      <style href="orch-cc-search" precedence="default">
+      <style href={styleHref("orch-cc-search", searchCss)} precedence="default">
         {searchCss}
       </style>
-      <style href="orch-kit-1" precedence="default">
+      <style href={styleHref("orch-kit", kitCss)} precedence="default">
         {kitCss}
       </style>
-      <style href="orch-kit-thread-1" precedence="default">
+      <style href={styleHref("orch-kit-thread", threadCss)} precedence="default">
         {threadCss}
       </style>
-      <style href="orch-kit-pins-2" precedence="default">
+      <style href={styleHref("orch-kit-pins", pinsCss)} precedence="default">
         {pinsCss}
       </style>
-      <style href="orch-cc-book-2" precedence="default">
+      <style href={styleHref("orch-cc-book", bookCss)} precedence="default">
         {bookCss}
       </style>
-      <style href="orch-cc-layout-2" precedence="default">
+      <style href={styleHref("orch-cc-layout", layoutCss)} precedence="default">
         {layoutCss}
       </style>
       <StandingAgents agents={agents} full={lanesFrom} busy={busy} refetchAll={refetchAll} />

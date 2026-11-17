@@ -8,17 +8,21 @@
 //
 // Readability (PLAN.md "Readability changes"): sizes 16/14/12, weights 400/600, colour only for meaning (CI failing
 // red, approved green), no boxes or uppercase labels, one column on a phone.
+import { styleHref } from "./style-href.ts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { experimental_useRpcQuery, useBbNavigate, useRealtime } from "@get-bb/plugin-sdk/app";
 import { CHANGED_CHANNEL } from "../contract.ts";
 import { OPEN_PRS_CHANNEL, openPrsContract, type OpenPr, type OpenPrsView } from "../open-prs/contract.ts";
-import { buildPrompt, initialTicks, prChips, prRef, slackHtml, slackLines } from "../core/open-prs.ts";
+import { buildPrompt, initialTicks, prChips, prRef, slackHtml, slackLines, sortPrs, type PrSort } from "../core/open-prs.ts";
 import { PR_CHIP_TONES, SLACK_TONES, TINT } from "./palette.ts";
 import { EmptyState } from "./affect/empty-state-clean.tsx";
 import { openInBb } from "./open-proof.ts";
 import { useIdentity } from "./identity.ts";
 import { ProofLink } from "./proof-link.tsx";
 import { Btn, Muted, ReadState, when } from "./ui.tsx";
+import { useElementWidth } from "./panes.tsx";
+import { isWide } from "./source.ts";
+import { age } from "./lanes.ts";
 
 type Filter = "needs" | "all";
 
@@ -31,15 +35,15 @@ const CSS = `
 [data-orch] .orch-prs__filters button:hover { color: var(--orch-ink); }
 [data-orch] .orch-prs__filters button[aria-pressed="true"] { background: light-dark(rgba(0, 0, 0, 0.07), rgba(255, 255, 255, 0.1)); color: var(--orch-ink); font-weight: 600; }
 [data-orch] .orch-prs__note { margin: 0; font-size: 12px; line-height: 16px; color: var(--orch-muted); }
-[data-orch] .orch-prs__list { display: grid; gap: 20px; margin: 0; padding: 0; list-style: none; }
+[data-orch] .orch-prs__list { display: grid; gap: 16px; margin: 0; padding: 0; list-style: none; min-width: 0; }
 [data-orch] .orch-prs__row { display: grid; gap: 4px; min-width: 0; }
-[data-orch] .orch-prs__title { font-size: 14px; line-height: 20px; font-weight: 600; color: var(--orch-ink); text-decoration: none; overflow-wrap: anywhere; }
+[data-orch] .orch-prs__title { font-size: 14px; line-height: 20px; font-weight: 600; color: var(--orch-ink); text-decoration: none; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
 [data-orch] .orch-prs__title:hover { text-decoration: underline; text-underline-offset: 2px; }
 [data-orch] .orch-prs__meta { display: flex; flex-wrap: wrap; gap: 2px 12px; font-size: 12px; line-height: 16px; color: var(--orch-muted); min-width: 0; }
 [data-orch] .orch-prs__meta > span { overflow-wrap: anywhere; }
 [data-orch] .orch-prs__state { display: flex; flex-wrap: wrap; gap: 2px 12px; font-size: 12px; line-height: 16px; color: var(--orch-ink); }
 [data-orch] .orch-prs__state { gap: 4px 6px; }
-[data-orch] .orch-prs__chip { --c: currentColor; display: inline-flex; align-items: center; border-radius: 999px; padding: 2px 8px; font-size: 12px; line-height: 16px; color: var(--c); background: color-mix(in srgb, var(--c) ${TINT * 100}%, transparent); }
+[data-orch] .orch-prs__chip { --c: currentColor; display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; align-items: center; border-radius: 999px; padding: 2px 8px; font-size: 12px; line-height: 16px; color: var(--c); background: color-mix(in srgb, var(--c) ${TINT * 100}%, transparent); }
 ${Object.entries(PR_CHIP_TONES)
   .map(([k, t]) => `[data-orch] .orch-prs__chip[data-tone="${k}"] { --c: light-dark(${t.light}, ${t.dark}); }`)
   .join("\n")}
@@ -47,6 +51,18 @@ ${Object.entries(PR_CHIP_TONES)
 [data-orch] .orch-prs__link { font-size: 12px; line-height: 16px; font-weight: 600; color: light-dark(${SLACK_TONES.link.light}, ${SLACK_TONES.link.dark}); text-decoration: underline; text-underline-offset: 2px; }
 [data-orch] .orch-prs__bullets { margin: 0; padding-left: 20px; list-style: disc; font-size: 14px; line-height: 20px; color: var(--orch-ink); overflow-wrap: anywhere; }
 [data-orch] .orch-prs__bullets li::marker { color: var(--orch-muted); }
+/* the ask and the Post preview keep a reading width beside the wide table */
+[data-orch] [data-layout="table"] [data-ask], [data-orch] [data-layout="table"] [data-post] { max-width: 768px; }
+/* wide: one table, a row per PR (the payload is flat per PR, so there is no more to show in a detail beside it) */
+[data-orch] .orch-prs__table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 14px; line-height: 20px; }
+[data-orch] .orch-prs__table th { padding: 8px; text-align: start; font-size: 12px; line-height: 16px; font-weight: 600; color: var(--orch-muted); border-bottom: 1px solid var(--orch-line); }
+[data-orch] .orch-prs__table th button { border: 0; padding: 0; background: none; font: inherit; color: inherit; cursor: pointer; }
+[data-orch] .orch-prs__table th button:hover, [data-orch] .orch-prs__table th[aria-sort] button { color: var(--orch-ink); }
+[data-orch] .orch-prs__table td { padding: 10px 8px; vertical-align: top; border-bottom: 1px solid var(--orch-line); min-width: 0; overflow-wrap: anywhere; }
+[data-orch] .orch-prs__table tr:hover td { background: var(--orch-wash); }
+[data-orch] .orch-prs__table .orch-prs__sum { margin-top: 2px; font-size: 12px; line-height: 16px; color: var(--orch-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+[data-orch] .orch-prs__table .orch-prs__cell { display: flex; flex-wrap: wrap; gap: 4px; }
+[data-orch] .orch-prs__table .orch-prs__sub { font-size: 12px; line-height: 16px; color: var(--orch-muted); }
 /* the Slack message card: avatar, name, then the text as Slack draws it */
 [data-orch] .orch-slack { display: grid; grid-template-columns: 36px minmax(0, 1fr); gap: 0 8px; padding: 12px; border: 1px solid var(--orch-line); border-radius: 8px; background: light-dark(#ffffff, #1a1d21); }
 [data-orch] .orch-slack__avatar { width: 36px; height: 36px; border-radius: 6px; display: grid; place-items: center; font-size: 16px; font-weight: 600; color: #ffffff; background: light-dark(#4a154b, #7c3a7e); }
@@ -87,7 +103,7 @@ function useOpenPrs() {
 function Row({ pr }: { pr: OpenPr }) {
   return (
     <li className="orch-prs__row" data-pr={pr.url} data-needs={pr.needsReview ? "true" : "false"}>
-      <ProofLink open={{ url: pr.url }} className="orch-prs__title" title={pr.url}>
+      <ProofLink open={{ url: pr.url }} className="orch-prs__title" title={pr.title}>
         {pr.title}
       </ProofLink>
       <div className="orch-prs__meta">
@@ -245,7 +261,104 @@ function Post({ prs, view, name, onClose }: { prs: OpenPr[]; view: OpenPrsView; 
   );
 }
 
+const COLS: { key: PrSort | null; label: string; width: string }[] = [
+  { key: null, label: "Pull request", width: "auto" },
+  { key: "project", label: "Project", width: "13%" },
+  { key: "review", label: "Review", width: "17%" },
+  { key: "ci", label: "CI", width: "10%" },
+  { key: null, label: "Merge", width: "12%" },
+  { key: "updated", label: "Updated", width: "8%" },
+];
+
+/** The wide tab: one row per PR with its state, checks, review, age and project in columns; a header click sorts. */
+function Table({ prs }: { prs: OpenPr[] }) {
+  const [sort, setSort] = useState<{ key: PrSort; desc: boolean }>({ key: "updated", desc: true });
+  const rows = useMemo(() => sortPrs(prs, sort.key, sort.desc), [prs, sort]);
+  const chip = (pr: OpenPr, ...keys: string[]) =>
+    prChips(pr)
+      .filter((c) => keys.includes(c.key))
+      .map((c) => (
+        <span key={c.key} className="orch-prs__chip" data-chip={c.key} data-tone={c.tone} title={c.text}>
+          {c.text}
+        </span>
+      ));
+  return (
+    <table className="orch-prs__table" data-prs-table="">
+      <colgroup>
+        {COLS.map((c) => (
+          <col key={c.label} style={{ width: c.width }} />
+        ))}
+      </colgroup>
+      <thead>
+        <tr>
+          {COLS.map((c) => (
+            <th key={c.label} scope="col" aria-sort={c.key && sort.key === c.key ? (sort.desc ? "descending" : "ascending") : undefined}>
+              {c.key ? (
+                <button type="button" data-sort={c.key} onClick={() => setSort((s) => ({ key: c.key!, desc: s.key === c.key ? !s.desc : c.key === "updated" }))}>
+                  {c.label}
+                  {sort.key === c.key ? (sort.desc ? " ↓" : " ↑") : ""}
+                </button>
+              ) : (
+                c.label
+              )}
+            </th>
+          ))}
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((pr) => (
+          <tr key={pr.url} data-pr={pr.url} data-needs={pr.needsReview ? "true" : "false"}>
+            <td>
+              <ProofLink open={{ url: pr.url }} className="orch-prs__title" title={pr.title}>
+                {pr.title}
+              </ProofLink>
+              <div className="orch-prs__sum" title={pr.summary}>
+                <ProofLink open={{ url: pr.url }} className="orch-prs__link" data-pr-link={pr.url} title={pr.url}>
+                  {prRef(pr)}
+                </ProofLink>{" "}
+                {pr.summary}
+              </div>
+            </td>
+            <td>
+              <div>{pr.project ?? "No project"}</div>
+              <div className="orch-prs__sub">{pr.project ? (pr.lead ?? "no lead") : ""}</div>
+            </td>
+            <td>
+              <div className="orch-prs__cell">{chip(pr, "review")}</div>
+            </td>
+            <td>
+              <div className="orch-prs__cell">{chip(pr, "ci")}</div>
+            </td>
+            <td>
+              <div className="orch-prs__cell">{chip(pr, "draft", "merge")}</div>
+            </td>
+            <td className="orch-prs__sub" title={pr.updatedAt}>
+              {age(Date.parse(pr.updatedAt), Date.now())} ago
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+/**
+ * The tab, laid out on the pane's own width (a ResizeObserver, as Projects and Deliverables do, so it follows a split
+ * pane live): a sortable table when wide, the compact column of rows when narrow.
+ */
 export function OpenPrsView() {
+  const [width, measure] = useElementWidth();
+  const wide = isWide(width);
+  return (
+    <div ref={measure} data-prs-width={width}>
+      <div data-layout={wide ? "table" : "column"} style={wide ? undefined : { maxWidth: 768, marginInline: "auto" }}>
+        <OpenPrsBody wide={wide} />
+      </div>
+    </div>
+  );
+}
+
+function OpenPrsBody({ wide }: { wide: boolean }) {
   const q = useOpenPrs();
   // the Slack preview's sender: the ownerName setting, else a neutral "You"
   const name = useIdentity().ownerName.trim() || "You";
@@ -267,7 +380,7 @@ export function OpenPrsView() {
   const shown = filter === "needs" ? needs : v.prs;
   return (
     <div className="orch-prs" data-open-prs="">
-      <style href="orch-prs" precedence="default">
+      <style href={styleHref("orch-prs", CSS)} precedence="default">
         {CSS}
       </style>
       <div className="grid gap-2">
@@ -301,6 +414,8 @@ export function OpenPrsView() {
       {posting && needs.length > 0 ? <Post prs={needs} view={v} name={name} onClose={() => setPosting(false)} /> : null}
       {shown.length === 0 ? (
         <Muted>{filter === "needs" ? "Nothing needs review." : "No open PRs."}</Muted>
+      ) : wide ? (
+        <Table prs={shown} />
       ) : (
         <ul className="orch-prs__list">
           {shown.map((p) => (

@@ -217,3 +217,14 @@ export function treeKey(rows: readonly Row[], focus: string | null, key: string)
       return null;
   }
 }
+
+/**
+ * The deliverable the wide Deliverables tab shows beside its list: the one picked while it still exists, else the
+ * newest in review (what waits for the owner), else the newest of all. null when there are none.
+ */
+export function shownDeliverable(ds: readonly Deliverable[], picked: string | null): Deliverable | null {
+  const hit = picked ? ds.find((d) => d.id === picked) : undefined;
+  if (hit) return hit;
+  const sorted = [...ds].sort(byUpdated);
+  return sorted.find((d) => d.state === "review") ?? sorted[0] ?? null;
+}

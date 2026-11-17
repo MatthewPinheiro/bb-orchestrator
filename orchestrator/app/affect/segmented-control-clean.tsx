@@ -1,6 +1,7 @@
 // affectUI components/segmented-control-clean.tsx @ f002d8a58cbb7e19cff7a8b4c8982b420b9e8c7e, MIT, (c) affectUI
 "use client";
 
+import { styleHref } from "../style-href.ts";
 import {
   useEffect,
   useLayoutEffect,
@@ -318,7 +319,7 @@ export function SegmentedControl<T extends string = string>({
       data-disabled={disabled || undefined}
     >
       {/* React 19 hoists this into <head> once, no matter how many controls render */}
-      <style href="ui-segmented-control-clean" precedence="default">
+      <style href={styleHref("ui-segmented-control-clean", css)} precedence="default">
         {css}
       </style>
 
