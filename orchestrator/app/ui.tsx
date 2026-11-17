@@ -59,7 +59,7 @@ export function Look() {
 
 const VARIANT = { primary: "primary", outline: "secondary", ghost: "ghost", danger: "destructive" } as const;
 /** affectUI's button. Disabled stays a real `disabled`: a click on it stops there, not on what's below. */
-export function Btn({ tone = "outline", ...p }: ButtonHTMLAttributes<HTMLButtonElement> & { tone?: keyof typeof VARIANT; [data: `data-${string}`]: string | undefined }) {
+export function Btn({ tone = "outline", ...p }: ButtonHTMLAttributes<HTMLButtonElement> & { tone?: keyof typeof VARIANT; size?: "sm" | "md" | "lg"; icon?: ReactNode; [data: `data-${string}`]: string | undefined }) {
   return <Button variant={VARIANT[tone]} {...p} />;
 }
 

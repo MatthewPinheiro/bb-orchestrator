@@ -1,6 +1,8 @@
 // The thread card (2026-11-17, proposal 3): one lead or thread, one unit, two lines. The title first (what it works on);
 // then its state chip (a wait on the owner is a chip that opens the card), its PR and its PR's chips, and one context
 // meter. Idle threads with nothing to merge recede; five show, then "all N". The order is kit.ts threadCards.
+// 1.16.0: the threads are rows in their section's card, split by the kit's hairline (a card in a card drew two edges);
+// the ⋯ is affectUI's icon button, and the picker its text field and buttons, with the same steps as before.
 import { useState, type MouseEvent } from "react";
 import type { z } from "zod";
 import { useBbNavigate } from "@get-bb/plugin-sdk/app";
@@ -9,15 +11,17 @@ import { DropdownMenu } from "./affect/dropdown-menu-clean.tsx";
 import { MonSprite } from "./mon.tsx";
 import { openInBb, plainClick } from "./open-proof.ts";
 import { pickableTasks, prChips, scopeActions, STATE_CHIP, taskNameFor, TASK_NAME_MAX, threadCards, ticketOf, titleOf, THREADS_SHOWN, type ScopeAction, type ThreadSpec } from "./kit.ts";
-import { Chip, ChipButton, CtxMeter } from "./kit-ui.tsx";
+import { Chip, ChipButton, CtxMeter, Icon } from "./kit-ui.tsx";
+import { TextField } from "./affect/text-field-clean.tsx";
 import type { Lane } from "./lanes.ts";
 import type { OpenCard } from "./projects.tsx";
 import { gate, write } from "./store.ts";
-import { PageError } from "./ui.tsx";
+import { Btn, PageError } from "./ui.tsx";
 
 export const threadCss = /* css */ `
-[data-orch] .k-threads { display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 4px 0 0; list-style: none; min-width: 0; }
-[data-orch] .k-thread { display: grid; grid-template-columns: 28px minmax(0, 1fr); column-gap: 12px; row-gap: 4px; align-items: center; padding: 8px 12px; border: 1px solid var(--k-border); border-radius: 8px; min-width: 0; }
+[data-orch] .k-threads { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; min-width: 0; }
+[data-orch] .k-thread { display: grid; grid-template-columns: 28px minmax(0, 1fr); column-gap: 12px; row-gap: 4px; align-items: center; padding: 8px; min-width: 0; }
+[data-orch] .k-thread + .k-thread { border-top: 0.5px solid var(--orch-line); }
 [data-orch] .k-thread .k-face { grid-row: 1 / span 2; display: flex; align-items: center; justify-content: center; width: 28px; height: 28px; }
 [data-orch] .k-thread .k-face button { border: 0; background: none; padding: 0; display: flex; cursor: pointer; }
 [data-orch] .k-thread .k-l1 { display: flex; align-items: center; gap: 8px; min-width: 0; }
@@ -32,14 +36,16 @@ export const threadCss = /* css */ `
   [data-orch] .k-thread .k-l1, [data-orch] .k-thread .k-l2 { flex-wrap: wrap; }
   [data-orch] .k-thread .k-who { flex-basis: 100%; }
 }
-[data-orch] .k-thread .k-dots.k-dots { min-height: 24px; padding: 0 6px; font-size: 14px; flex: none; }
 [data-orch] .k-thread .k-below { grid-column: 1 / -1; min-width: 0; }
-[data-orch] .k-pick { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 8px; margin-top: 4px; padding: 12px; border-radius: 8px; background: var(--k-wash); font-size: 13px; line-height: 20px; }
+/* the picker, in the thread's row: a line of what scoping means, the choice (a new task, named in the kit's field, or
+   an open one), then Cancel and the kit's primary button */
+[data-orch] .k-pick { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 8px; padding: 8px 0 4px; }
 [data-orch] .k-pick .k-pick-h { color: var(--orch-muted); font-size: 12px; line-height: 16px; }
-[data-orch] .k-pick .k-pick-row { display: flex; align-items: center; gap: 8px; min-width: 0; cursor: pointer; }
-[data-orch] .k-pick .k-pick-row input[type="text"] { flex: 1 1 auto; min-width: 0; height: 28px; padding: 0 8px; border: 1px solid var(--k-border); border-radius: 6px; background: Canvas; color: var(--orch-ink); font: inherit; }
-[data-orch] .k-pick .k-pick-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-[data-orch] .k-pick .k-pick-by { flex: none; margin-left: auto; color: var(--orch-muted); font-size: 12px; line-height: 16px; }
+[data-orch] .k-pick .k-pick-row { display: flex; align-items: center; gap: 8px; min-width: 0; min-height: 28px; cursor: pointer; }
+[data-orch] .k-pick .k-pick-row input[type="radio"] { flex: none; width: 16px; height: 16px; margin: 0; accent-color: var(--orch-ink); cursor: pointer; }
+[data-orch] .k-pick .k-pick-row .ui-tfc { flex: 1 1 auto; min-width: 0; }
+[data-orch] .k-pick .k-pick-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+[data-orch] .k-pick .k-pick-by { flex: none; color: var(--orch-muted); font-size: 12px; line-height: 16px; }
 [data-orch] .k-pick .k-pick-acts { display: flex; justify-content: flex-end; gap: 8px; }
 `;
 
@@ -63,11 +69,11 @@ function ScopePicker({ a, title, ctl, onDone }: { a: Agent; title: string; ctl: 
   };
   return (
     <div className="k-pick" role="dialog" aria-label={`Scope ${title}`} data-scope-picker={a.threadId} onKeyDown={(e) => (e.key === "Escape" ? onDone() : undefined)}>
-      <div className="k-pick-h">It investigates read-only and makes no changes; the questions its lead forwards go to the Scope tab, under the task.</div>
+      <div className="k-pick-h">Read-only from then on. Its questions go to the Scope tab, under the task.</div>
       <label className="k-pick-row">
         <input type="radio" name={group} checked={choice === "new"} onChange={() => setChoice("new")} data-scope-new="" />
-        <span>New task:</span>
-        <input type="text" value={name} maxLength={TASK_NAME_MAX} autoFocus aria-label="The new task's name" data-scope-name="" onChange={(e) => (setName(e.target.value), setChoice("new"))} />
+        <span>New task</span>
+        <TextField size="sm" value={name} maxLength={TASK_NAME_MAX} autoFocus aria-label="The new task's name" data-scope-name="" onChange={(e) => (setName(e.target.value), setChoice("new"))} />
       </label>
       {tasks.map((t) => (
         <label key={t.id} className="k-pick-row">
@@ -79,12 +85,12 @@ function ScopePicker({ a, title, ctl, onDone }: { a: Agent; title: string; ctl: 
         </label>
       ))}
       <div className="k-pick-acts">
-        <button type="button" className="btn" data-scope-cancel="" onClick={onDone}>
+        <Btn tone="ghost" data-scope-cancel="" onClick={onDone}>
           Cancel
-        </button>
-        <button type="button" className="btn primary" data-scope-go="" disabled={ctl.busy || (choice === "new" && !name.trim())} onClick={go}>
+        </Btn>
+        <Btn tone="primary" data-scope-go="" disabled={ctl.busy || (choice === "new" && !name.trim())} onClick={go}>
           Scope this thread
-        </button>
+        </Btn>
       </div>
     </div>
   );
@@ -110,9 +116,7 @@ function ScopeMenu({ a, title, ctl, onPick }: { a: Agent; title: string; ctl: Sc
       title={title}
       items={acts.map((x) => ({ label: x.label, description: x.kind === "stop" ? `task ${JSON.stringify(x.task.name)} stays open` : undefined, disabled: ctl.busy, data: { "data-scope-action": x.kind }, onSelect: () => run(x) }))}
       trigger={({ triggerProps }) => (
-        <button type="button" className="k-more k-dots" data-thread-more={a.address} aria-label={`More for ${a.address}`} title="Scoping" disabled={ctl.busy} {...triggerProps}>
-          ⋯
-        </button>
+        <Btn tone="ghost" size="sm" icon={<Icon name="more" />} data-thread-more={a.address} aria-label={`More for ${a.address}`} title="Scoping" disabled={ctl.busy} {...triggerProps} />
       )}
     />
   );

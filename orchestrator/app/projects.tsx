@@ -17,7 +17,7 @@ import { WRITES, type Agents, type Board, type NeedsYou, type Projects, type arc
 import { ASK_STATUS_TEXT, FILTERS, FILTER_WORD, attentionOrder, isQuiet, leadHead, matches, statusStale, waitLine, type Filter } from "./command-center.ts";
 import { ccCss } from "./cc-lines.tsx";
 import { ProjectRefs, RefsContext, refCss, type SharedRefs } from "./ref-text.tsx";
-import { ChatLog, Composer, directCss, markSeen } from "./direct-line.tsx";
+import { ChatCard, ChatLog, Composer, directCss, markSeen } from "./direct-line.tsx";
 import { useMinute } from "./status-bar.tsx";
 import { DropdownMenu } from "./affect/dropdown-menu-clean.tsx";
 import { EmptyState } from "./affect/empty-state-clean.tsx";
@@ -25,7 +25,7 @@ import { MonSprite } from "./mon.tsx";
 import { PRIORITIES, PRIORITY_TONES, css, type Priority } from "./palette.ts";
 import { accentText, accentVars } from "./accent.ts";
 import { gate, useGate, write } from "./store.ts";
-import { PageError, ReadState, cx, when } from "./ui.tsx";
+import { Btn, PageError, ReadState, cx, when } from "./ui.tsx";
 import { useIdentity } from "./identity.ts";
 import { buildLanes, type Lane } from "./lanes.ts";
 import { ownerOnScreen } from "../core/owner.ts";
@@ -112,9 +112,7 @@ function MoreMenu({ project, busy, refetchAll, narrow, onArchive, askStatus, ask
         { label: "Archive…", danger: true, disabled: busy, data: { "data-archive-project": project.slug }, onSelect: onArchive },
       ]}
       trigger={({ triggerProps }) => (
-        <button type="button" className="btn more" data-more={project.slug} title="More: priority, hold, archive" aria-label={`More for ${project.slug}`} disabled={busy} {...triggerProps}>
-          ⋯
-        </button>
+        <Btn tone="ghost" size="sm" icon={<Icon name="more" />} data-more={project.slug} title="More: priority, hold, archive" aria-label={`More for ${project.slug}`} disabled={busy} {...triggerProps} />
       )}
     />
   );
@@ -363,18 +361,18 @@ function DetailPanel({ project, lanes, busy, refetchAll, openCard, onOpen, onPic
           {forYou ? <Chip spec={{ tone: "need", icon: "you", word: `${forYou} for you` }} data-detail-for-you={String(forYou)} /> : null}
           <span className="acts">
             {project.lead ? null : (
-              <button type="button" className="btn" data-start-lead={project.slug} disabled={busy || held} onClick={startLead}>
+              <Btn size="sm" data-start-lead={project.slug} disabled={busy || held} onClick={startLead}>
                 Start lead
-              </button>
+              </Btn>
             )}
-            <button type="button" className="btn" data-open-project={project.slug} title="The timeline, the flow and the dependencies" onClick={() => onOpen(project.slug)}>
+            <Btn size="sm" data-open-project={project.slug} title="The timeline, the flow and the dependencies" onClick={() => onOpen(project.slug)}>
               Timeline
-            </button>
+            </Btn>
             <MoreMenu project={project} busy={busy} refetchAll={refetchAll} narrow={narrow} onArchive={() => setConfirming(true)} askStatus={askStatus} askInMenu onPin={() => setPinning(true)} />
           </span>
         </div>
         {project.lead ? (
-          <div className="direct" data-direct-line={project.slug}>
+          <ChatCard slug={project.slug}>
             <ChatLog project={project} now={now} cos={cosTitle} busy={busy} refetchAll={refetchAll} onPick={onPick} />
             <Composer
               compact
@@ -388,12 +386,12 @@ function DetailPanel({ project, lanes, busy, refetchAll, openCard, onOpen, onPic
                 markSeen(project, refetchAll);
               }}
             />
-          </div>
+          </ChatCard>
         ) : project.direct?.messages.length ? (
           // no lead running (none started, or archived): the direct-message log so far, read-only until Start lead
-          <div className="direct" data-direct-line={project.slug}>
+          <ChatCard slug={project.slug}>
             <ChatLog project={project} now={now} cos={cosTitle} busy={busy} refetchAll={refetchAll} onPick={onPick} />
-          </div>
+          </ChatCard>
         ) : null}
         {held ? <div className="muted small">Mail to this lead is held until the project resumes.</div> : null}
         <PageError where={`lead:${project.slug}`} />

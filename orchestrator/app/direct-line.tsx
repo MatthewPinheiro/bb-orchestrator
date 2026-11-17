@@ -5,6 +5,8 @@
 // beside the list, or a row opened in place); the owner: "the message input bar should just always be there".
 // 1.13.0: open, the chat draws the lead's own thread as the Chat tab draws the CoS's (lead-chat.ts says when), and the
 // composer under it is a chat input; the 1.10.0 log is what shows while the lead has no live thread.
+// 1.16.0: one card, built from the affectUI kit (Card, TextArea, Checkbox, Button): the head, the transcript and the
+// composer are its zones, split by the kit's hairline. Nothing about what a send is changed.
 import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type CSSProperties, type ReactNode, type RefObject } from "react";
 import type { z } from "zod";
 import { Markdown, ThreadChat, experimental_useRpcQuery, useRealtime } from "@get-bb/plugin-sdk/app";
@@ -13,50 +15,60 @@ import { chatOrder, chatPreview, directState, followUpOf, seenUpTo } from "./com
 import { directWrite, leadChatView, messageStates } from "./lead-chat.ts";
 import { age } from "./lanes.ts";
 import { write } from "./store.ts";
-import { when } from "./ui.tsx";
+import { Btn, when } from "./ui.tsx";
+import { Card } from "./affect/card-clean.tsx";
+import { Checkbox } from "./affect/checkbox-clean.tsx";
+import { TextArea } from "./affect/text-area-clean.tsx";
 
 type Project = Projects[number];
 const MAX = 4000;
 
 export const directCss = /* css */ `
-/* the composer (1.13.0): a chat input under the transcript, as bb draws its own: one box, the text on top, the
-   follow-up switch and Send in a bar inside it; the rules in one quiet line under it */
-[data-orch] .orch-cc .k-input { display: flex; flex-direction: column; gap: 2px; padding: 8px 8px 8px 12px; border-radius: 12px; box-shadow: inset 0 0 0 1px var(--k-border, var(--cc-edge)); background: light-dark(#fff, rgba(255, 255, 255, 0.04)); cursor: text; }
-[data-orch] .orch-cc .k-input:focus-within { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--orch-ink) 45%, transparent); }
-[data-orch] .orch-cc .k-input textarea { width: 100%; min-width: 0; max-height: 240px; padding: 4px 0; border: 0; background: transparent; color: var(--orch-ink); font: inherit; font-size: 14px; line-height: 20px; resize: none; outline: none; }
-[data-orch] .orch-cc .k-input__bar { display: flex; align-items: center; gap: 8px; min-height: 28px; cursor: default; }
-[data-orch] .orch-cc .k-input__follow { display: inline-flex; gap: 4px; align-items: center; min-width: 0; font-size: 12px; line-height: 16px; color: var(--orch-muted); cursor: pointer; }
-[data-orch] .orch-cc .k-input__follow input { margin: 0; }
-[data-orch] .orch-cc .k-input__send { margin-left: auto; padding: 4px 12px; border-radius: 8px; }
-[data-orch] .orch-cc .k-input__hint { margin: 4px 12px 0; font-size: 12px; line-height: 16px; color: var(--orch-muted); cursor: default; }
-[data-orch] .orch-cc .k-input__hint .warn { color: var(--k-need, #9d174d); font-weight: 600; }
-/* the lead's own thread (1.13.0): the host's transcript in a bounded box, which it fills and scrolls inside */
-[data-orch] .orch-cc .k-leadthread { display: flex; flex-direction: column; height: var(--k-leadthread-h, 480px); min-height: 0; border-radius: 8px; box-shadow: inset 0 0 0 1px var(--k-border, var(--cc-edge)); overflow: hidden; }
+/* the chat's card (1.16.0): affectUI's Card with no padding of its own; its zones are split by the kit's hairline */
+[data-orch] .orch-cc .k-chatcard { --ui-crdc-pad: 0px; gap: 0; overflow: hidden; }
+[data-orch] .orch-cc .k-chatcard > * + *, [data-orch] .orch-cc .k-chat > * + * { border-top: 0.5px solid var(--orch-line); }
+[data-orch] .orch-cc .k-chat { display: flex; flex-direction: column; min-width: 0; }
+/* the head: the kit's card header as one button, so the whole row opens and closes the chat */
+[data-orch] .orch-cc .k-chat__head { align-items: center; width: 100%; margin: 0; padding: 12px 16px; border: 0; background: none; font: inherit; color: inherit; text-align: start; cursor: pointer; }
+[data-orch] .orch-cc .k-chat__head:hover { background: var(--orch-wash); }
+/* the card clips what leaves it, so the keyboard ring is drawn inside the row */
+[data-orch] .orch-cc .k-chat__head:focus-visible { outline: 2px solid var(--ui-crdc-focus); outline-offset: -2px; }
+[data-orch] .orch-cc .k-chat__head .ui-crdc__title, [data-orch] .orch-cc .k-chat__head .ui-crdc__desc { display: block; }
+[data-orch] .orch-cc .k-chat__head .ui-crdc__desc { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; line-height: 16px; }
+[data-orch] .orch-cc .k-chat__chev { transition: transform 160ms ease; }
+[data-orch] .orch-cc .k-chat__chev[data-open] { transform: rotate(90deg); }
+[data-orch] .orch-cc .k-chat__dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--k-need, #9d174d); }
+/* a head that is not a button (the Scope tab's): whose chat, and the way to its thread */
+[data-orch] .orch-cc .k-chat__bar { display: flex; align-items: center; gap: 8px; min-width: 0; min-height: 48px; padding: 8px 16px; }
+[data-orch] .orch-cc .k-chat__bar h3 { margin: 0; }
+[data-orch] .orch-cc .k-chat__bar .tail { margin-left: auto; }
+/* the lead's own thread (1.13.0): the host's transcript in a zone of a fixed height, which it fills and scrolls inside */
+[data-orch] .orch-cc .k-leadthread { display: flex; flex-direction: column; height: var(--k-leadthread-h, 480px); min-height: 0; overflow: hidden; }
 [data-orch] .orch-cc .k-leadthread > * { flex: 1 1 auto; min-height: 0; }
 [data-orch] .orch-cc .k-leadthread__note { margin: 0 0 8px; font-size: 12px; line-height: 16px; color: var(--orch-muted); }
-/* the chat log (1.10.0): sizes 12/14/16, weights 400/600; the owner's messages on the right in a tint, the lead's on the left */
-[data-orch] .orch-cc .k-chat { display: flex; flex-direction: column; gap: 8px; min-width: 0; margin-bottom: 8px; }
-[data-orch] .orch-cc .k-chat__bar { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 6px 8px; border: 0; border-radius: 6px; background: none; font: inherit; font-size: 14px; line-height: 20px; color: var(--orch-ink); text-align: start; cursor: pointer; }
-[data-orch] .orch-cc .k-chat__bar:hover { background: var(--orch-wash); }
-[data-orch] .orch-cc .k-chat__chev { flex: none; color: var(--orch-muted); transition: transform 160ms ease; }
-[data-orch] .orch-cc .k-chat__chev[data-open] { transform: rotate(90deg); }
-[data-orch] .orch-cc .k-chat__h { flex: none; font-weight: 600; }
-[data-orch] .orch-cc .k-chat__pre { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--orch-muted); }
-[data-orch] .orch-cc .k-chat__dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--k-need, #9d174d); margin-left: auto; }
-[data-orch] .orch-cc .k-chat__log { display: flex; flex-direction: column; gap: 12px; max-height: 480px; overflow-y: auto; padding: 8px; border-radius: 8px; box-shadow: inset 0 0 0 1px var(--k-border, var(--cc-edge)); }
-[data-orch] .orch-cc .k-chat__pair { display: flex; flex-direction: column; gap: 6px; }
+/* the chat log (1.10.0): the owner's messages on the right in a tint, the lead's on the left */
+[data-orch] .orch-cc .k-chat__log { display: flex; flex-direction: column; gap: 12px; max-height: 480px; overflow-y: auto; padding: 12px 16px; }
+[data-orch] .orch-cc .k-chat__pair { display: flex; flex-direction: column; gap: 8px; }
 [data-orch] .orch-cc .k-msg { max-width: min(640px, 85%); min-width: 0; padding: 8px 12px; border-radius: 10px; font-size: 14px; line-height: 20px; overflow-wrap: anywhere; }
 [data-orch] .orch-cc .k-msg[data-from="you"] { align-self: flex-end; background: light-dark(rgba(0, 0, 0, 0.06), rgba(255, 255, 255, 0.09)); }
-[data-orch] .orch-cc .k-msg[data-from="lead"] { align-self: flex-start; box-shadow: inset 0 0 0 1px var(--k-border, var(--cc-edge)); }
+[data-orch] .orch-cc .k-msg[data-from="lead"] { align-self: flex-start; box-shadow: inset 0 0 0 0.5px light-dark(rgba(0, 0, 0, 0.16), rgba(255, 255, 255, 0.22)); }
 [data-orch] .orch-cc .k-msg__b > :first-child { margin-top: 0; }
 [data-orch] .orch-cc .k-msg__b > :last-child { margin-bottom: 0; }
 [data-orch] .orch-cc .k-msg__who, [data-orch] .orch-cc .k-msg__re { font-size: 12px; line-height: 16px; font-weight: 600; color: var(--orch-muted); }
 [data-orch] .orch-cc .k-msg__re { font-weight: 400; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 [data-orch] .orch-cc .k-msg__meta { margin-top: 4px; font-size: 12px; line-height: 16px; color: var(--orch-muted); }
 [data-orch] .orch-cc .k-msg__new { color: var(--k-need, #9d174d); font-weight: 600; }
-[data-orch] .orch-cc .k-chat__older { align-self: center; border: 0; padding: 4px 10px; border-radius: 6px; background: none; font: inherit; font-size: 12px; color: var(--orch-muted); cursor: pointer; }
-[data-orch] .orch-cc .k-chat__older:hover { color: var(--orch-ink); background: var(--orch-wash); }
-[data-orch] .orch-cc .k-chat__empty { margin: 0; font-size: 12px; color: var(--orch-muted); }
+[data-orch] .orch-cc .k-chat__older { align-self: center; }
+[data-orch] .orch-cc .k-chat__empty { margin: 0; font-size: 12px; line-height: 16px; color: var(--orch-muted); }
+/* the composer (1.16.0): the kit's text area with Send beside it, where it stays while the field grows; under them, only
+   when there is something to say, the follow-up switch and one quiet line */
+[data-orch] .orch-cc .k-composer { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 8px; padding: 12px 16px; }
+[data-orch] .orch-cc .k-composer__send { margin-top: 4px; }
+[data-orch] .orch-cc .k-composer__meta { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; min-width: 0; font-size: 12px; line-height: 16px; color: var(--orch-muted); }
+[data-orch] .orch-cc .k-composer__meta .ui-chkc { font-size: 12px; line-height: 16px; color: inherit; }
+[data-orch] .orch-cc .k-composer__meta .ui-chkc__control { height: 16px; }
+[data-orch] .orch-cc .k-composer__hint { min-width: 0; cursor: default; }
+[data-orch] .orch-cc .k-composer__hint .warn { color: var(--k-need, #9d174d); font-weight: 600; }
 `;
 
 /**
@@ -97,28 +109,45 @@ export function ChatLog({ project, now, cos, busy, refetchAll, onPick, startOpen
   const pre = chatPreview(project.direct);
   return (
     <section className="k-chat" data-chat={slug} data-open={open ? "true" : "false"}>
-      <button type="button" className="k-chat__bar" aria-expanded={open} data-chat-toggle={slug} onClick={toggle}>
-        <svg className="k-chat__chev" data-open={open || undefined} viewBox="0 0 16 16" width="12" height="12" aria-hidden>
-          <path d="m6 4 4 4-4 4" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-        </svg>
-        <span className="k-chat__h">Chat with lead</span>
-        {!open && pre ? (
-          <span className="k-chat__pre" data-chat-preview="" title={pre.lead ? `You: ${pre.you}\nLead: ${pre.lead}` : `You: ${pre.you}`}>
-            You: {pre.you}
-            {pre.lead ? ` · Lead: ${pre.lead}` : ""}
+      <button type="button" className="ui-crdc__head k-chat__head" aria-expanded={open} data-chat-toggle={slug} onClick={toggle}>
+        <span className="ui-crdc__icon">
+          <svg className="k-chat__chev" data-open={open || undefined} viewBox="0 0 16 16" aria-hidden>
+            <path d="m6 4 4 4-4 4" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </span>
+        <span className="ui-crdc__titles">
+          <span className="ui-crdc__title">Chat with lead</span>
+          {!open && pre ? (
+            <span className="ui-crdc__desc" data-chat-preview="" title={pre.lead ? `You: ${pre.you}\nLead: ${pre.lead}` : `You: ${pre.you}`}>
+              You: {pre.you}
+              {pre.lead ? ` · Lead: ${pre.lead}` : ""}
+            </span>
+          ) : null}
+        </span>
+        {pre?.unread ? (
+          <span className="ui-crdc__action">
+            <span className="k-chat__dot" data-chat-unread="" role="img" aria-label="New reply from the lead" />
           </span>
         ) : null}
-        {pre?.unread ? <span className="k-chat__dot" data-chat-unread="" role="img" aria-label="New reply from the lead" /> : null}
       </button>
       {open ? <ChatBody project={project} now={now} cos={cos} busy={busy} refetchAll={refetchAll} /> : null}
     </section>
   );
 }
 
+/** The chat's card: affectUI's Card, its children the zones (a head, the transcript, the composer). */
+export function ChatCard({ slug, children, ...rest }: { slug: string; children: ReactNode; [data: `data-${string}`]: string | undefined }) {
+  return (
+    <Card as="section" className="k-chatcard" data-direct-line={slug} {...rest}>
+      {children}
+    </Card>
+  );
+}
+
 /** The chat itself: the lead's live thread, else the direct-message log (lead-chat.ts leadChatView). */
 export function ChatBody({ project, now, cos, busy, refetchAll, height }: { project: Project; now: number; cos: string; busy: boolean; refetchAll: () => void; height?: string }) {
   const view = leadChatView(project.lead);
-  if (view.kind === "thread") return <ThreadBox threadId={view.threadId} label={`lead:${project.slug}`} height={height} note={`The ${project.slug} lead's own thread. What you send below reaches it as a direct message.`} />;
+  if (view.kind === "thread") return <ThreadBox threadId={view.threadId} label={`lead:${project.slug}`} height={height} note={`The ${project.slug} lead's own thread.`} />;
   return <ChatPages project={project} now={now} cos={cos} busy={busy} refetchAll={refetchAll} />;
 }
 
@@ -179,9 +208,9 @@ function ChatPage({ project, before, now, cos, busy, refetchAll, oldest, onOlder
   return (
     <>
       {oldest && q.data.more && ms[0] ? (
-        <button type="button" className="k-chat__older" data-chat-older="" onClick={() => onOlder(ms[0]!.at)}>
+        <Btn tone="ghost" size="sm" className="k-chat__older" data-chat-older="" onClick={() => onOlder(ms[0]!.at)}>
           Older messages
-        </button>
+        </Btn>
       ) : null}
       {latest && ms.length === 0 ? <p className="k-chat__empty">No messages yet. Write to the lead below.</p> : null}
       {ms.map((m) => {
@@ -269,10 +298,12 @@ function resend(slug: string, id: string, refetchAll: () => void) {
  * The composer, always open: the message, an optional follow-up, and what it is not (an approval). While the box is
  * empty the follow-up is the latest message (while in force), so after a send it is the one just sent; the first
  * keystroke fixes it, and a newer message elsewhere never retargets a draft. It never takes focus by itself.
- * 1.13.0: a chat input as bb draws one (the follow-up switch and Send inside the box, the rules in one quiet line under
- * it). Whatever the chat above shows, a send is the owner's tracked direct message (lead-chat.ts directWrite). While
- * the lead's thread shows, the quiet line also says where the latest message is, and offers Resend for a dead one: the
+ * Whatever the chat above shows, a send is the owner's tracked direct message (lead-chat.ts directWrite). While the
+ * lead's thread shows, the quiet line also says where the latest message is, and offers Resend for a dead one: the
  * transcript doesn't. `via`: where the message goes, when it is not plainly "the lead" (the Scope tab's scoping thread).
+ * 1.16.0: affectUI's text area with Send beside it (it stays there while the field grows); the follow-up switch (the
+ * kit's checkbox) and one quiet line sit under them. The line says only what changes (the last message's state, a dead
+ * one's Resend, who passes it on) and that this is not an approval; the full rules are its tooltip.
  */
 export function Composer({ project, now, cos, busy, refetchAll, onFocus, compact = false, via }: { project: Project; now: number; cos: string; busy: boolean; refetchAll: () => void; onFocus: () => void; compact?: boolean; via?: string }) {
   const slug = project.slug;
@@ -321,55 +352,49 @@ export function Composer({ project, now, cos, busy, refetchAll, onFocus, compact
   // compact (the detail, 2026-11-17): the quiet line shows once typed in, or while a message needs a Resend; the
   // follow-up switch once there is a draft to follow up with
   const quiet = !compact || !!text || !!states?.dead.length;
-  const rows = Math.min(8, Math.max(compact && !text ? 1 : 2, text.split("\n").length));
+  const following = !!followUp && (!compact || !!text);
   return (
-    <div role="group" aria-label={`Message the ${project.slug} lead`} data-composer={project.slug} className={compact ? "compact" : undefined}>
-      <div className="k-input" onClick={(e) => (e.target as HTMLElement).closest("button, label, textarea") || box.current?.focus()}>
-        <textarea
-          ref={box}
-          value={text}
-          maxLength={MAX}
-          rows={rows}
-          title={rules}
-          placeholder={`Message the ${project.slug} lead… (not an approval)`}
-          aria-label={`Message to lead:${project.slug}`}
-          onFocus={onFocus}
-          onChange={(e) => update(e.target.value)}
-          // Esc leaves the text box and keeps the draft (the app's rule for every text box)
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) void send();
-          }}
-        />
-        <div className="k-input__bar">
-          {followUp && (!compact || text) ? (
-            <label className="k-input__follow" title={followUp.text}>
-              <input type="checkbox" checked={follow} onChange={(e) => update(text, e.target.checked)} data-direct-follow={followUp.id} />
-              a follow-up of your last message
-            </label>
-          ) : null}
-          <button type="button" className="btn primary k-input__send" data-direct-send={project.slug} disabled={busy || !text.trim()} title="Send (⌘/Ctrl+Enter)" onClick={() => void send()}>
-            Send to lead
-          </button>
-        </div>
-      </div>
-      {quiet ? (
-        <div className="k-input__hint" title={rules} data-composer-hint="">
-          {states?.dead.map((m) => (
-            <span key={m.id} data-direct-dead={m.id}>
-              <b className="warn">Your message of {age(m.at, now)} ago got no ack</b> and is with the {cos} ·{" "}
-              <button type="button" className="link" data-direct-resend={m.id} disabled={busy} onClick={() => resend(slug, m.id, refetchAll)}>
-                Resend
-              </button>
-              {" · "}
-            </span>
-          ))}
-          {states?.last ? (
-            <span data-direct-last={states.last.id} data-chat-state="">
-              Your last message: {states.last.word} ·{" "}
+    <div role="group" aria-label={`Message the ${project.slug} lead`} data-composer={project.slug} className={compact ? "k-composer compact" : "k-composer"}>
+      <TextArea
+        ref={box}
+        value={text}
+        maxLength={MAX}
+        minRows={compact ? 1 : 2}
+        maxRows={8}
+        title={rules}
+        placeholder={`Message the ${project.slug} lead… (not an approval)`}
+        aria-label={`Message to lead:${project.slug}`}
+        onFocus={onFocus}
+        onChange={(e) => update(e.target.value)}
+        // Esc leaves the text box and keeps the draft (the app's rule for every text box)
+        onSubmitShortcut={() => void send()}
+      />
+      <Btn tone="primary" className="k-composer__send" data-direct-send={project.slug} disabled={busy || !text.trim()} title="Send (⌘/Ctrl+Enter)" onClick={() => void send()}>
+        Send
+      </Btn>
+      {following || quiet ? (
+        <div className="k-composer__meta">
+          {following ? <Checkbox label="Follow-up of your last message" title={followUp.text} checked={follow} onChange={(e) => update(text, e.target.checked)} data-direct-follow={followUp.id} /> : null}
+          {quiet ? (
+            <span className="k-composer__hint" title={rules} data-composer-hint="">
+              {states?.dead.map((m) => (
+                <span key={m.id} data-direct-dead={m.id}>
+                  <b className="warn">No ack for your message of {age(m.at, now)} ago</b> ·{" "}
+                  <button type="button" className="link" data-direct-resend={m.id} disabled={busy} onClick={() => resend(slug, m.id, refetchAll)}>
+                    Resend
+                  </button>
+                  {" · "}
+                </span>
+              ))}
+              {states?.last ? (
+                <span data-direct-last={states.last.id} data-chat-state="">
+                  Last message: {states.last.word} ·{" "}
+                </span>
+              ) : null}
+              {via ? `${via} · ` : ""}Not an approval
+              {left < 500 ? ` · ${left} characters left` : ""}
             </span>
           ) : null}
-          {to}; the {cos} gets a copy. Not an approval.
-          {left < 500 ? ` ${left} characters left.` : ""}
         </div>
       ) : null}
     </div>

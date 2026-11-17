@@ -2,7 +2,10 @@
 // age with its source, a step meter, a context meter and the section card. Shareable: the tokens sit on [data-orch], so
 // Open PRs and Deliverables can use them as they are (not restyled this round). Rules kept: type 12/14/16, weights
 // 400/600, every gap on a 4 px grid, no coloured left edges; colour says state only, and never alone.
+// 1.16.0: the chip is affectUI's Badge and the section card its Card (affect-fit.tsx puts both on the rules above).
 import type { ReactNode } from "react";
+import { Badge } from "./affect/badge-clean.tsx";
+import { Card } from "./affect/card-clean.tsx";
 import type { AgeSpec, ChipSpec, IconName, Tone } from "./kit.ts";
 
 export const kitCss = /* css */ `
@@ -16,15 +19,17 @@ export const kitCss = /* css */ `
   --k-info: light-dark(#3730a3, #a5b4fc);
 }
 [data-orch] .k-i { width: 12px; height: 12px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
-/* .k-chip.k-chip, .k-btn.k-btn, .k-more.k-more: doubled to beat a tab's button reset ([data-orch] .orch-cc button) */
-[data-orch] .k-chip.k-chip { display: inline-flex; align-items: center; gap: 4px; height: 24px; padding: 0 8px; border-radius: 12px; font-size: 12px; line-height: 16px; font-weight: 400; white-space: nowrap; flex: none; color: var(--orch-ink); background: var(--k-wash); text-decoration: none; vertical-align: middle; }
-[data-orch] .k-chip[data-tone="need"] { background: var(--k-need); color: Canvas; font-weight: 600; }
-[data-orch] .k-chip[data-tone="blocked"] { color: var(--k-blocked); background: color-mix(in srgb, var(--k-blocked) 12%, transparent); font-weight: 600; }
-[data-orch] .k-chip[data-tone="warn"] { color: var(--k-warn); background: color-mix(in srgb, var(--k-warn) 12%, transparent); }
-[data-orch] .k-chip[data-tone="good"] { color: var(--k-good); background: color-mix(in srgb, var(--k-good) 12%, transparent); }
-[data-orch] .k-chip[data-tone="info"] { color: var(--k-info); background: color-mix(in srgb, var(--k-info) 12%, transparent); }
-[data-orch] .k-chip[data-tone="quiet"] { color: var(--orch-muted); background: transparent; box-shadow: inset 0 0 0 1px var(--k-border); }
-[data-orch] button.k-chip { cursor: pointer; border: 0; font-family: inherit; }
+/* the chip: affectUI's badge. The kit's tones carry the state colours; "need" is the tab's one solid accent */
+[data-orch] .k-chip[data-tone="need"] { --bg: var(--k-need); --fg: Canvas; font-weight: 600; }
+[data-orch] .k-chip[data-tone="blocked"] { --bg: var(--ui-bdgc-danger-bg); --fg: var(--ui-bdgc-danger-fg); font-weight: 600; }
+[data-orch] .k-chip[data-tone="warn"] { --bg: var(--ui-bdgc-warning-bg); --fg: var(--ui-bdgc-warning-fg); }
+[data-orch] .k-chip[data-tone="good"] { --bg: var(--ui-bdgc-success-bg); --fg: var(--ui-bdgc-success-fg); }
+[data-orch] .k-chip[data-tone="info"] { --bg: var(--ui-bdgc-purple-bg); --fg: var(--ui-bdgc-purple-fg); }
+/* a chip that is a button: 24 px high, the badge filling it */
+[data-orch] button.k-chipbtn.k-chipbtn { display: inline-flex; flex: none; padding: 0; border: 0; border-radius: 6px; background: none; font: inherit; cursor: pointer; }
+[data-orch] button.k-chipbtn .ui-bdgc.k-chip[data-size] { --h: 24px; }
+[data-orch] .orch-cc button.k-chipbtn .ui-bdgc.k-chip[data-size] { --h: 24px; }
+/* .k-btn.k-btn, .k-more.k-more: doubled to beat a tab's button reset ([data-orch] .orch-cc button) */
 [data-orch] .k-age { display: inline-flex; align-items: center; justify-content: flex-end; gap: 4px; min-width: 48px; font-size: 12px; line-height: 16px; color: var(--orch-muted); white-space: nowrap; flex: none; font-variant-numeric: tabular-nums; }
 [data-orch] .k-age[data-old="true"] { color: var(--k-warn); }
 [data-orch] .k-meter { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; line-height: 16px; color: var(--orch-muted); white-space: nowrap; flex: none; font-variant-numeric: tabular-nums; }
@@ -41,17 +46,16 @@ export const kitCss = /* css */ `
 [data-orch] .k-more.k-more { display: inline-flex; align-items: center; gap: 4px; min-height: 24px; padding: 0 8px; border: 0; border-radius: 12px; background: transparent; color: var(--orch-muted); font: inherit; font-size: 12px; line-height: 16px; cursor: pointer; white-space: nowrap; }
 [data-orch] .k-more.k-more:hover { background: var(--k-wash); }
 
-/* ---- section card: one section, one unit; only Needs and Blocked get a tone */
-[data-orch] .k-card { border: 1px solid var(--k-border); border-radius: 8px; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
-[data-orch] .k-card-h { display: flex; align-items: center; gap: 8px; min-height: 40px; padding: 0 12px 0 16px; margin: 0; font-size: 12px; line-height: 16px; font-weight: 600; color: var(--orch-ink); border-bottom: 1px solid var(--k-border); }
+/* ---- section card: one section, one unit (affectUI's Card, its head and rows split by the kit's hairline); only
+   Needs and Blocked get a tone, on the head */
+[data-orch] .k-card { --ui-crdc-pad: 0px; gap: 0; overflow: hidden; }
+[data-orch] .k-card-h { display: flex; align-items: center; gap: 8px; min-height: 40px; padding: 0 12px 0 16px; margin: 0; font-size: 12px; line-height: 16px; font-weight: 600; color: var(--orch-ink); border-bottom: 0.5px solid var(--orch-line); }
 [data-orch] .k-card-h .k-count { font-weight: 400; color: var(--orch-muted); font-variant-numeric: tabular-nums; }
 [data-orch] .k-card-h .k-sub { font-weight: 400; color: var(--orch-muted); }
 [data-orch] .k-card-h .k-right { margin-left: auto; display: inline-flex; align-items: center; gap: 8px; font-weight: 400; }
 [data-orch] .k-card-b { display: flex; flex-direction: column; padding: 4px 8px 8px; min-width: 0; }
-[data-orch] .k-card[data-tone="need"] { border-color: color-mix(in srgb, var(--k-need) 40%, transparent); }
-[data-orch] .k-card[data-tone="need"] > .k-card-h { background: color-mix(in srgb, var(--k-need) 12%, transparent); color: var(--k-need); border-bottom-color: color-mix(in srgb, var(--k-need) 24%, transparent); }
-[data-orch] .k-card[data-tone="blocked"] { border-color: color-mix(in srgb, var(--k-blocked) 40%, transparent); }
-[data-orch] .k-card[data-tone="blocked"] > .k-card-h { background: color-mix(in srgb, var(--k-blocked) 12%, transparent); color: var(--k-blocked); border-bottom-color: color-mix(in srgb, var(--k-blocked) 24%, transparent); }
+[data-orch] .k-card[data-tone="need"] > .k-card-h { background: color-mix(in srgb, var(--k-need) 12%, transparent); color: var(--k-need); }
+[data-orch] .k-card[data-tone="blocked"] > .k-card-h { background: color-mix(in srgb, var(--k-blocked) 12%, transparent); color: var(--k-blocked); }
 [data-orch] .k-card[data-tone] > .k-card-h .k-count { color: inherit; }
 [data-orch] .k-card[data-empty="true"] > .k-card-h { border-bottom: 0; font-weight: 400; color: var(--orch-muted); }
 
@@ -109,22 +113,22 @@ export function Icon({ name, label }: { name: IconName; label?: string }) {
   return <svg className="k-i" viewBox="0 0 16 16" role={label ? "img" : undefined} aria-label={label} aria-hidden={label ? undefined : true} dangerouslySetInnerHTML={{ __html: P[name] }} />;
 }
 
-/** The state chip: an icon and a word in one of five tones (never colour alone). */
+/** The state chip: an icon and a word in one of five tones (never colour alone), as affectUI's badge. */
 export function Chip({ spec, title, ...data }: { spec: ChipSpec; title?: string; [d: `data-${string}`]: string | undefined }) {
   return (
-    <span className="k-chip" data-tone={spec.tone} title={title} {...data}>
-      <Icon name={spec.icon} />
-      <span>{spec.word}</span>
-    </span>
+    <Badge size="md" className="k-chip" icon={<Icon name={spec.icon} />} title={title} {...data} data-tone={spec.tone}>
+      {spec.word}
+    </Badge>
   );
 }
 
 /** A chip that is also a button (a wait on the owner that opens its card). */
 export function ChipButton({ spec, title, onClick, ...data }: { spec: ChipSpec; title?: string; onClick: () => void; [d: `data-${string}`]: string | undefined }) {
   return (
-    <button type="button" className="k-chip" data-tone={spec.tone} title={title} onClick={onClick} {...data}>
-      <Icon name={spec.icon} />
-      <span>{spec.word}</span>
+    <button type="button" className="k-chipbtn" title={title} onClick={onClick} {...data}>
+      <Badge size="md" className="k-chip" icon={<Icon name={spec.icon} />} data-tone={spec.tone}>
+        {spec.word}
+      </Badge>
     </button>
   );
 }
@@ -174,7 +178,7 @@ export function CtxMeter({ used, window: win }: { used: number | null; window: n
  */
 export function SectionCard({ name, title, count, sub, tone, icon, right, empty, children }: { name: string; title: ReactNode; count?: number | null; sub?: string | null; tone?: Extract<Tone, "need" | "blocked">; icon?: IconName; right?: ReactNode; empty?: boolean; children?: ReactNode }) {
   return (
-    <section className="k-card" data-card-section={name} data-book-section={name} data-tone={tone} data-empty={empty ? "true" : "false"}>
+    <Card as="section" className="k-card" data-card-section={name} data-book-section={name} data-tone={tone} data-empty={empty ? "true" : "false"}>
       <h4 className="k-card-h">
         {icon ? <Icon name={icon} /> : null}
         <span>{title}</span>
@@ -183,7 +187,7 @@ export function SectionCard({ name, title, count, sub, tone, icon, right, empty,
         {right ? <span className="k-right">{right}</span> : null}
       </h4>
       {empty ? null : <div className="k-card-b">{children}</div>}
-    </section>
+    </Card>
   );
 }
 

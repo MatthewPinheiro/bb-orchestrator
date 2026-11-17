@@ -185,18 +185,12 @@ function PaneView({ pane, views, render, fill, wide, onView, onFocus, onSplit, o
         </div>
         {canSplit ? (
           <>
-            <Btn tone="ghost" aria-label="Split right" title="Split right" data-split-right="" onClick={() => onSplit(pane.id, "row")}>
-              <SplitRight />
-            </Btn>
-            <Btn tone="ghost" aria-label="Split down" title="Split down" data-split-down="" onClick={() => onSplit(pane.id, "col")}>
-              <SplitDown />
-            </Btn>
+            <Btn tone="ghost" icon={<SplitRight />} aria-label="Split right" title="Split right" data-split-right="" onClick={() => onSplit(pane.id, "row")} />
+            <Btn tone="ghost" icon={<SplitDown />} aria-label="Split down" title="Split down" data-split-down="" onClick={() => onSplit(pane.id, "col")} />
           </>
         ) : null}
         {many ? (
-          <Btn tone="ghost" aria-label="Close pane" title="Close pane" data-close-pane="" onClick={() => onClose(pane.id)}>
-            <CloseIcon />
-          </Btn>
+          <Btn tone="ghost" icon={<CloseIcon />} aria-label="Close pane" title="Close pane" data-close-pane="" onClick={() => onClose(pane.id)} />
         ) : null}
       </header>
       {fills ? (

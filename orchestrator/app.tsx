@@ -30,6 +30,7 @@ import { EmptyState } from "./app/affect/empty-state-clean.tsx";
 import { RENAMED_VIEWS, close, detailOf, findPane, panes, parse, pathFor, resize, setView, single, split, type Layout } from "./app/layout.ts";
 import { PaneLayout, paneCss, useWidth } from "./app/panes.tsx";
 import { Btn, Look, Muted, ReadState } from "./app/ui.tsx";
+import { AffectFit } from "./app/affect-fit.tsx";
 import { RowMeta, useRowData } from "./app/row-meta.tsx";
 import { decide, where, type TargetLike } from "./app/keys.ts";
 import { emitKeys, handlerFor, keyState } from "./app/key-state.ts";
@@ -354,6 +355,7 @@ function OrchestratorPanel({ subPath }: PluginNavPanelProps) {
     <IdentityContext.Provider value={config.data ?? DEFAULT_IDENTITY}>
     <div ref={root} data-orch="" data-view={findPane(layout, layout.focus)?.view} onPointerDownCapture={pointerPressed} className="flex h-full min-h-0 flex-1 flex-col">
       <Look />
+      <AffectFit />
       <style href={styleHref("orch-panes", paneCss)} precedence="default">
         {paneCss}
       </style>

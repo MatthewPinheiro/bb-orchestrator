@@ -20,7 +20,8 @@ export const ccCss = /* css */ `
 }
 [data-orch] .orch-cc * { box-sizing: border-box; }
 [data-orch] .orch-cc b, [data-orch] .orch-cc strong { font-weight: 600; }
-[data-orch] .orch-cc button { font: inherit; color: inherit; background: none; border: 0; padding: 0; margin: 0; cursor: pointer; text-align: start; }
+/* the tab's own buttons start bare; an affectUI one (a ui- class) keeps the kit's look */
+[data-orch] .orch-cc button:where(:not([class^="ui-"], [class*=" ui-"])) { font: inherit; color: inherit; background: none; border: 0; padding: 0; margin: 0; cursor: pointer; text-align: start; }
 [data-orch] .orch-cc ul { list-style: none; margin: 0; padding: 0; }
 [data-orch] .orch-cc .muted { color: var(--orch-muted); }
 [data-orch] .orch-cc .small { font-size: 12px; line-height: 16px; }
