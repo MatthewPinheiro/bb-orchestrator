@@ -100,3 +100,66 @@ test("joining the merge queue is news", () => {
   assert.equal(s.e.prSeen(s.w, "env1", reading({ mergeable: "MERGEABLE", merge: "mergeable", review: "approved", attention: "queued", queued: true })), true);
   assert.match(s.notices().at(-1)!, /\(mergeable, approved, queued\)/);
 });
+
+// An open PR whose only gap is its approval (2026-11-17): GitHub reads it mergeable or BLOCKED depending on when it
+// recomputes, with nothing else changing, and each flip was a notice. Both words are one state, "needs approval".
+const awaiting = reading({ mergeable: "MERGEABLE", merge: "mergeable", review: "review_requested", attention: "review_requested" });
+const awaitingBlocked = reading({ mergeable: "MERGEABLE", merge: "blocked", review: "review_requested", attention: "blocked" });
+
+test("a PR missing only its approval sends one notice while GitHub flips it between mergeable and blocked", () => {
+  for (const review of ["review_requested", "review_required"]) {
+    const s = setup();
+    for (let i = 0; i < 6; i++) {
+      s.e.prSeen(s.w, "env1", reading({ mergeable: "MERGEABLE", merge: "mergeable", review, attention: "review_requested" }));
+      s.e.prSeen(s.w, "env1", reading({ mergeable: "MERGEABLE", merge: "blocked", review, attention: "blocked" }));
+    }
+    assert.deepEqual(s.notices(), [`thread:alpha:1: PR #7 open (needs approval, ${review.replace(/_/g, " ")}), checks passing ${URL7}`], review);
+  }
+});
+
+test("the same PR's real changes still send a notice: approved (ready to merge), conflicting, checks failing", () => {
+  const s = setup();
+  s.e.prSeen(s.w, "env1", awaiting);
+  s.e.prSeen(s.w, "env1", awaitingBlocked);
+  assert.equal(s.notices().length, 1);
+  assert.equal(s.e.prSeen(s.w, "env1", reading({ mergeable: "MERGEABLE", merge: "mergeable", review: "approved", attention: "ready_to_merge" })), true, "approved: news");
+  assert.equal(s.notices("cos").length, 1, "ready to merge reaches the CoS");
+  assert.equal(s.e.prSeen(s.w, "env1", reading({ mergeable: "CONFLICTING", merge: "conflicts", review: "approved", attention: "conflicts" })), true, "a conflict: news");
+  assert.equal(s.e.prSeen(s.w, "env1", reading({ mergeable: "CONFLICTING", merge: "conflicts", review: "approved", checks: "failing", attention: "conflicts" })), true, "checks failing: news");
+  assert.equal(s.e.prSeen(s.w, "env1", reading({ mergeable: "MERGEABLE", merge: "blocked", review: "changes_requested", attention: "changes_requested" })), true, "changes requested: news");
+  assert.equal(s.e.prSeen(s.w, "env1", reading({ mergeable: "MERGEABLE", merge: "mergeable", review: "approved", attention: "merged", state: "merged" })), true, "merged: news");
+  assert.equal(s.notices().length, 6);
+});
+
+test("an approved, clean PR is still ready to merge, and blocked with an approval is still its own state", () => {
+  const s = setup();
+  s.e.prSeen(s.w, "env1", reading({ mergeable: "MERGEABLE", merge: "mergeable", review: "approved", attention: "ready_to_merge" }));
+  assert.equal(s.e.prFor("env1")!.attention, "ready_to_merge");
+  assert.equal(s.notices("cos").length, 1);
+  assert.match(s.notices().at(-1)!, /\(mergeable, approved\)/);
+  assert.equal(s.e.prSeen(s.w, "env1", reading({ mergeable: "MERGEABLE", merge: "blocked", review: "approved", attention: "blocked" })), true, "approved but blocked is something else: news");
+  assert.notEqual(s.e.prFor("env1")!.attention, "ready_to_merge");
+});
+
+test("the first reading after the change is silent: a row stored with either old word for the same state is no news", () => {
+  for (const word of ["mergeable", "blocked"]) {
+    const s = setup();
+    s.db
+      .prepare(`INSERT INTO prs (environment_id, thread_id, url, number, state, attention, checks, sig, seen_at) VALUES ('env1', 'T-w1', ?, 7, 'open', ?, 'passing', ?, 0)`)
+      .run(URL7, word, `v2|${URL7}|open|passing|review_requested|${word}|`);
+    assert.equal(s.e.prSeen(s.w, "env1", word === "mergeable" ? awaitingBlocked : awaiting), false, `stored ${word}: rewritten quietly`);
+    assert.equal(s.e.prSeen(s.w, "env1", word === "mergeable" ? awaiting : awaitingBlocked), false);
+    assert.equal(s.notices().length, 0, word);
+    assert.equal(s.e.prSeen(s.w, "env1", reading({ mergeable: "MERGEABLE", merge: "blocked", review: "review_requested", checks: "failing", attention: "blocked" })), true, "a real change after it still is news");
+  }
+});
+
+test("an approval that lands while GitHub recomputes never reads as needing one, and ready waits for a known reading", () => {
+  const s = setup();
+  s.e.prSeen(s.w, "env1", awaiting);
+  assert.equal(s.e.prSeen(s.w, "env1", reading({ mergeable: "UNKNOWN", merge: "unknown", review: "approved", attention: "none" })), true);
+  assert.equal(s.notices().at(-1), `thread:alpha:1: PR #7 open (approved), checks passing ${URL7}`);
+  assert.equal(s.notices("cos").length, 0, "no guess at ready while the mergeability is unknown");
+  assert.equal(s.e.prSeen(s.w, "env1", reading({ mergeable: "MERGEABLE", merge: "mergeable", review: "approved", attention: "ready_to_merge" })), true);
+  assert.equal(s.notices("cos").length, 1, "the next known reading tells the CoS");
+});

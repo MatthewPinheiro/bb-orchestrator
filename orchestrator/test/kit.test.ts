@@ -200,3 +200,13 @@ test("the Scope tab lists each project scoping as a whole and each open scoping 
   assert.equal(scopeEntryOf(kite, "st-a"), "kite/st-a", "a link to a task's card opens that task");
   assert.equal(scopeEntryOf(kite, "st-gone"), "kite");
 });
+
+test("a PR missing only its approval reads in review on either word GitHub flips between, never a red blocked", () => {
+  // the lane keeps whichever word came with the last real change: both must draw the same chip
+  for (const review of ["review_requested", "review_required"]) {
+    const chips = ["blocked", "review_requested", "none"].map((attention) => prChips(pr(9, { attention, review })));
+    for (const c of chips) assert.deepEqual(c, [{ tone: "info", icon: "eye", word: "in review" }], review);
+  }
+  assert.equal(prChips(pr(10, { attention: "blocked", review: "review_requested", state: "draft" }))[0]!.word, "blocked", "a draft is not that state");
+  assert.deepEqual(words(prChips(pr(11, { attention: "blocked", review: "review_requested", checks: "failing" }))), ["in review", "CI failing"], "failing checks still show");
+});

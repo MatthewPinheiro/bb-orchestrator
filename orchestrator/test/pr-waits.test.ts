@@ -240,3 +240,14 @@ test("a message acked with pr is moved and dropped the same way by its recipient
   s.e.tick();
   assert.equal(s.nudges().length, 0);
 });
+
+test("a ready wait sleeps while GitHub flips a PR missing its approval between mergeable and blocked, and fires once it is approved and clean", () => {
+  const s = setup();
+  s.see(reading({}));
+  s.e.ack(s.lead, s.d.id, "done", "waiting until it can merge", { pr: URL, when: "ready" });
+  for (let i = 0; i < 4; i++) s.see(reading({ mstate: i % 2 ? "blocked" : "mergeable" }));
+  assert.equal(s.wakes().length, 0, "still missing its approval: not ready on either word");
+  s.see(reading({ review: "approved", mstate: "mergeable" }));
+  assert.equal(s.wakes().length, 1);
+  assert.match(s.wakes()[0]!.body, /PR #1234 is ready to merge/);
+});

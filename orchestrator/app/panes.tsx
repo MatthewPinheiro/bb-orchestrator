@@ -231,4 +231,6 @@ export const paneCss = /* css */ `
    with its count slot, its label centred. Kept at that natural width here (the mode would otherwise stretch the strip
    across the row); too narrow for them all, the strip scrolls sideways with the tabs still equal, none cut short */
 [data-orch] [data-pane] > header .ui-segc[data-full] { display: inline-flex; width: auto; }
+/* 2026-11-17: in a plugin pane bb-app 0.49.0's ThreadChat caps only the transcript at its 760px column, not the composer (bb's own thread page caps both), so the composer's wrapper (bb's [data-scroll-footer] and [data-app-composer] hooks) gets the same cap; a no-op once bb centres it itself */
+[data-orch] [data-pane-view="chat"] [data-scroll-footer] :has(> [data-app-composer]) { max-width: 760px; margin-inline: auto; }
 `;

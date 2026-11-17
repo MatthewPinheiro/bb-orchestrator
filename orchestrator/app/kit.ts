@@ -66,8 +66,9 @@ export function prChips(pr: PrLike): ChipSpec[] {
   else if (pr.state === "closed") out.push({ tone: "quiet", icon: "x", word: "closed" });
   else if (a === "ready_to_merge") out.push({ tone: "good", icon: "check", word: "ready to merge" });
   else if (a === "conflicts") out.push({ tone: "blocked", icon: "x", word: "conflicts" });
-  // blocked outranks a review's approval: a PR that can't merge must never read green
-  else if (a === "blocked") out.push({ tone: "blocked", icon: "blocked", word: "blocked" });
+  // blocked outranks a review's approval: a PR that can't merge must never read green. An open PR still missing its
+  // approval reads "in review" on either of GitHub's words for it, as its notice does, for the owner (2026-11-17)
+  else if (a === "blocked" && !(pr.state === "open" && (r === "review_required" || r === "review_requested"))) out.push({ tone: "blocked", icon: "blocked", word: "blocked" });
   else if (r === "changes_requested") out.push({ tone: "warn", icon: "eye", word: "changes asked" });
   else if (pr.state === "draft") out.push({ tone: "quiet", icon: "draft", word: "draft" });
   else if (r === "approved") out.push({ tone: "good", icon: "check", word: "approved" });

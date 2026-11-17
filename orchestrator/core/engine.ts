@@ -553,6 +553,10 @@ interface WaitRow {
   item_id: string | null;
 }
 
+const awaitsApproval = (state: string | null, review: string | null) => state === "open" && (review === "review_required" || review === "review_requested");
+/** An open PR still missing its approval: GitHub reads it mergeable or BLOCKED as it recomputes, so for the owner both are one word, one notice (2026-11-17). */
+const approvalWord = (state: string | null, review: string | null, merge: string | null) => (awaitsApproval(state, review) && (merge === "mergeable" || merge === "blocked") ? "needs_approval" : merge);
+
 /**
  * One PR reading's facts as the engine keeps them, for bb's readings and a PR wait's gh reading alike, so "ready" has
  * one rule. `prevMerge`: the last known mergeability (undefined: none). GitHub reads mergeable UNKNOWN while it
@@ -563,8 +567,10 @@ function prFacts(pr: Extract<PrResult, { outcome: "available" }>["pullRequest"],
   const attention = pr.attention ?? null;
   // an injected reading or an older bb has no mergeability or review: its attention stands in for both
   const raw = pr.mergeability ? pr.mergeability.mergeable : undefined;
-  const merge = !pr.mergeability ? attention : raw && raw !== "UNKNOWN" ? (pr.mergeability.state ?? null) : (prevMerge ?? "unknown");
   const review = pr.mergeability || pr.review ? (pr.review?.state ?? null) : null;
+  // a kept "needs_approval" whose approval has come since says nothing: unknown, never a guess at ready
+  const kept = prevMerge === "needs_approval" && !awaitsApproval(pr.state, review) ? "unknown" : (prevMerge ?? "unknown");
+  const merge = approvalWord(pr.state, review, !pr.mergeability ? attention : raw && raw !== "UNKNOWN" ? (pr.mergeability.state ?? null) : kept);
   const queued = pr.inMergeQueue === true;
   const sig = ["v2", pr.url, pr.state, checks ?? "", review ?? "", merge ?? "", queued ? "queued" : ""].join("|");
   // ready to merge, by bb's own order, from the signature's fields (bb's attention says "none" mid-recompute)
@@ -3953,8 +3959,10 @@ export class Engine {
     const prev = !old || old.url !== pr.url ? null : legacy ? { merge: old.attention === "conflicts" ? "conflicts" : null } : { merge: old.sig.split("|")[5] || null };
     const { checks, review, merge, queued, sig, ready, shown } = prFacts(pr, prev ? prev.merge : undefined);
     if (old?.sig === sig) return false;
-    // the first reading after the upgrade only rewrites the signature: a changed format is no news
-    const quiet = legacy && old.url === pr.url && old.state === pr.state && old.checks === checks;
+    // the first reading after the upgrade only rewrites the signature: a changed format, or an old merge word for the same state, is no news
+    const was = old && !legacy ? old.sig.split("|") : null;
+    const reworded = !!was && [...was.slice(0, 5), approvalWord(was[2] ?? null, was[4] || null, was[5] || null) ?? "", ...was.slice(6)].join("|") === sig;
+    const quiet = reworded || (legacy && old.url === pr.url && old.state === pr.state && old.checks === checks);
     return tx(this.db, () => {
       this.db
         .prepare(
