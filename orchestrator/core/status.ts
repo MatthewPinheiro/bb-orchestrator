@@ -21,7 +21,7 @@ export type ListWaitKind = (typeof LIST_WAIT_KINDS)[number];
 /** A status older than this is stale: the page says so, and the lead is nudged once. */
 export const STATUS_STALE_MS = 2 * 3_600_000;
 /** Short caps ("way less text"). Enforced here, never in the tool schema: a running agent keeps the schema it started with. */
-export const STATUS_CAPS = { goal: 100, steps: 8, step: 48, label: 60, ref: 300, who: 40, waits: 3, blockers: 3, blocker: 100, workingOn: 3, bullet: 120, updateLine: 160 } as const;
+export const STATUS_CAPS = { goal: 100, steps: 8, step: 48, label: 60, ref: 300, who: 40, waits: 3, blockers: 3, blocker: 100, workingOn: 3, bullet: 90, updateLine: 140 } as const;
 
 /** One thing the lead waits on. `since`: when this kind and ref were first published (kept while they stay the same). */
 export interface Wait {
@@ -87,7 +87,7 @@ export const statusParams = z.object({
     .nullish()
     .describe(
       `The Lead status card on your project: {working_on: 1-${STATUS_CAPS.workingOn} bullets of what you have been working on (at most ${STATUS_CAPS.bullet} each), ` +
-        `at: where it stands (at most ${STATUS_CAPS.updateLine}), needs: what it needs (at most ${STATUS_CAPS.updateLine})}. Replaces the last one; null clears it`,
+        `at: where it stands (at most ${STATUS_CAPS.updateLine}), needs: what it needs (at most ${STATUS_CAPS.updateLine})}. Plain words about the task and what is done; no SHAs, run ids or tool names. Replaces the last one; null clears it`,
     ),
   // leads whose session loaded the tool before `update` send its fields at the top level: kept (not stripped) and read as
   // the update when `update` is absent; `update` wins when both are given
@@ -206,11 +206,11 @@ export function normalizeStatus(
       const workingOn = (typeof u.working_on === "string" ? [u.working_on] : (u.working_on ?? [])).map(line).filter(Boolean);
       if (!workingOn.length) return { refusal: `${f}working_on is empty: give 1-3 bullets of what you have been working on` };
       if (workingOn.length > STATUS_CAPS.workingOn) return { refusal: `${f}working_on has ${workingOn.length} bullets; the cap is ${STATUS_CAPS.workingOn}. Keep the main ones` };
-      for (const [i, b] of workingOn.entries()) if (b.length > STATUS_CAPS.bullet) return { refusal: over(`${f}working_on[${i}]`, b.length, STATUS_CAPS.bullet, "One short line per bullet") };
+      for (const [i, b] of workingOn.entries()) if (b.length > STATUS_CAPS.bullet) return { refusal: over(`${f}working_on[${i}]`, b.length, STATUS_CAPS.bullet, "One short line per bullet: shorter, plain words") };
       const at = line(u.at ?? "");
       const needs = line(u.needs ?? "");
-      if (at.length > STATUS_CAPS.updateLine) return { refusal: over(`${f}at`, at.length, STATUS_CAPS.updateLine, "Say where it stands in one line") };
-      if (needs.length > STATUS_CAPS.updateLine) return { refusal: over(`${f}needs`, needs.length, STATUS_CAPS.updateLine, "Say what it needs in one line") };
+      if (at.length > STATUS_CAPS.updateLine) return { refusal: over(`${f}at`, at.length, STATUS_CAPS.updateLine, "Say where it stands in one line: shorter, plain words") };
+      if (needs.length > STATUS_CAPS.updateLine) return { refusal: over(`${f}needs`, needs.length, STATUS_CAPS.updateLine, "Say what it needs in one line: shorter, plain words") };
       out.update = { workingOn, at, needs, updateAt: ctx.now };
     }
   }

@@ -225,7 +225,7 @@ test("top-level working_on, at and needs (a lead on the schema before update) ar
   assert.deepEqual(st.update, { workingOn: ["Alias", "Fix"], at: "tests pass", needs: "a review", updateAt: T0 }, "stored as the card, not stripped");
   assert.throws(() => s.publish({ working_on: ["a", "b", "c", "d"] }), /working_on has 4 bullets; the cap is 3/);
   assert.throws(() => s.publish({ at: "x".repeat(STATUS_CAPS.updateLine + 1) }), /working_on is empty/, "an at without working_on is refused, not dropped");
-  assert.throws(() => s.publish({ working_on: "ok", needs: "x".repeat(STATUS_CAPS.updateLine + 1) }), /needs is 161 characters/);
+  assert.throws(() => s.publish({ working_on: "ok", needs: "x".repeat(STATUS_CAPS.updateLine + 1) }), /needs is 141 characters; the cap is 140\. .*shorter, plain words/);
   assert.deepEqual(s.e.leadStatus("demo")?.update?.workingOn, ["Alias", "Fix"], "a refused call keeps the last card");
   const both = statusParams.parse({ update: { working_on: "Inside" }, working_on: "Outside", needs: "n" });
   assert.deepEqual(s.publish(both).update?.workingOn, ["Inside"], "update wins");
