@@ -77,6 +77,8 @@ import {
   type Role,
   ROLES,
   type Rule,
+  type ScopingTask,
+  type ScopingTaskState,
 } from "./model.ts";
 
 export interface Settings {
@@ -334,8 +336,13 @@ export interface AskInput {
   key?: string | null;
   /** Typed parts the screens draw as components (blocks.ts). */
   blocks?: Block[];
-  /** "Scoping done?" (1.11.0): a scoping project's lead proposes the end, with its summary and PROJECT.md. */
-  scopingDone?: { summary: string; projectMd: string } | null;
+  /**
+   * "Scoping done?" (1.11.0): a scoping project's lead proposes the end, with its summary and PROJECT.md. With task
+   * (1.12.0): it proposes closing that scoping task, with the file (doc, or projectMd) its findings are in.
+   */
+  scopingDone?: { summary: string; projectMd?: string; doc?: string; task?: string | null } | null;
+  /** A lead's scoping task (1.12.0, its id or an open task's name): the card goes to the owner's Scope pane under it. */
+  scopeTask?: string | null;
 }
 
 /** The "Scoping done?" card's options, fixed so the owner's yes can't be misread: option 1 makes the project active. */
@@ -343,8 +350,15 @@ export const SCOPING_DONE_OPTIONS = [
   { label: "Yes, scoping is done", detail: "The project becomes active: the normal card flow from now on" },
   { label: "Not yet", detail: "It stays scoping; say in the note what is missing" },
 ] as const;
+/** A scoping task's "Scoping done?" (1.12.0): option 1 closes only that task; the rest of the project is unchanged. */
+export const SCOPING_TASK_DONE_OPTIONS = [
+  { label: "Yes, scoping is done", detail: "The task closes; its cards go the normal way from now on" },
+  { label: "Not yet", detail: "The task stays open; say in the note what is missing" },
+] as const;
 /** The summary's cap: the goal, the constraints and the first plan, as a plan's thread list. */
 export const SCOPING_SUMMARY_MAX = 1600;
+/** A scoping task's name: a short label on the Scope tab. */
+export const SCOPING_TASK_NAME_MAX = 60;
 
 export interface BoardRow {
   id: string;
@@ -500,7 +514,22 @@ export interface DeliverInput {
   blocks?: Block[];
   /** 2-6 decisions and findings, one line each with a short why, drawn before any prose. Absent: the old layout. */
   points?: Point[];
+  /** A scoping task (1.12.0, its id or an open task's name): reviewed in the owner's Scope pane under it. */
+  scopeTask?: string | null;
 }
+interface TaskRow {
+  id: string;
+  project: string;
+  name: string;
+  state: string;
+  opened_by: string;
+  opened_at: number;
+  closed_at: number | null;
+  summary: string | null;
+  doc: string | null;
+}
+const toTask = (r: TaskRow): ScopingTask => ({ id: r.id, project: r.project, name: r.name, state: r.state as ScopingTaskState, openedBy: r.opened_by, openedAt: r.opened_at, closedAt: r.closed_at, summary: r.summary, doc: r.doc });
+
 /** The folders a proof file may resolve into, each with the bb host it is on (missing folders are skipped). */
 export interface DeliverPlace {
   roots: { path: string; hostId: string | null }[];
@@ -2021,10 +2050,14 @@ export class Engine {
   ask(by: Agent, input: AskInput): Decision {
     if (by.role === "cos") throw new EngineError("forbidden", `the CoS asks ${this.owner.name} through triage(ask_person)`);
     const t = this.now();
-    // a scoping project's lead files into the owner's Scope pane; its threads still ask it, as always
-    const scoping = by.role === "lead" && this.isScoping(by.project);
-    const done = input.scopingDone ? this.scopingDone(by, scoping, input) : null;
-    const options = this.options(done ? SCOPING_DONE_OPTIONS.map((o) => ({ ...o })) : input.options, 2);
+    // a scoping project's lead, or a lead filing into one of its scoping tasks, files into the owner's Scope pane; its
+    // threads still ask it, as always
+    const done = input.scopingDone ? this.scopingDone(by, input) : null;
+    const named = input.scopeTask ? this.resolveTask(by, input.scopeTask) : null;
+    if (named && done?.task && named.id !== done.task) throw new EngineError("invalid", `scope_task ${named.id} and scoping_done.task ${done.task} name different tasks: give one`);
+    const task = done?.task ?? named?.id ?? null;
+    const scoping = by.role === "lead" && (!!task || this.isScoping(by.project));
+    const options = this.options(done ? (done.task ? SCOPING_TASK_DONE_OPTIONS : SCOPING_DONE_OPTIONS).map((o) => ({ ...o })) : input.options, 2);
     const kind = input.kind ?? "question";
     const tooLong = cardRefusal({ question: input.question, context: input.context, options, kind });
     if (tooLong) throw new EngineError("invalid", tooLong);
@@ -2046,8 +2079,11 @@ export class Engine {
         if (dup) return this.mustDecision(dup.id);
       }
       if (done) {
-        const open = this.db.prepare(`SELECT id FROM decisions WHERE project = ? AND state IN ('open','asked') AND json_extract(json, '$.orchestrator.scoping_done') IS NOT NULL`).get(by.project) as { id: string } | undefined;
-        if (open) throw new EngineError("bad_state", `${open.id} already asks ${this.owner.name} whether scoping is done: wait for that answer`);
+        // one at a time: per task, and one for the whole project
+        const open = this.db
+          .prepare(`SELECT id FROM decisions WHERE project = ? AND state IN ('open','asked') AND json_extract(json, '$.orchestrator.scoping_done') IS NOT NULL AND json_extract(json, '$.orchestrator.scoping_done.task') IS ?`)
+          .get(by.project, done.task ?? null) as { id: string } | undefined;
+        if (open) throw new EngineError("bad_state", `${open.id} already asks ${this.owner.name} whether ${done.task ? `scoping task ${done.task}` : "scoping"} is done: wait for that answer`);
       }
       const d: Decision = {
         schema: 1,
@@ -2089,6 +2125,7 @@ export class Engine {
           forwarded_by: null,
           plan,
           ...(done ? { scoping_done: done } : {}),
+          ...(task ? { scope_task: task } : {}),
         },
       };
       if (atCos) this.gate(d);
@@ -2099,20 +2136,34 @@ export class Engine {
       }
       if (this.ruleSettles(d)) return this.mustDecision(d.id);
       if (atCos) this.fileWithCos(d, by.address);
-      else this.put({ recipient: `lead:${by.project}`, sender: by.address, kind: "decision.new", ref: d.id, body: this.describe(d, "lead"), needsAck: false });
+      else {
+        // a scoping thread's question: the lead's forward files it under the thread's task
+        const tt = this.threadTask(d);
+        const from = tt ? ` From the scoping thread for task ${JSON.stringify(tt.name)} (${tt.id}): orch_forward files it in ${this.owner.name}'s Scope pane under that task.` : "";
+        this.put({ recipient: `lead:${by.project}`, sender: by.address, kind: "decision.new", ref: d.id, body: this.describe(d, "lead") + from, needsAck: false });
+      }
       return this.mustDecision(d.id);
     });
   }
 
-  /** A "Scoping done?" card's checks: a scoping project's lead, a plain question, a summary and its PROJECT.md. */
-  private scopingDone(by: Agent, scoping: boolean, input: AskInput): { summary: string; project_md: string } {
+  /**
+   * A "Scoping done?" card's checks: a scoping project's lead, a plain question, a summary and its PROJECT.md. With task
+   * (1.12.0): one of the lead's open scoping tasks, in a project of either mode, and the file its findings are in.
+   */
+  private scopingDone(by: Agent, input: AskInput): { summary: string; project_md?: string; doc?: string; task?: string } {
     const s = input.scopingDone!;
     if (by.role !== "lead") throw new EngineError("forbidden", "only a lead proposes the end of its project's scoping");
-    if (!scoping) throw new EngineError("bad_state", `${by.project} isn't scoping: "Scoping done?" is only for a project in scoping mode`);
+    const task = s.task ? this.resolveTask(by, s.task) : null;
+    if (!task && !this.isScoping(by.project)) throw new EngineError("bad_state", `${by.project} isn't scoping: "Scoping done?" is only for a project in scoping mode, or for one of its open scoping tasks (give task)`);
     if ((input.kind ?? "question") !== "question" || input.action) throw new EngineError("invalid", `"Scoping done?" is a plain question: no plan, no merge card`);
     const summary = String(s.summary ?? "").trim();
-    if (!summary) throw new EngineError("invalid", "scoping_done needs summary: the goal, the constraints and the first plan, as written to PROJECT.md");
-    if (summary.length > SCOPING_SUMMARY_MAX) throw new EngineError("invalid", `scoping_done's summary is ${summary.length} characters; the cap is ${SCOPING_SUMMARY_MAX}. Keep the goal, the constraints and the first plan; the rest is in PROJECT.md`);
+    if (!summary) throw new EngineError("invalid", `scoping_done needs summary: ${task ? "what the task settled" : "the goal, the constraints and the first plan, as written to PROJECT.md"}`);
+    if (summary.length > SCOPING_SUMMARY_MAX) throw new EngineError("invalid", `scoping_done's summary is ${summary.length} characters; the cap is ${SCOPING_SUMMARY_MAX}. Keep the goal, the constraints and the first plan; the rest is in ${task ? "the doc" : "PROJECT.md"}`);
+    if (task) {
+      const doc = String(s.doc ?? s.projectMd ?? "").trim();
+      if (!isAbsolute(doc)) throw new EngineError("invalid", "scoping_done with task needs doc (or project_md): the absolute path of the file you wrote the task's findings to");
+      return { summary, doc, task: task.id };
+    }
     const md = String(s.projectMd ?? "").trim();
     if (!isAbsolute(md) || !/(^|\/)PROJECT\.md$/.test(md)) throw new EngineError("invalid", "scoping_done needs project_md: the absolute path of the PROJECT.md you wrote the summary to");
     return { summary, project_md: md };
@@ -2154,18 +2205,24 @@ export class Engine {
     return ` Likely moot: ${this.owner.name}'s change note on ${hit.v.id} ${JSON.stringify(hit.v.title)} ${ago(at - Date.parse(hit.f.at))} ago already asks for this: ${JSON.stringify(hit.f.text!.slice(0, 300))} (shared: ${hit.shared.join(", ")}). ${d.kind === "plan" || d.orchestrator.action === "merge" ? `A ${d.kind === "plan" ? "plan's go" : "merge card's yes"} still comes from ${this.owner.name}: if the note covers it, say so when you ask.` : `If the note covers it, orch_moot it instead of asking ${this.owner.name}.`}`;
   }
 
-  /** A lead files its thread's question up to the CoS. The lead becomes the asker: the answer comes to it. */
-  forward(by: Agent, id: string, note: string | null): Decision {
+  /**
+   * A lead files its thread's question up to the CoS. The lead becomes the asker: the answer comes to it. With
+   * `scopeTask`, or from a thread started for a scoping task that is still open (1.12.0), it goes to the owner's Scope
+   * pane under that task instead.
+   */
+  forward(by: Agent, id: string, note: string | null, scopeTask: string | null = null): Decision {
     return tx(this.db, () => {
       const d = this.mustDecision(id);
       if (by.role !== "lead" || d.orchestrator.at_level !== "lead" || d.project !== by.project) throw new EngineError("forbidden", `${id} isn't your thread's question`);
       if (d.state !== "open") throw new EngineError("bad_state", `${id} is ${d.state}`);
+      const task = scopeTask ? this.resolveTask(by, scopeTask) : this.threadTask(d);
+      if (task) d.orchestrator.scope_task = task.id;
       d.orchestrator.asker = by.address;
       d.orchestrator.forwarded_by = by.address;
       d.reply_to.labels = { "orchestrator.address": by.address };
       if (note) d.request.context = `${d.request.context}\n\nLead's note: ${note}`.trim().slice(0, 8192);
       this.gate(d);
-      if (this.isScoping(by.project)) this.fileInScope(d, by.address); // the lead's card now: the Scope pane, like its own
+      if (task || this.isScoping(by.project)) this.fileInScope(d, by.address); // the lead's card now: the Scope pane, like its own
       else if (!this.ruleSettles(d)) this.fileWithCos(d, by.address);
       return this.mustDecision(id);
     });
@@ -2356,7 +2413,7 @@ export class Engine {
       const p = this.mustDecision(into);
       if (p.id === d.id) throw new EngineError("invalid", "a decision can't merge into itself");
       if (!["open", "asked"].includes(p.state) || p.orchestrator.at_level === "lead") throw new EngineError("bad_state", `${into} is ${p.state} at ${p.orchestrator.at_level}`);
-      if (p.orchestrator.scope) throw new EngineError("forbidden", `${into} waits in ${this.owner.name}'s Scope pane (${p.project} is scoping): your copy is read-only`);
+      if (p.orchestrator.scope) throw new EngineError("forbidden", `${into} waits in ${this.owner.name}'s Scope pane (${this.scopeWhy(p.project, p.orchestrator.scope_task)}): your copy is read-only`);
       // a merged card takes its parent's answer: a plan's go or a merge card's yes must come from the owner on that card itself
       if (d.kind === "plan" || p.kind === "plan") throw new EngineError("forbidden", `a plan card is never merged: ${this.owner.name} approves each plan on its own card`);
       if (d.orchestrator.action === "merge" || p.orchestrator.action === "merge") throw new EngineError("forbidden", `a merge card is never merged: ${this.owner.name} answers each PR's card in person`);
@@ -2575,7 +2632,7 @@ export class Engine {
     return tx(this.db, () => {
       const d = this.mustDecision(id);
       if (d.orchestrator.at_level === "lead") throw new EngineError("bad_state", `${id} is with ${d.orchestrator.asker}'s lead, not on ${this.owner.name}'s Needs you`);
-      if (d.orchestrator.scope) throw new EngineError("forbidden", `${id} waits in ${this.owner.name}'s Scope pane (${d.project} is scoping), not on Needs you: your copy is read-only`);
+      if (d.orchestrator.scope) throw new EngineError("forbidden", `${id} waits in ${this.owner.name}'s Scope pane (${this.scopeWhy(d.project, d.orchestrator.scope_task)}), not on Needs you: your copy is read-only`);
       if (d.state !== "open" && d.state !== "asked") throw new EngineError("bad_state", `${id} is ${d.state}${d.withdrawn?.moot ? " (already moot)" : ""}: only an open card can be moot`);
       this.mootOne(d, why, by.address);
       for (const mid of d.merged) {
@@ -2639,8 +2696,13 @@ export class Engine {
       this.save(d, "answer", "person", wasDeferred ? "answered while deferred" : proposal?.rule_id ? `rule ${proposal.rule_id} added` : null, rev);
       this.relay(d);
       this.copyAnswerToCos(d, `option ${opt ? `${opt.id} ${JSON.stringify(opt.label)}` : "none"}${t ? `, note: ${JSON.stringify(t)}` : ""}`);
-      // "Scoping done?": only option 1 is the yes; "Not yet" or a note alone keeps scoping (the note went to the lead)
-      if (d.orchestrator.scoping_done && d.project && opt?.id === "1") this.setMode(d.project, "active", "person", d.id);
+      // "Scoping done?": only option 1 is the yes; "Not yet" or a note alone keeps scoping (the note went to the lead). A
+      // task's closes only that task (1.12.0); the project's mode and its other tasks stay as they are.
+      const sd = d.orchestrator.scoping_done;
+      if (sd && d.project && opt?.id === "1") {
+        if (sd.task) this.closeTask(sd.task, "done", "person", d.id, sd.summary, sd.doc ?? null);
+        else this.setMode(d.project, "active", "person", d.id);
+      }
       if (proposal?.rule_id) this.put({ recipient: "cos", sender: "person", kind: "notice", ref: d.id, body: `Rule ${proposal.rule_id} is live: ${JSON.stringify(proposal.text)}. It settles the cards it matches by itself; you hear about each one.`, key: `rule-live:${d.id}`, needsAck: false });
       this.offerRule(d);
       this.releaseHeld();
@@ -3023,30 +3085,8 @@ export class Engine {
       this.event({ kind: "mode", project: slug, address: `lead:${slug}`, threadId: null, value: mode, note: by, ref: card });
       const o = this.owner;
       const who = by === "person" ? o.Name : by;
-      let moved = 0;
-      if (mode === "active") {
-        const open = (this.db.prepare(`SELECT json FROM decisions WHERE project = ? AND state = 'asked' AND json_extract(json, '$.orchestrator.scope') = 1 ORDER BY id`).all(slug) as { json: string }[]).map((r) => JSON.parse(r.json) as Decision);
-        for (const d of open) {
-          if (d.id === card) continue;
-          if (d.orchestrator.scoping_done) {
-            d.state = "withdrawn";
-            d.withdrawn = { by, at: iso(this.now()), reason: `${slug} is active now (${who} ended scoping)` };
-            this.save(d, "withdraw", by, "scoping ended", null);
-            continue;
-          }
-          d.orchestrator.scope = false;
-          this.save(d, "notify", "engine", "scoping ended: to Needs you", null);
-          this.upOrHold(d);
-          moved++;
-        }
-        for (const v of this.db.prepare(`SELECT json FROM deliverables WHERE project = ? AND state = 'review' AND json_extract(json, '$.scope') = 1`).all(slug) as { json: string }[]) {
-          const d = JSON.parse(v.json) as Deliverable;
-          delete d.scope;
-          this.saveDeliverable(d);
-          this.ports.delivered?.(d);
-          moved++;
-        }
-      }
+      // what waits under a scoping task still open stays: the task is scoped on its own (1.12.0)
+      const moved = mode === "active" ? this.releaseScope(slug, (task) => !task || this.task(task)?.state !== "scoping", by, card, `${slug} is active now (${who} ended scoping)`) : 0;
       const what =
         mode === "scoping"
           ? `${slug} is scoping: its lead's cards and deliverables go only to ${o.name}'s Scope pane, and no standing rule settles them.`
@@ -3072,7 +3112,159 @@ export class Engine {
     });
   }
 
-  /** A card from a scoping project's lead: straight to the owner in its Scope pane, and a read-only copy to the CoS. */
+  /**
+   * Release the Scope pane's open cards and deliverables in review that `pick` takes (by their task id, or null): while
+   * the project is active, to Needs you and Deliverables; while it scopes as a whole, back to its whole-project pane (they
+   * only lose the task). An open "Scoping done?" among them, except `keep` (the card that made the change), is withdrawn
+   * with `reason`: nothing is left to decide. How many moved.
+   */
+  private releaseScope(slug: string, pick: (task: string | null) => boolean, by: string, keep: string | null, reason: string): number {
+    const whole = this.isScoping(slug);
+    let moved = 0;
+    const open = (this.db.prepare(`SELECT json FROM decisions WHERE project = ? AND state = 'asked' AND json_extract(json, '$.orchestrator.scope') = 1 ORDER BY id`).all(slug) as { json: string }[]).map((r) => JSON.parse(r.json) as Decision);
+    for (const d of open) {
+      if (d.id === keep || !pick(d.orchestrator.scope_task ?? null)) continue;
+      if (d.orchestrator.scoping_done) {
+        d.state = "withdrawn";
+        d.withdrawn = { by, at: iso(this.now()), reason };
+        this.save(d, "withdraw", by, "scoping ended", null);
+        continue;
+      }
+      delete d.orchestrator.scope_task;
+      moved++;
+      if (whole) {
+        this.save(d, "notify", "engine", "its scoping task closed: to the whole project's Scope pane", null);
+        continue;
+      }
+      d.orchestrator.scope = false;
+      this.save(d, "notify", "engine", "scoping ended: to Needs you", null);
+      this.upOrHold(d);
+    }
+    for (const v of this.db.prepare(`SELECT json FROM deliverables WHERE project = ? AND state = 'review' AND json_extract(json, '$.scope') = 1`).all(slug) as { json: string }[]) {
+      const d = JSON.parse(v.json) as Deliverable;
+      if (!pick(d.scope_task ?? null)) continue;
+      delete d.scope_task;
+      moved++;
+      if (!whole) delete d.scope;
+      this.saveDeliverable(d);
+      if (!whole) this.ports.delivered?.(d);
+    }
+    return moved;
+  }
+
+  /** One scoping task (1.12.0), or null. */
+  task(id: string): ScopingTask | null {
+    const r = this.db.prepare(`SELECT * FROM scoping_tasks WHERE id = ?`).get(id) as TaskRow | undefined;
+    return r ? toTask(r) : null;
+  }
+
+  /** The open scoping tasks of live projects, oldest first: one project's, or all of them. */
+  openTasks(project: string | null = null): ScopingTask[] {
+    return (
+      this.db
+        .prepare(`SELECT t.* FROM scoping_tasks t JOIN projects p ON p.slug = t.project WHERE t.state = 'scoping' AND p.archived_at IS NULL AND (? IS NULL OR t.project = ?) ORDER BY t.opened_at, t.rowid`)
+        .all(project, project) as unknown as TaskRow[]
+    ).map(toTask);
+  }
+
+  /**
+   * A lead's open scoping task, by its id or its name (any case). Refused, with what to do instead: from anyone but a
+   * lead, for another project's task, for a task that is done or dropped, or for one that doesn't exist.
+   */
+  resolveTask(by: Agent, ref: string): ScopingTask {
+    if (by.role !== "lead" || !by.project) throw new EngineError("forbidden", `only a lead files into a scoping task${by.role === "thread" ? ": ask your lead as always, and it files your questions into the task" : ""}`);
+    const key = String(ref ?? "").trim();
+    if (!key) throw new EngineError("invalid", "scope_task is empty: give an open scoping task's id (st-…) or name, or leave it out");
+    const byName = this.db.prepare(`SELECT * FROM scoping_tasks WHERE project = ? AND name = ? COLLATE NOCASE ORDER BY state = 'scoping' DESC, opened_at DESC LIMIT 1`).get(by.project, key) as TaskRow | undefined;
+    const t = this.task(key) ?? (byName ? toTask(byName) : null);
+    if (!t) throw new EngineError("not_found", `${by.project} has no scoping task ${JSON.stringify(key)}: open one with orch_scope_task(action="open", name), or leave scope_task out`);
+    if (t.project !== by.project) throw new EngineError("forbidden", `${t.id} is ${t.project}'s scoping task, not ${by.project}'s`);
+    if (t.state !== "scoping") throw new EngineError("bad_state", `scoping task ${t.id} ${JSON.stringify(t.name)} is ${t.state}${t.closedAt ? ` since ${iso(t.closedAt)}` : ""}, not open: leave scope_task out, or open a new task`);
+    return t;
+  }
+
+  /**
+   * A lead opens a scoping task in its project (orch_scope_task open), in either mode: the cards and deliverables it files
+   * with the task go to the owner's Scope pane under it, and the rest of the project is unchanged. A timeline event and a
+   * board notice record it, and the CoS gets a copy. Refused: a name already open in the project (any case).
+   */
+  openTask(by: Agent, name: string): ScopingTask {
+    if (by.role !== "lead" || !by.project) throw new EngineError("forbidden", "only a lead opens a scoping task");
+    const n = oneLine(String(name ?? ""), SCOPING_TASK_NAME_MAX, "the task's name");
+    const slug = by.project;
+    return tx(this.db, () => {
+      const p = this.project(slug);
+      if (!p) throw new EngineError("not_found", `no project ${slug}`);
+      if (p.archivedAt) throw new EngineError("bad_state", `${slug} is archived`);
+      const dup = this.db.prepare(`SELECT id FROM scoping_tasks WHERE project = ? AND state = 'scoping' AND name = ? COLLATE NOCASE`).get(slug, n) as { id: string } | undefined;
+      if (dup) throw new EngineError("conflict", `${slug} already has an open scoping task ${JSON.stringify(n)} (${dup.id}): file into it, or pick another name`);
+      const id = `st-${hex(4)}`;
+      this.db.prepare(`INSERT INTO scoping_tasks (id, project, name, state, opened_by, opened_at) VALUES (?, ?, ?, 'scoping', ?, ?)`).run(id, slug, n, by.address, this.now());
+      this.event({ kind: "scope-task", project: slug, address: `lead:${slug}`, threadId: null, value: "scoping", note: n, ref: id });
+      const o = this.owner;
+      const what = `${by.address} opened scoping task ${id} ${JSON.stringify(n)} in ${slug}: the cards and deliverables it files with that task go only to ${o.name}'s Scope pane, under the task, and no standing rule settles them. The rest of ${slug} goes the normal way.`;
+      this.boardAdd("notice", by.address, slug, `${slug}: scoping task ${JSON.stringify(n)}`, what, id);
+      if (this.agentByAddress("cos")) this.put({ recipient: "cos", sender: by.address, kind: "copy", ref: id, body: `${what} You get read-only copies of them (don't triage, settle, merge or moot them).`, key: `scope-task-copy:${id}:scoping`, needsAck: false });
+      this.ports.changed();
+      return this.task(id)!;
+    });
+  }
+
+  /** A lead drops a scoping task it no longer needs (orch_scope_task drop): what still waits under it is released. */
+  dropTask(by: Agent, ref: string): { task: ScopingTask; moved: number } {
+    return tx(this.db, () => {
+      const t = this.resolveTask(by, ref);
+      const moved = this.closeTask(t.id, "dropped", by.address, null, null, null);
+      return { task: this.task(t.id)!, moved };
+    });
+  }
+
+  /**
+   * Close a scoping task: done (the owner's yes on its "Scoping done?", with the summary and doc) or dropped (by its
+   * lead). A timeline event and a board notice record it, and the lead (unless it did it) and the CoS are told. What still
+   * waits under it is released (releaseScope); nothing else in the project changes. Not open any more: a no-op.
+   */
+  private closeTask(id: string, state: Exclude<ScopingTaskState, "scoping">, by: string, card: string | null, summary: string | null, doc: string | null): number {
+    const t = this.task(id);
+    if (!t || t.state !== "scoping") return 0;
+    const lead = `lead:${t.project}`;
+    const who = by === "person" ? this.owner.Name : by;
+    this.db.prepare(`UPDATE scoping_tasks SET state = ?, closed_at = ?, summary = ?, doc = ? WHERE id = ?`).run(state, this.now(), summary, doc, id);
+    this.event({ kind: "scope-task", project: t.project, address: lead, threadId: null, value: state, note: t.name, ref: card ?? id });
+    const moved = this.releaseScope(t.project, (task) => task === id, by, card, `scoping task ${id} is ${state} (${who})`);
+    const where = this.isScoping(t.project) ? `${t.project}'s whole-project Scope pane (${t.project} still scopes as a whole)` : "Needs you and Deliverables";
+    const what = `${who} ${state === "done" ? "closed" : "dropped"} scoping task ${id} ${JSON.stringify(t.name)} in ${t.project}${doc ? ` (findings: ${doc})` : ""}.${moved ? ` ${moved} still open under it moved to ${where}.` : ""} The rest of ${t.project} is unchanged.`;
+    this.boardAdd("notice", by, t.project, `${t.project}: scoping task ${JSON.stringify(t.name)} ${state}`, what, card ?? id);
+    const sender = by === "person" ? "person" : by;
+    if (by !== lead && this.liveAt(lead)) this.put({ recipient: lead, sender, kind: "notice", ref: card ?? id, body: what, key: `scope-task:${id}:${state}`, needsAck: false });
+    if (by !== "cos" && this.agentByAddress("cos")) this.put({ recipient: "cos", sender, kind: "copy", ref: card ?? id, body: what, key: `scope-task-copy:${id}:${state}`, needsAck: false });
+    this.ports.changed();
+    return moved;
+  }
+
+  /**
+   * The open scoping task the thread that asked `d` was started for (orch_spawn_thread scope_task), or null. Through the
+   * asker's live holder first (a handoff moves the spawn row to the successor), then the thread that asked.
+   */
+  private threadTask(d: Decision): ScopingTask | null {
+    if (d.request.by.role !== "thread") return null;
+    for (const id of [this.agentByAddress(d.orchestrator.origin)?.threadId, d.request.by.thread]) {
+      if (!id) continue;
+      const r = this.db.prepare(`SELECT scope_task FROM spawns WHERE thread_id = ?`).get(id) as { scope_task: string | null } | undefined;
+      if (!r) continue;
+      const t = r.scope_task ? this.task(r.scope_task) : null;
+      return t?.state === "scoping" ? t : null;
+    }
+    return null;
+  }
+
+  /** Why a card or deliverable waits in the Scope pane, as messages say it: its scoping task, else its project scoping. */
+  private scopeWhy(project: string | null, task: string | null | undefined): string {
+    const t = task ? this.task(task) : null;
+    return t ? `in ${project}'s scoping task ${JSON.stringify(t.name)} (${t.id})` : `while ${project} is scoping`;
+  }
+
+  /** A card from a scoping project's lead, or one filed into a scoping task: straight to the owner in its Scope pane, and a read-only copy to the CoS. */
   private fileInScope(d: Decision, by: string): void {
     this.putAsk(d, by, d.request.title, d.request.question, d.request.context, d.request.options, d.kind !== "plan");
     d.orchestrator.scope = true;
@@ -3085,31 +3277,49 @@ export class Engine {
       sender: by,
       kind: "copy",
       ref: d.id,
-      body: `${by} asked ${d.id} ${JSON.stringify(d.request.title)}${d.kind === "plan" ? " (a plan card)" : ""} while ${d.project} is scoping: it went straight to ${o.name}'s Scope pane, not to your triage. Read-only: don't triage, settle, merge or moot it; ${o.name} answers it there with the lead. Question: ${JSON.stringify(d.request.question)}${done ? ` It proposes ending scoping (${done.project_md}): ${JSON.stringify(done.summary.slice(0, 600))}` : ""}`,
+      body: `${by} asked ${d.id} ${JSON.stringify(d.request.title)}${d.kind === "plan" ? " (a plan card)" : ""} ${this.scopeWhy(d.project, d.orchestrator.scope_task)}: it went straight to ${o.name}'s Scope pane, not to your triage. Read-only: don't triage, settle, merge or moot it; ${o.name} answers it there with the lead. Question: ${JSON.stringify(d.request.question)}${done ? (done.task ? ` It proposes closing that scoping task (${done.doc})` : ` It proposes ending scoping (${done.project_md})`) + `: ${JSON.stringify(done.summary.slice(0, 600))}` : ""}`,
       key: `scope-copy:${d.id}`,
       needsAck: false,
     });
   }
 
-  /** What waits on the owner in each scoping project's Scope pane: its open cards and its deliverables in review. */
-  scopeView(): { slug: string; cards: Decision[]; deliverables: Deliverable[] }[] {
-    const slugs = (this.db.prepare(`SELECT slug FROM projects WHERE mode = 'scoping' AND archived_at IS NULL ORDER BY slug`).all() as { slug: string }[]).map((r) => r.slug);
-    return slugs.map((slug) => ({
+  /**
+   * What waits on the owner in the Scope pane, per project: those scoping as a whole and those with open scoping tasks
+   * (1.12.0). Each has its open tasks, its open cards and its deliverables in review; each card and deliverable names its
+   * task (scope_task), or none for the whole project.
+   */
+  scopeView(): { slug: string; whole: boolean; tasks: ScopingTask[]; cards: Decision[]; deliverables: Deliverable[] }[] {
+    const rows = this.db
+      .prepare(`SELECT slug, mode FROM projects p WHERE archived_at IS NULL AND (mode = 'scoping' OR EXISTS (SELECT 1 FROM scoping_tasks t WHERE t.project = p.slug AND t.state = 'scoping')) ORDER BY slug`)
+      .all() as { slug: string; mode: string }[];
+    return rows.map(({ slug, mode }) => ({
       slug,
+      whole: mode === "scoping",
+      tasks: this.openTasks(slug),
       cards: (this.db.prepare(`SELECT json FROM decisions WHERE project = ? AND state = 'asked' AND json_extract(json, '$.orchestrator.scope') = 1 ORDER BY id`).all(slug) as { json: string }[]).map((r) => JSON.parse(r.json) as Decision),
       deliverables: (this.db.prepare(`SELECT json FROM deliverables WHERE project = ? AND state = 'review' AND json_extract(json, '$.scope') = 1 ORDER BY updated_at DESC`).all(slug) as { json: string }[]).map((r) => JSON.parse(r.json) as Deliverable),
     }));
   }
 
-  /** The scoping projects as the CoS reads them (orch_inbox, orch_needs_you): lines, or none while nothing scopes. */
+  /**
+   * The Scope pane as the CoS reads it (orch_inbox, orch_needs_you): a line per project scoping as a whole and per open
+   * scoping task, each starting "- <slug>:", or none while nothing scopes.
+   */
   private scopeLines(): string[] {
-    const v = this.scopeView();
-    if (!v.length) return [];
+    const n = (k: number, word: string) => `${k} ${word}${k === 1 ? "" : "s"}`;
+    const lines = this.scopeView().flatMap((p) => {
+      const open = new Set(p.tasks.map((t) => t.id));
+      const under = (task: string | null) => (t: string | null | undefined) => (task ? t === task : !t || !open.has(t));
+      const line = (head: string, task: string | null) => {
+        const cards = p.cards.filter((d) => under(task)(d.orchestrator.scope_task));
+        const dl = p.deliverables.filter((d) => under(task)(d.scope_task));
+        return `- ${p.slug}: ${head}${n(cards.length, "open card")}${dl.length ? `, ${n(dl.length, "deliverable")} in review` : ""}${cards.some((d) => d.orchestrator.scoping_done) ? ' (incl. "Scoping done?")' : ""}`;
+      };
+      return [...(p.whole ? [line("", null)] : []), ...p.tasks.map((t) => line(`task ${JSON.stringify(t.name)} (${t.id}), `, t.id))];
+    });
+    if (!lines.length) return [];
     const o = this.owner;
-    return [
-      `Scoping with ${o.name} directly (${v.length}): their cards wait in ${o.name}'s Scope pane, not your triage; you get read-only copies (don't triage, settle, merge or moot them):`,
-      ...v.map((p) => `- ${p.slug}: ${p.cards.length} open card${p.cards.length === 1 ? "" : "s"}${p.deliverables.length ? `, ${p.deliverables.length} deliverable${p.deliverables.length === 1 ? "" : "s"} in review` : ""}${p.cards.some((d) => d.orchestrator.scoping_done) ? " (incl. \"Scoping done?\")" : ""}`),
-    ];
+    return [`Scoping with ${o.name} directly (${lines.length}): their cards wait in ${o.name}'s Scope pane, not your triage; you get read-only copies (don't triage, settle, merge or moot them):`, ...lines];
   }
 
   setPriority(slug: string, priority: Priority): void {
@@ -3326,16 +3536,20 @@ export class Engine {
     return d;
   }
 
-  /** Reserve one of a plan's thread slots before spawning; confirm with the new thread's id, or release on failure. */
-  reserveSpawn(lead: Agent, planId: string): string {
+  /**
+   * Reserve one of a plan's thread slots before spawning; confirm with the new thread's id, or release on failure. With
+   * `scopeTask` (1.12.0) the thread is that open task's scoping thread: its spawn row names the task.
+   */
+  reserveSpawn(lead: Agent, planId: string, scopeTask: string | null = null): string {
     if (lead.role !== "lead") throw new EngineError("forbidden", "only a lead starts threads");
     return tx(this.db, () => {
       if (this.project(lead.project!)?.heldAt) throw new EngineError("bad_state", `${lead.project} is on hold`);
       const d = this.approvedPlan(lead, planId);
       const used = (this.db.prepare(`SELECT COUNT(*) AS c FROM spawns WHERE plan_id = ?`).get(planId) as { c: number }).c;
       if (used >= d.orchestrator.plan!.threads) throw new EngineError("bad_state", `${planId} allows ${d.orchestrator.plan!.threads} thread(s); all started`);
+      const task = scopeTask ? this.resolveTask(lead, scopeTask).id : null;
       const token = `pending:${hex(4)}`;
-      this.db.prepare(`INSERT INTO spawns (thread_id, plan_id, via, lead, created_at) VALUES (?, ?, 'plan', ?, ?)`).run(token, planId, lead.address, this.now());
+      this.db.prepare(`INSERT INTO spawns (thread_id, plan_id, via, lead, created_at, scope_task) VALUES (?, ?, 'plan', ?, ?, ?)`).run(token, planId, lead.address, this.now(), task);
       return token;
     });
   }
@@ -3816,13 +4030,19 @@ export class Engine {
     const points = parsePoints(input.points);
     return tx(this.db, () => {
       const t = this.now();
-      // scoping (1.11.0): reviewed in the owner's Scope pane, not on Deliverables; no push, a read-only copy to the CoS
-      const scoping = this.isScoping(by.project);
+      // scoping (1.11.0): reviewed in the owner's Scope pane, not on Deliverables; no push, a read-only copy to the CoS.
+      // A scoping task's (1.12.0) too; a revision stays in the task its earlier rev was in while that task is open.
+      let task = input.scopeTask ? this.resolveTask(by, input.scopeTask).id : null;
+      let scoping = !!task || this.isScoping(by.project);
       let d: Deliverable;
       if (input.revises) {
         d = this.mustDeliverable(input.revises);
         if (d.lead !== by.address) throw new EngineError("forbidden", `${d.id} is ${d.lead}'s deliverable`);
         if (d.state !== "changes") throw new EngineError("bad_state", `${d.id} is ${d.state}: revise only a deliverable ${this.owner.name} sent back with changes`);
+        if (!task && d.scope_task && this.task(d.scope_task)?.state === "scoping") {
+          task = d.scope_task;
+          scoping = true;
+        }
         d.rev += 1;
         d.title = title;
         d.summary = summary;
@@ -3830,6 +4050,8 @@ export class Engine {
         d.revisions.push({ rev: d.rev, summary, proof, at: iso(t), blocks, ...points });
         if (scoping) d.scope = true;
         else delete d.scope;
+        if (task) d.scope_task = task;
+        else delete d.scope_task;
         this.saveDeliverable(d);
         // The owner's request is answered by the new revision: its item would otherwise be resent and dead-lettered
         this.closeItems(`recipient = ? AND kind = 'deliverable.changes' AND ref = ?`, [by.address, d.id], "done", `re-delivered as rev ${d.rev}`);
@@ -3849,6 +4071,7 @@ export class Engine {
           feedback: [],
           withdrawn: null,
           ...(scoping ? { scope: true } : {}),
+          ...(task ? { scope_task: task } : {}),
         };
         this.saveDeliverable(d);
         this.boardAdd("deliverable", by.address, by.project, `Delivered: ${title}`, summary, d.id);
@@ -3860,7 +4083,7 @@ export class Engine {
           sender: by.address,
           kind: "copy",
           ref: d.id,
-          body: `${by.address} delivered ${d.id} ${JSON.stringify(d.title)} (rev ${d.rev}) while ${d.project} is scoping: it is in ${this.owner.name}'s Scope pane, not Deliverables. Read-only copy: ${this.owner.name} reviews it there. ${JSON.stringify(summary.slice(0, 300))}`,
+          body: `${by.address} delivered ${d.id} ${JSON.stringify(d.title)} (rev ${d.rev}) ${this.scopeWhy(d.project, d.scope_task)}: it is in ${this.owner.name}'s Scope pane, not Deliverables. Read-only copy: ${this.owner.name} reviews it there. ${JSON.stringify(summary.slice(0, 300))}`,
           key: `scope-copy:${d.id}:${d.rev}`,
           needsAck: false,
         });
@@ -4198,6 +4421,11 @@ export class Engine {
     if (proj && a.role === "lead")
       lines.push(
         `Project ${proj.slug}: priority ${proj.priority}${proj.heldAt ? `, ON HOLD since ${iso(proj.heldAt)} (mail waits; no new threads)` : ""}${proj.mode === "scoping" ? `, SCOPING with ${this.owner.name}: your cards and deliverables go only to ${this.owner.name}'s Scope pane (no CoS triage, no standing rule); ask ${this.owner.name} there, start no build threads (read-only investigation is fine), and when the goal, constraints and first plan are in PROJECT.md, propose the end with orch_ask(scoping_done={summary, project_md})` : ""}.`,
+      );
+    const tasks = proj && a.role === "lead" ? this.openTasks(proj.slug) : [];
+    if (tasks.length)
+      lines.push(
+        `Open scoping tasks (${tasks.length}): ${tasks.map((t) => `${t.id} ${JSON.stringify(t.name)}`).join(", ")}. What you file with scope_task=<id> (orch_ask, orch_forward, orch_deliver) goes only to ${this.owner.name}'s Scope pane under it; orch_ask(scoping_done={summary, doc, task}) proposes closing one.`,
       );
     lines.push(items.length ? `Open items (${items.length}); use orch_inbox(id=<item id>) for full text and references:` : "No open items.");
     for (const it of items) {

@@ -54,6 +54,25 @@ export const PRIORITIES: readonly Priority[] = ["urgent", "high", "normal", "low
 export type ProjectMode = "scoping" | "active";
 export const PROJECT_MODES: readonly ProjectMode[] = ["scoping", "active"];
 
+/**
+ * A scoping task (1.12.0): one named part of a project the owner scopes with its lead while the rest goes the normal
+ * way. Its cards and deliverables carry its id (scope_task) beside the scope flag; "Scoping done?" with the task closes it.
+ */
+export type ScopingTaskState = "scoping" | "done" | "dropped";
+export interface ScopingTask {
+  id: string;
+  project: string;
+  name: string;
+  state: ScopingTaskState;
+  openedBy: string;
+  openedAt: number;
+  closedAt: number | null;
+  /** The lead's summary on the "Scoping done?" the owner said yes to. */
+  summary: string | null;
+  /** The file the lead wrote the task's findings to. */
+  doc: string | null;
+}
+
 export interface HistoryEntry {
   at: string;
   rev: number;
@@ -136,10 +155,15 @@ export interface Decision {
     rule_proposal?: { text: string; project: string | null; match: RuleMatch; evidence: string[]; rule_id: string | null } | null;
     /** Held off the owner's Needs you behind an earlier card from the same asker and project, until `until` at most. */
     held?: { behind: string; at: string; until: string } | null;
-    /** Filed while its project was scoping: it waits in the owner's Scope pane, never in triage or Needs you. */
+    /** Filed while its project was scoping, or into a scoping task: it waits in the owner's Scope pane, never in triage or Needs you. */
     scope?: boolean;
-    /** A "Scoping done?" card: the lead's summary and its PROJECT.md. Option 1 (yes) makes the project active. */
-    scoping_done?: { summary: string; project_md: string } | null;
+    /** The scoping task it was filed into (1.12.0): it groups the card in the Scope pane under that task. */
+    scope_task?: string | null;
+    /**
+     * A "Scoping done?" card: the lead's summary and its PROJECT.md. Option 1 (yes) makes the project active. With task
+     * (1.12.0): the file is doc, and the yes closes only that task.
+     */
+    scoping_done?: { summary: string; project_md?: string; doc?: string; task?: string } | null;
   };
 }
 
@@ -239,8 +263,10 @@ export interface Deliverable {
   withdrawn: { at: string; reason: string | null } | null;
   /** The owner approved it with a next action for the lead: what to do, and the needs-ack item that carries it. */
   next?: { text: string; rev: number; at: string; item: string } | null;
-  /** Delivered while its project was scoping: reviewed in the owner's Scope pane, not on Deliverables. */
+  /** Delivered while its project was scoping, or into a scoping task: reviewed in the owner's Scope pane, not on Deliverables. */
   scope?: boolean;
+  /** The scoping task it was delivered into (1.12.0). */
+  scope_task?: string;
 }
 
 /** A next action as it stands: the lead's item, open until they close it with an outcome and a note. */

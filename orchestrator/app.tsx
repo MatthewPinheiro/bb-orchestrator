@@ -24,6 +24,7 @@ import type { SharedRefs } from "./app/ref-text.tsx";
 import { DeliverablesView, inReview } from "./app/deliverables.tsx";
 import { OpenPrsView } from "./app/open-prs.tsx";
 import { ScopeView } from "./app/scope.tsx";
+import { scopeEntryOf } from "./app/kit.ts";
 import { pointerPressed } from "./app/store.ts";
 import { EmptyState } from "./app/affect/empty-state-clean.tsx";
 import { RENAMED_VIEWS, close, detailOf, findPane, panes, parse, pathFor, resize, setView, single, split, type Layout } from "./app/layout.ts";
@@ -271,7 +272,7 @@ function OrchestratorPanel({ subPath }: PluginNavPanelProps) {
         : v.id === "deliverables" && reviewCount > 0
           ? reviewCount
           : v.id === "scope" && scope.data && scope.data.badge > 0
-            ? scope.data.badge // the scoping projects' unanswered cards
+            ? scope.data.badge // every unanswered card in the Scope tab, whole projects and tasks alike
           : v.id === "projects" && board.data?.directUnread?.length
             ? "•" // a lead's note you haven't opened (PLAN 3.4); never a phone notification
             : undefined,
@@ -284,14 +285,14 @@ function OrchestratorPanel({ subPath }: PluginNavPanelProps) {
 
   keyCtx.current = { layout, views, setLayout, follow };
 
-  // the scoping project the Scope tab shows, when a link elsewhere opened one of its cards
+  // the Scope tab's entry (a project scoping as a whole, or one of its scoping tasks), when a link elsewhere opened one of its cards
   const [scopeFocus, setScopeFocus] = useState<string | null>(null);
   // a lane's "waits on you": Needs you in the focused pane, then that card scrolled into sight once it is drawn. A
   // scoping project's card waits in the Scope tab instead, with its project open there.
   const openCard = (selector: string) => {
     const id = /data-card="([^"]+)"/.exec(selector)?.[1];
     const scoping = id ? scope.data?.projects.find((p) => p.cards.some((c) => c.id === id)) : undefined;
-    if (scoping) setScopeFocus(scoping.slug);
+    if (scoping) setScopeFocus(scopeEntryOf(scoping, scoping.cards.find((c) => c.id === id)?.scopeTask));
     navigate.toPluginPanel(PANEL_PATH, { subPath: scoping ? "scope" : "needs-you" });
     let tries = 0;
     const find = () => {

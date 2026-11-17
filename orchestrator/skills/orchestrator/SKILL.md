@@ -78,6 +78,10 @@ from the app's Needs you page, and write to a lead only from its Projects row (a
   no Needs you, no standing rule; the CoS gets read-only copies. The lead starts no build threads (read-only
   investigation is fine), and ends it with `orch_ask(scoping_done={summary, project_md})`; the owner's yes makes the
   project active.
+- **Part of a project can scope too.** Its lead opens a scoping task (`orch_scope_task(action="open", name)`), may start
+  a read-only scoping thread for it (`orch_spawn_thread(scope_task)`), and files its cards and deliverables with
+  `scope_task`: they wait in the owner's Scope tab under the task, the rest of the project goes the normal way.
+  `orch_ask(scoping_done={summary, doc, task})` proposes closing it; the owner's yes closes only that task.
 - **A lead publishes its status** with `orch_status` when it starts, at each step change and whenever what it waits on
   changes: goal, numbered steps (at most one `current`), `waiting_on` and blockers. It is the step bar on the project
   page; after 2 h without one it shows as stale, and the lead is reminded once per change in its project since then.

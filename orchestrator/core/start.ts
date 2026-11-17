@@ -119,6 +119,19 @@ export function scopingStart(slug: string, owner: string, folder: string): strin
 }
 
 /**
+ * What a scoping thread is told at its start (1.12.0), after the lead's brief: the thread orch_spawn_thread started with
+ * scope_task. Its questions and findings go to its lead as always; the lead takes them to the owner's Scope pane.
+ */
+export function scopingThreadStart(project: string, task: { id: string; name: string }, owner: string, lead: string): string {
+  return [
+    `## You are the scoping thread for ${project}'s task ${JSON.stringify(task.name)} (${task.id})`,
+    `${owner} and ${lead} are scoping this part of ${project} before anything is built. Your job is read-only investigation: read code, docs and data, and change nothing (no commits, no PRs, no pushes).`,
+    `- Ask ${lead} with orch_ask, and send it your findings with orch_send or orch_report. ${lead} takes your questions and findings to ${owner}'s Scope tab, under this task.`,
+    `- Write your findings into one file and say where it is in your report: ${lead} proposes closing the task to ${owner} with it.`,
+  ].join("\n");
+}
+
+/**
  * Start lead:<slug>: one path for the owner's Start lead button and the CoS's orch_start_lead. Refused, before any
  * spawn, when the slug is bad, the project is on hold, a lead is live, there is no project folder, its PROJECT.md names
  * no repo under "## Repos", or that repo isn't on this machine. The hold and live-lead checks run again just before the

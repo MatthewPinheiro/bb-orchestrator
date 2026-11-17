@@ -10,7 +10,7 @@ import { type BbRun, setupSidebar } from "./core/sidebar.ts";
 import { chmodSync, closeSync, cpSync, createReadStream, openSync, readdirSync, readSync, rmSync, statSync } from "node:fs";
 import { Readable } from "node:stream";
 import { approveBody, type Deliverables, PROOF_ROUTE, type ProjectOrder, requestChangesBody, secretBody } from "./contract.ts";
-import { type DeliverPlace, type OutputPlace, type ProofInput, SCOPING_SUMMARY_MAX, SECRET_TTL_MS } from "./core/engine.ts";
+import { type DeliverPlace, type OutputPlace, type ProofInput, SCOPING_SUMMARY_MAX, SCOPING_TASK_NAME_MAX, SECRET_TTL_MS } from "./core/engine.ts";
 import { deliverBlocks, deliverPoints, fromJson, inputBlocksSchema, lessTextRefusal, looksLikeCode } from "./blocks.ts";
 import { CARD_CAPS, DELIVER_BUDGET, deliverBudgetRefusal } from "./core/caps.ts";
 import { ignoredTopLevelUpdate, statusParams, statusLine } from "./core/status.ts";
@@ -62,7 +62,7 @@ import {
 import { formAt, tokensForLevel } from "./mons.ts";
 import { placeable, pruneSections } from "./core/sections.ts";
 import { type Agent, type Decision, EngineError, OUTCOMES, projectTitle, type Role, ROLES, sectionTitle } from "./core/model.ts";
-import { type LeadStartPorts, loadBrief, pokemonSentence, samePath, startLead, type StartedBy } from "./core/start.ts";
+import { type LeadStartPorts, loadBrief, pokemonSentence, samePath, scopingThreadStart, startLead, type StartedBy } from "./core/start.ts";
 import { externalMailSchema, integrationRoutes, allowImport } from "./core/integration.ts";
 import { adoptThread, type AdoptThread } from "./core/adopt.ts";
 import { spawnSelection, START_DEFAULTS } from "./core/provider.ts";
@@ -81,7 +81,7 @@ import { type ChildLevel, type NotifySaved, SAVED_KEY as NOTIFY_SAVED, serialRec
 
 const TOOLS_BY_ROLE: Record<Role, string[]> = {
   thread: ["orch_ask", "orch_ack", "orch_send", "orch_inbox", "orch_report", "orch_output"],
-  lead: ["orch_ask", "orch_forward", "orch_answer", "orch_ack", "orch_send", "orch_inbox", "orch_report", "orch_stop_thread", "orch_spawn_thread", "orch_resolve", "orch_handoff", "orch_output", "orch_deliver", "orch_deliver_withdraw", "orch_status"],
+  lead: ["orch_ask", "orch_forward", "orch_answer", "orch_ack", "orch_send", "orch_inbox", "orch_report", "orch_stop_thread", "orch_spawn_thread", "orch_resolve", "orch_handoff", "orch_output", "orch_deliver", "orch_deliver_withdraw", "orch_status", "orch_scope_task"],
   cos: ["orch_triage", "orch_ack", "orch_send", "orch_inbox", "orch_needs_you", "orch_moot", "orch_deliverables", "orch_dead_letters", "orch_start_lead", "orch_new_project", "orch_project_mode"],
   steward: ["orch_ask", "orch_ack", "orch_send", "orch_inbox", "orch_host", "orch_cleanup", "orch_needs_you", "orch_deliverables"],
 };
@@ -90,7 +90,7 @@ const TOOLS_BY_ROLE: Record<Role, string[]> = {
 const roleBrief = (o: OwnerWords): Record<Role, string> => ({
   cos: `You are the Chief of Staff (cos) in ${o.name}'s orchestrator. You hear only what needs judgment: new decisions to triage and messages to you. For each decision use orch_triage: settle (only by citing a standing rule id that covers it; never a merge card), ask_person (2-4 options, recommended first), or merge a question into a duplicate question (never a plan or merge card). Ack messages with orch_ack. You get a read-only copy of each answer ${o.name} gives (no ack). orch_needs_you lists what is on ${o.name}'s Needs you now and what was answered or went moot lately; when a card there no longer needs an answer (its PR merged, the asker found out), take it off with orch_moot(id, reason): the asker is told why. orch_deliverables lists what leads delivered to ${o.name}, its review state and proof. Dead letters (mail nobody took) come to you, not ${o.name}'s board: an hourly notice lists new ones; with orch_dead_letters resend one, re-route it to the right address, close it for its recipient, or escalate it to ${o.name}'s board with your note when only ${o.name} can fix it. orch_new_project(brief) creates a project (its folder with PROJECT.md and the project record, and its row at the brief's priority) from slug, title, repo (an existing absolute path; a URL alone is refused, nothing is cloned), goal, and optional repo_url, base, constraints, priority, mode; it refuses a taken slug or folder and never starts the lead. mode=scoping starts the project in scoping mode: its lead's cards and deliverables go only to ${o.name}'s Scope tab, you get read-only copies (never triage, settle, merge or moot them), and ${o.name}'s yes on the lead's "Scoping done?" card makes it active; orch_project_mode(slug, mode) sets or clears it on an existing project. orch_start_lead(slug) starts lead:<slug> through the same checks as ${o.name}'s Start lead button (project folder, a repo under "## Repos" that exists here, not on hold, no live lead); ${o.name}'s board shows that you started it. You get a read-only copy of each direct message ${o.name} sends a lead from the Projects tab and of the lead's ack note: for 48 h it wins on its point over your instructions, earlier or later, and as a dead letter you may resend or escalate it but never re-route or close it. Do not poll; wait for [orchestrator] messages.`,
   steward: `You are the Steward (steward) of the runner's resources. Host alarms arrive as [orchestrator] alarm messages with a snapshot. Report with orch_send to cos; run only the allow-listed orch_cleanup actions on your own; anything else (stopping a process, deleting other files) becomes an orch_ask card. Never kill processes you didn't start, remove worktrees, touch other agents' files or point caches at /tmp.`,
-  lead: `You are a project lead in ${o.name}'s orchestrator. Your threads' questions come to you as decision.new: settle with orch_answer (citing a standing rule that covers it, or with a note as your own call), else orch_forward to file it up. Answers to your decisions come only to you: relay to the thread with orch_send(ref=<decision id>) unless you withhold it, and ack. An answer to carry out only once a PR gets somewhere ("merge when approved"): ack it with pr and when, and the orchestrator brings it back to you then and reminds you daily; arm no watcher of your own. Use orch_ask for your own questions (2-4 options, recommended first; it never blocks). While your project is scoping (orch_inbox says so), your cards and deliverables go only to ${o.name}'s Scope tab: ask ${o.name} there, start no build threads (read-only investigation is fine), and end it with orch_ask(scoping_done={summary, project_md}) once the goal, constraints and first plan are in PROJECT.md. Threads start only from a plan card ${o.name} approved: orch_ask(kind=plan, threads=<n>, options with the go option first) lists each thread (title, goal, model, done criteria); once the answer is its go, start each with orch_spawn_thread(plan=<id>). Threads you start any other way are flagged. Resolve a finished thread with orch_resolve: it retires the role and archives the thread once its worktree is clean (nothing uncommitted, its branch in its base branch or pushed) and its PR is merged, its branch is merged into its base, its PR was closed unmerged after its report, or ${o.name} has read its final report, or pass handed_off {pr, owner} when its open PR now belongs to someone else; a dirty worktree is refused with the reason. To swap a thread to another provider, have it write handoff-<UTC date>.md in its worktree, then orch_handoff. ${o.Name} sees only your deliverables and your questions: orch_deliver (finished work with proof) and orch_ask. Bundle your threads' work into deliverables that prove the result (screenshots, video, test output, PR), not into narration. Write them for a 10-second read: visuals first; each decision or finding is one line plus a short why (points); a one-line summary; no file:line, SHAs, logs or tool names at the top, those go in text or doc proof under Details (a PR review: a verdicts block for every PR, the recommended decisions, then 2-4 findings; proof that something works: screenshots or video of it happening, checks; a root cause: rca, a screenshot of the failure, a diagram of where it sits). Never message ${o.name} any other way. ${o.Name} may write to you directly from the Projects tab (a direct message, kind owner.message): answer it only with orch_ack(id, outcome, note), at once even for long work; the note is what ${o.name} reads on the row ("done" means taken, so say whether it is finished) and the CoS gets a copy. For 48 h it wins on its point over a CoS instruction, earlier or later; only ${o.name}'s own later word changes it. If the CoS says ${o.name} changed their mind, file one card with both instructions as options; say in your note what you set aside, and tell the CoS. orch_inbox lists those still in force. A direct message is never an approval: a merge, a production change or a public push still needs its own card citing the message id, and it can't be acked with pr and when. On deliverable.changes: fix it, then orch_deliver(revises=<id>). On deliverable.next: do what ${o.name} asked, then ack it with an outcome and a note saying what you did; the note shows on the deliverable. orch_output only records a file (for example one you then give as proof); it never reaches ${o.name}. Publish orch_status (goal, numbered steps with the current one, what you wait on, blockers) when you start, at each step change and whenever what you wait on changes: it is your project page's step bar, and stale after 2 h. When a thread finishes and at each milestone, include update (working_on: 1-3 bullets, at, needs) in orch_status: it is the Lead status card on your project and replaces the last one. Write it for ${o.name}, in plain words, about the task and what is done: 1-3 short bullets of at most 12 words each; no SHAs, run ids, file paths, flag internals or tool names unless ${o.name} needs them to act. Good: 'Search fix merged; preview ready for Robin to test'. Bad: 'Rebased 4087 onto main at 3f2a1c9, CI run 88123 green'.`,
+  lead: `You are a project lead in ${o.name}'s orchestrator. Your threads' questions come to you as decision.new: settle with orch_answer (citing a standing rule that covers it, or with a note as your own call), else orch_forward to file it up. Answers to your decisions come only to you: relay to the thread with orch_send(ref=<decision id>) unless you withhold it, and ack. An answer to carry out only once a PR gets somewhere ("merge when approved"): ack it with pr and when, and the orchestrator brings it back to you then and reminds you daily; arm no watcher of your own. Use orch_ask for your own questions (2-4 options, recommended first; it never blocks). While your project is scoping (orch_inbox says so), your cards and deliverables go only to ${o.name}'s Scope tab: ask ${o.name} there, start no build threads (read-only investigation is fine), and end it with orch_ask(scoping_done={summary, project_md}) once the goal, constraints and first plan are in PROJECT.md. To scope only part of a project, open a scoping task (orch_scope_task), start its scoping thread with orch_spawn_thread(scope_task) and file its cards with scope_task; orch_ask(scoping_done={summary, doc, task}) proposes closing it, and ${o.name}'s yes closes only that task. Threads start only from a plan card ${o.name} approved: orch_ask(kind=plan, threads=<n>, options with the go option first) lists each thread (title, goal, model, done criteria); once the answer is its go, start each with orch_spawn_thread(plan=<id>). Threads you start any other way are flagged. Resolve a finished thread with orch_resolve: it retires the role and archives the thread once its worktree is clean (nothing uncommitted, its branch in its base branch or pushed) and its PR is merged, its branch is merged into its base, its PR was closed unmerged after its report, or ${o.name} has read its final report, or pass handed_off {pr, owner} when its open PR now belongs to someone else; a dirty worktree is refused with the reason. To swap a thread to another provider, have it write handoff-<UTC date>.md in its worktree, then orch_handoff. ${o.Name} sees only your deliverables and your questions: orch_deliver (finished work with proof) and orch_ask. Bundle your threads' work into deliverables that prove the result (screenshots, video, test output, PR), not into narration. Write them for a 10-second read: visuals first; each decision or finding is one line plus a short why (points); a one-line summary; no file:line, SHAs, logs or tool names at the top, those go in text or doc proof under Details (a PR review: a verdicts block for every PR, the recommended decisions, then 2-4 findings; proof that something works: screenshots or video of it happening, checks; a root cause: rca, a screenshot of the failure, a diagram of where it sits). Never message ${o.name} any other way. ${o.Name} may write to you directly from the Projects tab (a direct message, kind owner.message): answer it only with orch_ack(id, outcome, note), at once even for long work; the note is what ${o.name} reads on the row ("done" means taken, so say whether it is finished) and the CoS gets a copy. For 48 h it wins on its point over a CoS instruction, earlier or later; only ${o.name}'s own later word changes it. If the CoS says ${o.name} changed their mind, file one card with both instructions as options; say in your note what you set aside, and tell the CoS. orch_inbox lists those still in force. A direct message is never an approval: a merge, a production change or a public push still needs its own card citing the message id, and it can't be acked with pr and when. On deliverable.changes: fix it, then orch_deliver(revises=<id>). On deliverable.next: do what ${o.name} asked, then ack it with an outcome and a note saying what you did; the note shows on the deliverable. orch_output only records a file (for example one you then give as proof); it never reaches ${o.name}. Publish orch_status (goal, numbered steps with the current one, what you wait on, blockers) when you start, at each step change and whenever what you wait on changes: it is your project page's step bar, and stale after 2 h. When a thread finishes and at each milestone, include update (working_on: 1-3 bullets, at, needs) in orch_status: it is the Lead status card on your project and replaces the last one. Write it for ${o.name}, in plain words, about the task and what is done: 1-3 short bullets of at most 12 words each; no SHAs, run ids, file paths, flag internals or tool names unless ${o.name} needs them to act. Good: 'Search fix merged; preview ready for Robin to test'. Bad: 'Rebased 4087 onto main at 3f2a1c9, CI run 88123 green'.`,
   thread: `You are a worker thread in ${o.name}'s orchestrator. Ask your lead with orch_ask (2-4 options, recommended first); it returns at once with an id, so carry on or end your turn: the answer comes as a message. Message only your lead (orch_send). When an answer or message is handled, close it with orch_ack(id, outcome); replying to its sender with ref=<its id> closes it as replied, and an ack after that still records the real outcome. Report finished work with orch_report (with the PR URL when there is one). Use orch_output to record a finished artefact (a doc, video, image, report or link) so your lead can put it in a deliverable as proof; ${o.name} sees only what your lead delivers.`,
 });
 
@@ -365,15 +365,25 @@ export default async function plugin(bb: BbPluginApi) {
     }
   };
   const optionsSchema = z.array(z.object({ label: z.string().min(1).max(80), detail: z.string().max(300).optional() })).min(2).max(4);
-  // "Scoping done?" (1.11.0): an object, or its JSON in a string (an agent on an older schema); the PROJECT.md must exist
-  const SCOPING_DONE = z.preprocess(fromJson, z.object({ summary: z.string().optional(), project_md: z.string().optional() }).or(z.string()));
-  const scopingDoneIn = (v: unknown): { summary: string; projectMd: string } => {
+  // "Scoping done?" (1.11.0): an object, or its JSON in a string (an agent on an older schema); the PROJECT.md must exist.
+  // With task (1.12.0): a scoping task's, and its doc (or project_md) must exist.
+  const SCOPING_DONE = z.preprocess(fromJson, z.object({ summary: z.string().optional(), project_md: z.string().optional(), doc: z.string().optional(), task: z.string().optional() }).or(z.string()));
+  const scopingDoneIn = (v: unknown): { summary: string; projectMd: string; doc?: string; task?: string } => {
     const o = typeof v === "string" ? fromJson(v) : v;
-    if (!o || typeof o !== "object") throw new EngineError("invalid", 'scoping_done is {summary, project_md}: the goal, constraints and first plan, and the PROJECT.md they are in');
-    const { summary, project_md } = o as { summary?: unknown; project_md?: unknown };
+    if (!o || typeof o !== "object") throw new EngineError("invalid", 'scoping_done is {summary, project_md}: the goal, constraints and first plan, and the PROJECT.md they are in (for a scoping task: {summary, doc, task})');
+    const { summary, project_md, doc, task } = o as { summary?: unknown; project_md?: unknown; doc?: unknown; task?: unknown };
     const md = typeof project_md === "string" ? project_md.trim() : "";
-    if (md && isAbsolute(md) && !existsSync(md)) throw new EngineError("not_found", `scoping_done.project_md ${md} doesn't exist: write the goal, constraints and first plan there first`);
-    return { summary: typeof summary === "string" ? summary : "", projectMd: md };
+    const file = typeof doc === "string" ? doc.trim() : "";
+    for (const [what, f] of [["doc", file], ["project_md", md]] as const)
+      if (f && isAbsolute(f) && !existsSync(f)) throw new EngineError("not_found", `scoping_done.${what} ${f} doesn't exist: write ${typeof task === "string" && task.trim() ? "the task's findings" : "the goal, constraints and first plan"} there first`);
+    return { summary: typeof summary === "string" ? summary : "", projectMd: md, ...(file ? { doc: file } : {}), ...(typeof task === "string" && task.trim() ? { task: task.trim() } : {}) };
+  };
+  // a scoping task (1.12.0): its id or an open task's name; a quoted JSON string works too
+  const SCOPE_TASK = z.preprocess((v) => (typeof v === "string" && /^\s*"/.test(v) ? (() => { try { return JSON.parse(v); } catch { return v; } })() : v), z.string().max(80));
+  /** Where a Scope pane card went, for the tool's reply: its task, else its project scoping. */
+  const scopeWhere = (project: string | null, task: string | null | undefined) => {
+    const t = task ? engine.task(task) : null;
+    return t ? `scoping task ${t.id} ${JSON.stringify(t.name)}` : `${project} is scoping`;
   };
 
   bb.agents.registerTool({
@@ -395,28 +405,63 @@ export default async function plugin(bb: BbPluginApi) {
           `Typed parts ${O.name}'s card draws as components instead of prose: login (a sign-in link, its code and expiry; paste=true when ${O.name} must paste a code back, which reaches you only as a file path), steps (what to do and what ${O.name} should see), pr (drawn with its live state), list (an exact list; selectable lets ${O.name} untick items), facts (figures, sizes, before/after), command (the exact command), decisions (one line each, a short why). Use them instead of putting links, codes, lists or commands in the context. A merge card needs a pr block: the card leads with it.`,
         ),
       scoping_done: SCOPING_DONE.optional().describe(
-        `Lead of a scoping project only: this card asks ${O.name} "Scoping done?". summary: the goal, constraints and first plan (at most ${SCOPING_SUMMARY_MAX} characters); project_md: the absolute path of the PROJECT.md they are written in. The options you pass are replaced by the fixed Yes / Not yet; a yes makes the project active. Refused when the project isn't scoping`,
+        `Lead of a scoping project only: this card asks ${O.name} "Scoping done?". summary: the goal, constraints and first plan (at most ${SCOPING_SUMMARY_MAX} characters); project_md: the absolute path of the PROJECT.md they are written in. The options you pass are replaced by the fixed Yes / Not yet; a yes makes the project active. Refused when the project isn't scoping. With task (an open scoping task's id or name) and doc (the absolute path of the file its findings are in) instead of project_md: a yes closes only that task, in a project of either mode`,
+      ),
+      scope_task: SCOPE_TASK.optional().describe(
+        `Lead only: an open scoping task's id (st-…) or name (orch_scope_task). The card goes only to ${O.name}'s Scope tab, under that task: no CoS triage, no standing rule; the CoS gets a read-only copy. Leave it out for the normal route. Refused for a task that is done, dropped or unknown`,
       ),
     }),
     execute: (p, { threadId }) =>
       run(threadId, (a) => {
         if (p.merge && !p.blocks?.some((b) => b.kind === "pr")) throw new EngineError("invalid", "a merge card needs a pr block (the PR's URL, and a one-line verdict as its note)");
         const done = p.scoping_done === undefined ? null : scopingDoneIn(p.scoping_done);
-        const d = engine.ask(a, { title: p.title, question: p.question, context: p.context, options: p.options, kind: p.kind, threads: p.threads, action: p.merge ? "merge" : null, key: p.key ?? null, blocks: p.blocks, scopingDone: done });
-        if (d.orchestrator.scope) return `Filed ${d.id} in ${O.name}'s Scope pane (${a.project} is scoping: no CoS triage, no standing rule; the CoS gets a read-only copy). The answer will come as a message; don't wait on it.`;
+        const d = engine.ask(a, { title: p.title, question: p.question, context: p.context, options: p.options, kind: p.kind, threads: p.threads, action: p.merge ? "merge" : null, key: p.key ?? null, blocks: p.blocks, scopingDone: done, scopeTask: p.scope_task ?? null });
+        if (d.orchestrator.scope) return `Filed ${d.id} in ${O.name}'s Scope pane (${scopeWhere(a.project, d.orchestrator.scope_task)}: no CoS triage, no standing rule; the CoS gets a read-only copy). The answer will come as a message; don't wait on it.`;
         return `Filed ${d.id} (${d.orchestrator.at_level === "lead" ? `with ${`lead:${a.project}`}` : "with the CoS"}). The answer will come as a message; don't wait on it.`;
       }),
   });
 
   bb.agents.registerTool({
     name: "orch_forward",
-    description: `Lead only: file your thread's question up to the CoS (and ${O.name}). You become its asker: the answer comes to you, and you relay it.`,
+    description: `Lead only: file your thread's question up to the CoS (and ${O.name}). You become its asker: the answer comes to you, and you relay it. A question from a scoping thread (started with scope_task) goes to ${O.name}'s Scope tab under its task while the task is open; scope_task files any question there.`,
     presentation: { label: { pending: "Filing a question up", completed: "Filed a question up" } },
-    parameters: z.object({ id: z.string(), note: z.string().max(2000).optional() }),
+    parameters: z.object({
+      id: z.string(),
+      note: z.string().max(2000).optional(),
+      scope_task: SCOPE_TASK.optional().describe(`An open scoping task's id or name: the question goes only to ${O.name}'s Scope tab under it (default: the asking thread's task, if it is a scoping thread)`),
+    }),
     execute: (p, { threadId }) =>
       run(threadId, (a) => {
-        const d = engine.forward(a, p.id, p.note ?? null);
-        return d.orchestrator.scope ? `Filed ${d.id} in ${O.name}'s Scope pane (${a.project} is scoping: no CoS triage; the CoS gets a read-only copy).` : `Filed ${d.id} with the CoS.`;
+        const d = engine.forward(a, p.id, p.note ?? null, p.scope_task ?? null);
+        return d.orchestrator.scope ? `Filed ${d.id} in ${O.name}'s Scope pane (${scopeWhere(a.project, d.orchestrator.scope_task)}: no CoS triage; the CoS gets a read-only copy).` : `Filed ${d.id} with the CoS.`;
+      }),
+  });
+
+  bb.agents.registerTool({
+    name: "orch_scope_task",
+    description: `Lead only: scope one part of your project with ${O.name} while the rest goes the normal way. action=open with name (one line of at most ${SCOPING_TASK_NAME_MAX} characters, not one of your open tasks') opens a scoping task and returns its id: what you file with scope_task=<id> (orch_ask, orch_forward, orch_deliver) goes only to ${O.name}'s Scope tab under it (no CoS triage, no standing rule; the CoS gets read-only copies), and orch_spawn_thread(scope_task) starts its scoping thread. orch_ask(scoping_done={summary, doc, task}) proposes closing it; ${O.name}'s yes closes only that task. action=drop with task (its id or name) drops one you no longer need: what still waits under it goes the normal way. orch_inbox lists your open tasks.`,
+    presentation: { label: { pending: "Changing a scoping task", completed: "Changed a scoping task" } },
+    parameters: z.object({
+      action: z.string().max(10).optional().describe("open | drop"),
+      name: z.string().max(200).optional().describe(`open: the task's name, one line of at most ${SCOPING_TASK_NAME_MAX} characters`),
+      task: SCOPE_TASK.optional().describe("drop: the task's id (st-…) or name"),
+    }),
+    execute: (p, { threadId }) =>
+      run(threadId, (a) => {
+        if (a.role !== "lead") throw new EngineError("forbidden", "lead only");
+        const action = String(p.action ?? "").trim();
+        if (action === "open") {
+          if (!p.name?.trim()) throw new EngineError("invalid", "give name: the part of the project to scope, in one line");
+          const t = engine.openTask(a, p.name);
+          return `Opened scoping task ${t.id} ${JSON.stringify(t.name)} in ${t.project}. File its cards and deliverables with scope_task="${t.id}" (orch_ask, orch_forward, orch_deliver): they go only to ${O.name}'s Scope tab, under it. Start its scoping thread from an approved plan with orch_spawn_thread(scope_task="${t.id}"). Propose closing it with orch_ask(scoping_done={summary, doc, task: "${t.id}"}).`;
+        }
+        if (action === "drop") {
+          const ref = p.task ?? p.name;
+          if (!ref?.trim()) throw new EngineError("invalid", "give task: the id (st-…) or name of the scoping task to drop");
+          const r = engine.dropTask(a, ref);
+          return `Dropped scoping task ${r.task.id} ${JSON.stringify(r.task.name)}.${r.moved ? ` ${r.moved} still open under it moved to ${engine.isScoping(a.project) ? "the whole project's Scope pane" : "Needs you and Deliverables"}.` : ""}`;
+        }
+        throw new EngineError("invalid", 'give action: "open" (with name) or "drop" (with task)');
       }),
   });
 
@@ -671,7 +716,7 @@ export default async function plugin(bb: BbPluginApi) {
 
   bb.agents.registerTool({
     name: "orch_spawn_thread",
-    description: `Lead only: start one thread of a plan card ${O.name} approved (its go option). Each gets its own new worktree, you as its bb parent, and the orchestrator role. Refused without an approved plan, past the plan's thread count, or while the project is on hold.`,
+    description: `Lead only: start one thread of a plan card ${O.name} approved (its go option). Each gets its own new worktree, you as its bb parent, and the orchestrator role. Refused without an approved plan, past the plan's thread count, or while the project is on hold. With scope_task it is that scoping task's scoping thread: its brief says so (read-only investigation; questions and findings to you), and orch_forward files its questions under the task.`,
     presentation: { label: { pending: "Starting a thread", completed: "Started a thread" } },
     parameters: z.object({
       provider: z.string().min(1).max(100).optional().describe("Provider id (default: claude-code); unavailable selections are refused"),
@@ -681,12 +726,14 @@ export default async function plugin(bb: BbPluginApi) {
       model: z.string().max(80).optional(),
       reasoning: z.enum(["low", "medium", "high", "xhigh", "max"]).optional(),
       base_branch: z.string().max(200).optional().describe("Branch the worktree starts from (default: the repo's default)"),
+      scope_task: SCOPE_TASK.optional().describe("An open scoping task's id or name: the thread is its scoping thread"),
     }),
     execute: async (p, { threadId }) => {
       let token: string | null = null;
       try {
         const a = caller(threadId);
-        token = engine.reserveSpawn(a, p.plan);
+        const task = p.scope_task ? engine.resolveTask(a, p.scope_task) : null;
+        token = engine.reserveSpawn(a, p.plan, task?.id ?? null);
         const lead = await threadInfo(a.threadId);
         engine.ensureProject(a.project!, lead.projectId);
         // a new worktree on the lead's own machine (bb needs the host for a managed worktree)
@@ -696,12 +743,12 @@ export default async function plugin(bb: BbPluginApi) {
         const t = await bb.sdk.threads.spawn({
           projectId: lead.projectId,
           environment: { type: "host", hostId: leadEnv.hostId, workspace: { type: "managed-worktree", baseBranch: p.base_branch ? { kind: "named", name: p.base_branch } : { kind: "default" } } },
-          prompt: p.prompt,
+          prompt: task ? `${p.prompt.trimEnd()}\n\n${scopingThreadStart(a.project!, task, O.Name, a.address)}\n` : p.prompt,
           title: p.title,
           ...selection,
           parentThreadId: a.threadId,
           parentNotifications: "auto",
-          pluginMetadata: { role: "thread", project: a.project, plan: p.plan },
+          pluginMetadata: { role: "thread", project: a.project, plan: p.plan, ...(task ? { scope_task: task.id } : {}) },
         } as Parameters<typeof bb.sdk.threads.spawn>[0]);
         engine.confirmSpawn(token, t.id);
         token = null;
@@ -710,7 +757,7 @@ export default async function plugin(bb: BbPluginApi) {
         await bb.sdk.threads.updatePluginMetadata({ threadId: t.id, set: { address: reg.address, role: reg.role } });
         void flush();
         void placeSections();
-        return ok(`Started ${reg.address} (${t.id}${reg.mon ? `, ${reg.mon}` : ""}) from ${p.plan}. It reports to you; bb tells you when it finishes a turn.`);
+        return ok(`Started ${reg.address} (${t.id}${reg.mon ? `, ${reg.mon}` : ""}) from ${p.plan}${task ? `, the scoping thread for task ${task.id} ${JSON.stringify(task.name)}` : ""}. It reports to you; bb tells you when it finishes a turn.`);
       } catch (e) {
         if (token) {
           // bb may have created the thread before the call failed (a timeout): then it takes the slot, not a stray flag
@@ -1069,6 +1116,7 @@ export default async function plugin(bb: BbPluginApi) {
         .min(1)
         .max(20),
       revises: z.string().optional().describe(`The id of your deliverable ${O.name} sent back with changes`),
+      scope_task: SCOPE_TASK.optional().describe(`An open scoping task's id or name: ${O.name} reviews it in the Scope tab under that task, not on Deliverables; the CoS gets a read-only copy. A revision stays in its task while the task is open`),
       blocks: deliverBlocks.describe(
         `Typed parts drawn as visuals, under the screenshots: verdicts (a PR review: one tile per PR with a short verdict), decisions (what was decided, proposed or needs ${O.name}, each with a one-line why), ` +
           "diagram (2-14 boxes and arrows, each marked added/changed/removed/same: what a PR changes, or where a bug sits), " +
@@ -1083,9 +1131,9 @@ export default async function plugin(bb: BbPluginApi) {
         const tooLong = lessTextRefusal(p) ?? deliverBudgetRefusal(p);
         if (tooLong) throw new EngineError("invalid", tooLong);
         const place = p.proof.some((x) => x.path) ? await deliverPlace(a) : { roots: [] };
-        const d = engine.deliver(a, { title: p.title, summary: p.summary, points: p.points, proof: p.proof as ProofInput[], revises: p.revises ?? null, blocks: p.blocks }, place);
+        const d = engine.deliver(a, { title: p.title, summary: p.summary, points: p.points, proof: p.proof as ProofInput[], revises: p.revises ?? null, blocks: p.blocks, scopeTask: p.scope_task ?? null }, place);
         void flush();
-        return ok(`Delivered ${d.id} rev ${d.rev}: in ${ownerWords(cfg.ownerName).name}'s review${d.scope ? ` in the Scope tab (${d.project} is scoping; the CoS gets a read-only copy)` : ""}. The approval or requested changes come as a message.`);
+        return ok(`Delivered ${d.id} rev ${d.rev}: in ${ownerWords(cfg.ownerName).name}'s review${d.scope ? ` in the Scope tab (${scopeWhere(d.project, d.scope_task)}; the CoS gets a read-only copy)` : ""}. The approval or requested changes come as a message.`);
       } catch (e) {
         return fail(errText(e));
       }
@@ -1643,7 +1691,9 @@ export default async function plugin(bb: BbPluginApi) {
       const pr = engine.prByUrl(b.url);
       return pr ? [{ ...pr, url: b.url }] : [];
     }),
-    scopingDone: d.orchestrator.scoping_done ? { summary: d.orchestrator.scoping_done.summary, projectMd: d.orchestrator.scoping_done.project_md } : null,
+    // the file the summary is in: the project's PROJECT.md, or a scoping task's doc (1.12.0)
+    scopingDone: d.orchestrator.scoping_done ? { summary: d.orchestrator.scoping_done.summary, projectMd: d.orchestrator.scoping_done.project_md ?? d.orchestrator.scoping_done.doc ?? "" } : null,
+    scopeTask: d.orchestrator.scope_task ?? null,
   });
 
   const providerOf = new Map<string, string | null>();
@@ -1767,7 +1817,7 @@ export default async function plugin(bb: BbPluginApi) {
       return engine.projectBook(slug, dayStart);
     },
     scope() {
-      const projects = engine.scopeView().map((p) => ({ slug: p.slug, cards: p.cards.map((d) => card(d)) }));
+      const projects = engine.scopeView().map((p) => ({ slug: p.slug, whole: p.whole, tasks: p.tasks.map((t) => ({ id: t.id, name: t.name, openedAt: t.openedAt })), cards: p.cards.map((d) => card(d)) }));
       return { projects, badge: projects.reduce((n, p) => n + p.cards.length, 0) };
     },
     directHistory({ slug, before, limit }) {
@@ -1832,6 +1882,7 @@ export default async function plugin(bb: BbPluginApi) {
         withdrawn: d.withdrawn,
         next: engine.deliverableNext(d),
         ...(d.scope ? { scope: true } : {}),
+        ...(d.scope_task ? { scopeTask: d.scope_task } : {}),
       }));
     },
   });

@@ -554,3 +554,92 @@ test("orch_ask scoping_done: an object or its JSON string; its PROJECT.md must e
   const js = z.toJSONSchema(s.tools.get("orch_ask")!.parameters as never, { io: "input" }) as { required?: string[] };
   assert.ok(!(js.required ?? []).includes("scoping_done"));
 });
+
+// ---------------------------------------------------------------- scoping tasks (1.12.0)
+// A lead scopes part of an active project with the owner: it must be able to open and drop a task, start the task's
+// scoping thread (told at its start that it only investigates and reports to its lead), and file into the task from
+// every tool that reaches the owner. Every new parameter stays optional and takes the JSON-string form, so an agent on
+// an older schema still reaches the tool.
+
+test("orch_scope_task opens and drops a lead's task; only a lead may; its parameters are optional", async () => {
+  const s = await server();
+  s.engine.register("T-cos", "cos", null);
+  const lead = s.engine.register("T-lead", "lead", "otter");
+  s.engine.register("T-t1", "thread", "otter", "T-lead");
+  assert.deepEqual(await s.call("orch_scope_task", { action: "open", name: "Export format" }, "T-cos"), { ok: false, text: "forbidden: lead only" });
+  assert.deepEqual(await s.call("orch_scope_task", { action: "open", name: "Export format" }, "T-t1"), { ok: false, text: "forbidden: lead only" }, "a thread asks its lead instead");
+  assert.deepEqual(await s.call("orch_scope_task", {}, "T-lead"), { ok: false, text: 'invalid: give action: "open" (with name) or "drop" (with task)' });
+  assert.deepEqual(await s.call("orch_scope_task", { action: "open" }, "T-lead"), { ok: false, text: "invalid: give name: the part of the project to scope, in one line" });
+  const opened = await s.call("orch_scope_task", { action: "open", name: "Export format" }, "T-lead");
+  assert.ok(opened.ok, opened.text);
+  const id = /Opened scoping task (st-\S+)/.exec(opened.text)![1]!;
+  assert.match(opened.text, new RegExp(`scope_task="${id}"`));
+  assert.deepEqual(s.engine.openTasks("otter").map((t) => t.id), [id]);
+  assert.match((await s.call("orch_scope_task", { action: "open", name: "export format" }, "T-lead")).text, /^conflict: otter already has an open scoping task/);
+  const dropped = await s.call("orch_scope_task", { action: "drop", task: JSON.stringify(id) }, "T-lead");
+  assert.ok(dropped.ok, dropped.text);
+  assert.match(dropped.text, new RegExp(`^Dropped scoping task ${id} "Export format"`));
+  assert.match((await s.call("orch_scope_task", { action: "drop", task: id }, "T-lead")).text, /^bad_state: scoping task .* is dropped/);
+  assert.equal(s.engine.task(id)!.openedBy, lead.address);
+  const js = z.toJSONSchema(s.tools.get("orch_scope_task")!.parameters as never, { io: "input" }) as { required?: string[] };
+  assert.deepEqual(js.required ?? [], [], "every parameter is optional");
+});
+
+test("orch_ask, orch_forward and orch_deliver file into a task with scope_task, and say where it went; a closed task is refused", async () => {
+  const s = await server();
+  s.engine.register("T-cos", "cos", null);
+  const lead = s.engine.register("T-lead", "lead", "otter");
+  const t = s.engine.openTask(lead, "Export format");
+  const q = { title: "Which format?", question: "CSV or JSON?", options: [{ label: "CSV" }, { label: "JSON" }] };
+  const asked = await s.call("orch_ask", { ...q, scope_task: "Export format" }, "T-lead");
+  assert.match(asked.text, new RegExp(`in the owner's Scope pane \\(scoping task ${t.id} "Export format": no CoS triage`));
+  assert.match((await s.call("orch_ask", { ...q, title: "Plain?" }, "T-lead")).text, /with the CoS/, "without it, the normal route");
+  s.engine.register("T-t1", "thread", "otter", "T-lead");
+  const tid = /Filed (d-\S+)/.exec((await s.call("orch_ask", { ...q, title: "Thread asks?" }, "T-t1")).text)![1]!;
+  assert.match((await s.call("orch_forward", { id: tid, scope_task: t.id }, "T-lead")).text, new RegExp(`^Filed ${tid} in the owner's Scope pane \\(scoping task ${t.id}`));
+  const dl = await s.call("orch_deliver", { title: "Export spike", summary: "What each format costs.", proof: [{ kind: "link", caption: "notes", url: "https://example.com/n" }], scope_task: t.id }, "T-lead");
+  assert.match(dl.text, new RegExp(`in the Scope tab \\(scoping task ${t.id} "Export format"; the CoS gets a read-only copy\\)`));
+  // its "Scoping done?": an object or its JSON string, with task and doc; the doc must exist
+  const doc = join(s.root, "export-findings.md");
+  const missing = await s.call("orch_ask", { ...q, title: "Scoping done?", scoping_done: { summary: "CSV for finance.", doc, task: t.id } }, "T-lead");
+  assert.match(missing.text, /^not_found: scoping_done\.doc .* doesn't exist: write the task's findings there first/);
+  writeFileSync(doc, "# Export format\n\nCSV for finance.\n");
+  const r = await s.call("orch_ask", { ...q, title: "Scoping done?", scoping_done: JSON.stringify({ summary: "CSV for finance.", doc, task: t.id }) }, "T-lead");
+  assert.ok(r.ok, r.text);
+  const d = s.engine.decision(/Filed (d-\S+)/.exec(r.text)![1]!)!;
+  assert.deepEqual(d.orchestrator.scoping_done, { summary: "CSV for finance.", doc, task: t.id });
+  assert.equal(d.orchestrator.scope_task, t.id);
+  s.engine.dropTask(lead, t.id);
+  assert.match((await s.call("orch_ask", { ...q, title: "Late?", scope_task: t.id }, "T-lead")).text, /^bad_state: scoping task .* is dropped .*: leave scope_task out, or open a new task/);
+  for (const name of ["orch_ask", "orch_forward", "orch_deliver"]) {
+    const js = z.toJSONSchema(s.tools.get(name)!.parameters as never, { io: "input" }) as { required?: string[] };
+    assert.ok(!(js.required ?? []).includes("scope_task"), `${name}: scope_task is optional`);
+  }
+});
+
+test("orch_spawn_thread with scope_task starts the task's scoping thread: its brief says so, and its questions file under the task", async () => {
+  const s = await server();
+  const cos = s.engine.register("T-cos", "cos", null);
+  const lead = s.engine.register("T-lead", "lead", "alpha");
+  const t = s.engine.openTask(lead, "Export format");
+  const plan = s.engine.ask(lead, { title: "Plan: research", question: "Start one read-only thread?", options: [{ label: "Go" }, { label: "Wait" }], kind: "plan", threads: 2 });
+  s.engine.triageAskPerson(cos, plan.id, { question: "Start?", options: [{ label: "Go" }, { label: "Wait" }], allowText: true });
+  s.engine.personAnswer(plan.id, s.engine.needsYou().cards[0]!.rev, "1", null, "desktop");
+  assert.match((await s.call("orch_spawn_thread", { plan: plan.id, title: "Scout", prompt: "Look.", scope_task: "st-nope" }, lead.threadId)).text, /^not_found: alpha has no scoping task "st-nope"/);
+  assert.equal(s.spawns.length, 0, "a refused task starts nothing and holds no slot");
+  const r = await s.call("orch_spawn_thread", { plan: plan.id, title: "Scout", prompt: "Look at the export code.", scope_task: "Export format" }, lead.threadId);
+  assert.ok(r.ok, r.text);
+  assert.match(r.text, new RegExp(`the scoping thread for task ${t.id} "Export format"`));
+  const sp = s.spawns[0]!;
+  assert.match(sp.prompt, /^Look at the export code\.\n\n## You are the scoping thread for alpha's task "Export format"/);
+  assert.match(sp.prompt, /read-only investigation.*change nothing/);
+  assert.match(sp.prompt, /Ask lead:alpha with orch_ask/);
+  assert.equal(sp.pluginMetadata.scope_task, t.id);
+  const th = s.engine.agentByThread("T-1")!;
+  const q = s.engine.ask(th, { title: "Which format?", question: "CSV or JSON?", options: [{ label: "CSV" }, { label: "JSON" }] });
+  assert.match((await s.call("orch_forward", { id: q.id }, lead.threadId)).text, new RegExp(`Scope pane \\(scoping task ${t.id}`), "inherited from the thread");
+  // the same plan, without scope_task: a plain thread, its brief unchanged
+  assert.ok((await s.call("orch_spawn_thread", { plan: plan.id, title: "Builder", prompt: "Build." }, lead.threadId)).ok);
+  assert.equal(s.spawns[1]!.prompt, "Build.");
+  assert.equal(s.spawns[1]!.pluginMetadata.scope_task, undefined);
+});

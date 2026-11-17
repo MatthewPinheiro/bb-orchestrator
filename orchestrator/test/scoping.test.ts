@@ -205,12 +205,13 @@ test("the CoS's inbox and Needs you view list the scoping projects with their op
   assert.equal(s.e.ask(s.active, { ...q, title: "Otter scoping?" }).orchestrator.scope, true, "an existing project can be put in scoping");
 });
 
-test("the project mode is the last migration: an older database's projects come out active", () => {
-  assert.match(MIGRATIONS[MIGRATIONS.length - 1]!, /^ALTER TABLE projects ADD COLUMN mode TEXT NOT NULL DEFAULT 'active'$/);
-  assert.match(MIGRATIONS[MIGRATIONS.length - 2]!, /^CREATE TABLE handed_off_prs \(/, "appended after 1.10.0's table, never before it");
+test("the project mode is appended after 1.10.0's table: an older database's projects come out active", () => {
+  const mode = MIGRATIONS.findIndex((m) => /^ALTER TABLE projects ADD COLUMN mode TEXT NOT NULL DEFAULT 'active'$/.test(m));
+  assert.match(MIGRATIONS[mode - 1]!, /^CREATE TABLE handed_off_prs \(/, "appended after 1.10.0's table, never before it");
+  // later releases append after it (1.12.0's scoping tasks: test/scoping-tasks.test.ts)
   const db = new DatabaseSync(":memory:");
   db.exec(`CREATE TABLE _migrations (id INTEGER PRIMARY KEY)`);
-  MIGRATIONS.slice(0, -1).forEach((sql, i) => {
+  MIGRATIONS.slice(0, mode).forEach((sql, i) => {
     db.exec(sql);
     db.prepare(`INSERT INTO _migrations (id) VALUES (?)`).run(i);
   });

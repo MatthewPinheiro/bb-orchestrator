@@ -5,7 +5,7 @@ import { test } from "node:test";
 import type { Projects, SummaryWait } from "../contract.ts";
 import type { Lane } from "../app/lanes.ts";
 import type { RowState } from "../app/command-center.ts";
-import { DETAIL_LAYOUT, STATE_CHIP, ageSpec, detailOrder, laneChip, listRow, pinWhen, prChips, prRows, projectState, threadCards, ticketOf, titleOf, type ChipSpec } from "../app/kit.ts";
+import { DETAIL_LAYOUT, STATE_CHIP, ageSpec, detailOrder, inScopeEntry, laneChip, listRow, pinWhen, prChips, prRows, projectState, scopeEntries, scopeEntryOf, threadCards, ticketOf, titleOf, type ChipSpec } from "../app/kit.ts";
 
 const NOW = Date.parse("2026-11-17T15:00:00");
 const H = 3_600_000;
@@ -183,4 +183,20 @@ test("two waits on one PR both fold into its one row, oldest first: the PR is st
 
 test("a blocked PR never reads green, even when approved and passing", () => {
   assert.deepEqual(prChips(pr(8, { attention: "blocked", review: "approved" }))[0], { tone: "blocked", icon: "blocked", word: "blocked" });
+});
+
+test("the Scope tab lists each project scoping as a whole and each open scoping task, grouped project > task; each card shows under exactly one", () => {
+  // the owner must find every card that waits on them in the pane, once: a task's under the task, the rest under the project
+  const card = (id: string, scopeTask: string | null) => ({ id, scopeTask }) as never;
+  const kite = { slug: "kite", whole: true, tasks: [{ id: "st-a", name: "Data sources", openedAt: 1 }], cards: [card("d-1", null), card("d-2", "st-a"), card("d-3", "st-gone")] };
+  const otter = { slug: "otter", whole: false, tasks: [{ id: "st-b", name: "Export format", openedAt: 2 }, { id: "st-c", name: "Retention", openedAt: 3 }], cards: [card("d-4", "st-b")] };
+  const old = { slug: "wren", cards: [card("d-5", null)] }; // an older plugin process: no whole, no tasks
+  const entries = scopeEntries([kite, otter, old]);
+  assert.deepEqual(entries.map((e) => e.key), ["kite", "kite/st-a", "otter/st-b", "otter/st-c", "wren"], "whole project first, then its tasks; an active project has no whole entry");
+  const where = (p: typeof kite | typeof otter | typeof old) => (p.cards as { id: string; scopeTask: string | null }[]).map((c) => [c.id, entries.filter((e) => e.slug === p.slug && inScopeEntry(p, e.task?.id ?? null, c.scopeTask)).map((e) => e.key)]);
+  assert.deepEqual(where(kite), [["d-1", ["kite"]], ["d-2", ["kite/st-a"]], ["d-3", ["kite"]]], "a card under no open task is the whole project's");
+  assert.deepEqual(where(otter), [["d-4", ["otter/st-b"]]]);
+  assert.deepEqual(where(old), [["d-5", ["wren"]]]);
+  assert.equal(scopeEntryOf(kite, "st-a"), "kite/st-a", "a link to a task's card opens that task");
+  assert.equal(scopeEntryOf(kite, "st-gone"), "kite");
 });

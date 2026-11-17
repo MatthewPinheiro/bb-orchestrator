@@ -353,6 +353,22 @@ export const MIGRATIONS: string[] = [
   // CoS triage, no Needs you, no standing rule); the owner's yes on its "Scoping done?" card makes it active. Every
   // project that exists today is active.
   `ALTER TABLE projects ADD COLUMN mode TEXT NOT NULL DEFAULT 'active'`,
+  // 1.12.0: scoping tasks, the named parts of a project scoped with the owner while the rest goes the normal way (a project
+  // can have several; a name is unique among its open ones). A card or deliverable names its task in its JSON
+  // (scope_task); a thread started for one (orch_spawn_thread scope_task) has it on its spawn row, which a handoff moves.
+  `CREATE TABLE scoping_tasks (
+     id TEXT PRIMARY KEY,
+     project TEXT NOT NULL,
+     name TEXT NOT NULL,
+     state TEXT NOT NULL DEFAULT 'scoping',
+     opened_by TEXT NOT NULL,
+     opened_at INTEGER NOT NULL,
+     closed_at INTEGER,
+     summary TEXT,
+     doc TEXT
+   );
+   CREATE UNIQUE INDEX scoping_tasks_open_name ON scoping_tasks (project, name COLLATE NOCASE) WHERE state = 'scoping';
+   ALTER TABLE spawns ADD COLUMN scope_task TEXT`,
 ];
 
 export function migrate(db: Db): void {

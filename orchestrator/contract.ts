@@ -36,6 +36,8 @@ export const cardSchema = z.object({
   queued: z.number().optional(), // cards from the same asker held behind this one (batching); they come up once it is answered
   // a scoping lead's "Scoping done?" card (1.11.0): its summary and PROJECT.md, drawn above its options
   scopingDone: z.object({ summary: z.string(), projectMd: z.string() }).nullable().optional(),
+  // the scoping task it waits under in the Scope tab (1.12.0), or none for the whole project
+  scopeTask: z.string().nullable().optional(),
 });
 export type Card = z.infer<typeof cardSchema>;
 
@@ -318,13 +320,26 @@ export const deliverablesSchema = z.array(
       .nullable(),
     // delivered while its project was scoping: reviewed in the Scope tab, not on Deliverables (1.11.0)
     scope: z.boolean().optional(),
+    scopeTask: z.string().optional(), // the scoping task it is reviewed under (1.12.0)
   }),
 );
 export type Deliverables = z.infer<typeof deliverablesSchema>;
 
 // The Scope tab (1.11.0): each scoping project and the cards waiting on the owner there; badge: those cards. Its
 // deliverables come from the deliverables read (scope: true).
-export const scopeSchema = z.object({ projects: z.array(z.object({ slug: z.string(), cards: z.array(cardSchema) })), badge: z.number() });
+// 1.12.0: an active project is listed too while it has open scoping tasks; whole says it scopes as a whole, and its tasks
+// group the cards (by scopeTask). Both optional for an older plugin process (every listed project scoped as a whole).
+export const scopeSchema = z.object({
+  projects: z.array(
+    z.object({
+      slug: z.string(),
+      cards: z.array(cardSchema),
+      whole: z.boolean().optional(),
+      tasks: z.array(z.object({ id: z.string(), name: z.string(), openedAt: z.number() })).optional(),
+    }),
+  ),
+  badge: z.number(),
+});
 export type Scope = z.infer<typeof scopeSchema>;
 
 // Every project in the sidebar's placing order (engine.projects()), with its accent type (none with pokemon off); the page

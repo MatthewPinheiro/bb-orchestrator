@@ -6,7 +6,7 @@
 // - the thread card's order: what waits on the owner, then what works, then the rest receding; five shown;
 // - the detail layout: Needs | Blocked first, then Now | PRs + Record; each PR once, its wait folded into its row;
 // - a pin's "updated" words.
-import type { Projects, SummaryWait } from "../contract.ts";
+import type { Projects, Scope, SummaryWait } from "../contract.ts";
 import { blockersOf, stateOf, statusStale, type RowState } from "./command-center.ts";
 import { age, type Lane } from "./lanes.ts";
 import { otherWaits, prsInFlight } from "./source.ts";
@@ -227,4 +227,35 @@ export function pinWhen(p: { kind: string; updatedAt: number | null; rev: number
   if (p.kind === "deliverable") return `rev ${p.rev ?? 1} · ${when}`;
   if (p.kind === "link") return `pinned ${when}`;
   return `updated ${when}`;
+}
+
+// ---------------------------------------------------------------- the Scope tab's list (1.12.0)
+// One entry per project scoping as a whole and one per open scoping task, grouped project > task. Each card belongs to
+// exactly one entry, so no card shows twice and none goes missing.
+
+type ScopeProject = Scope["projects"][number];
+export interface ScopeEntry {
+  key: string;
+  slug: string;
+  task: { id: string; name: string } | null;
+}
+export const scopeKey = (slug: string, task: string | null) => (task ? `${slug}/${task}` : slug);
+
+/** Per project, its whole-project entry first (an older plugin process sends no whole: every project then scopes as a whole), then its open tasks, oldest first. */
+export function scopeEntries(projects: ScopeProject[]): ScopeEntry[] {
+  return projects.flatMap((p) => [
+    ...(p.whole !== false ? [{ key: p.slug, slug: p.slug, task: null }] : []),
+    ...(p.tasks ?? []).map((t) => ({ key: scopeKey(p.slug, t.id), slug: p.slug, task: { id: t.id, name: t.name } })),
+  ]);
+}
+
+/** Whether something filed under `scopeTask` shows in the entry for `task`: the task's own, or the whole project's (under no open task). */
+export function inScopeEntry(p: ScopeProject, task: string | null, scopeTask: string | null | undefined): boolean {
+  if (task) return scopeTask === task;
+  return !scopeTask || !(p.tasks ?? []).some((t) => t.id === scopeTask);
+}
+
+/** The entry a card of `p` shows in: where a link to it opens the Scope tab. */
+export function scopeEntryOf(p: ScopeProject, scopeTask: string | null | undefined): string {
+  return scopeKey(p.slug, scopeTask && (p.tasks ?? []).some((t) => t.id === scopeTask) ? scopeTask : null);
 }
