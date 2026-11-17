@@ -16,6 +16,8 @@ import { externalBody, externalMailSchema, externalPreview, type ExternalMail } 
 import type { StartedBy } from "./start.ts";
 import { MOOT_MIN_SHARED, MOOT_WINDOW_MS, sharedWords } from "./moot.ts";
 import { cardRefusal } from "./caps.ts";
+import type { BbPrReading } from "./open-prs.ts";
+import type { WaitView } from "./watchers.ts";
 import { type LeadStatus, normalizeStatus, sameWait, type StatusParams, STATUS_STALE_MS, statusLine } from "./status.ts";
 import { backfillEvents, buildHistory, buildSummary, logEvent, logSince, SUMMARY_DONE_MS, type DecisionLite, type EventIn, type EventRow, type HistoryInput, type ProjectHistory, type ProjectSummary, type SummaryInput } from "./history.ts";
 import { waitsOf } from "./status.ts";
@@ -218,23 +220,8 @@ export interface ProjectRow {
   mode: ProjectMode; // scoping: its lead's cards and deliverables go only to the owner's Scope pane (1.11.0)
 }
 
-/** One environment's PR as bb's PR status reports it (bb--github-pr-status `pullRequests`). */
-export type PrResult =
-  | {
-      outcome: "available";
-      pullRequest: {
-        url: string;
-        number?: number;
-        state: string;
-        attention?: string;
-        checks?: { state?: string };
-        review?: { state?: string };
-        mergeability?: { state?: string; mergeable?: string | null; mergeStateStatus?: string | null };
-        inMergeQueue?: boolean | null;
-      };
-    }
-  | { outcome: "absent" }
-  | { outcome: "unavailable"; message?: string };
+/** One environment's PR as bb's PR status reports it (bb--github-pr-status `pullRequests`); a PR wait's gh reading too. */
+export type PrResult = BbPrReading;
 
 export interface PrRow {
   environmentId: string;
@@ -540,6 +527,18 @@ interface DeliverableDbRow {
   json: string;
 }
 
+/** A PR wait's own gh reading of a PR no live environment shows (waitPrSeen). */
+interface PrReadingRow {
+  url: string;
+  number: number | null;
+  state: string | null;
+  attention: string | null;
+  checks: string | null;
+  sig: string;
+  seen_at: number;
+  read_at: number;
+}
+
 interface WaitRow {
   id: string;
   owner: string;
@@ -552,6 +551,27 @@ interface WaitRow {
   closed_at: number | null;
   outcome: string | null;
   item_id: string | null;
+}
+
+/**
+ * One PR reading's facts as the engine keeps them, for bb's readings and a PR wait's gh reading alike, so "ready" has
+ * one rule. `prevMerge`: the last known mergeability (undefined: none). GitHub reads mergeable UNKNOWN while it
+ * recomputes after any push to the base: an unknown mergeability keeps the last known one.
+ */
+function prFacts(pr: Extract<PrResult, { outcome: "available" }>["pullRequest"], prevMerge: string | null | undefined) {
+  const checks = pr.checks?.state ?? null;
+  const attention = pr.attention ?? null;
+  // an injected reading or an older bb has no mergeability or review: its attention stands in for both
+  const raw = pr.mergeability ? pr.mergeability.mergeable : undefined;
+  const merge = !pr.mergeability ? attention : raw && raw !== "UNKNOWN" ? (pr.mergeability.state ?? null) : (prevMerge ?? "unknown");
+  const review = pr.mergeability || pr.review ? (pr.review?.state ?? null) : null;
+  const queued = pr.inMergeQueue === true;
+  const sig = ["v2", pr.url, pr.state, checks ?? "", review ?? "", merge ?? "", queued ? "queued" : ""].join("|");
+  // ready to merge, by bb's own order, from the signature's fields (bb's attention says "none" mid-recompute)
+  const ready = merge === "ready_to_merge" || (pr.state === "open" && merge === "mergeable" && checks === "passing" && !queued && !["changes_requested", "review_requested", "review_required"].includes(review ?? ""));
+  // what the lanes and deliverables show: as the notice says it, not bb's word of the moment
+  const shown = merge === "conflicts" && pr.state === "open" ? "conflicts" : ready ? "ready_to_merge" : attention;
+  return { checks, review, merge, queued, sig, ready, shown };
 }
 
 /** How long a card waits off Needs you behind an earlier one from the same asker and project, at most (batching). */
@@ -1682,10 +1702,10 @@ export class Engine {
   private bindWait(by: Agent, id: string, url: string, when: WaitWhen): string {
     const wid = `w-${hex(4)}`;
     this.db.prepare(`INSERT INTO waits (id, owner, ref, about, pr_url, cond, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`).run(wid, by.address, id, this.waitAbout(id), url, when, this.now());
-    const now = this.prByUrl(url);
+    const shown = this.prByUrl(url);
     const woke = this.checkWaits(url);
     if (woke.includes(wid)) return `bound to ${url}: it is ${WHEN_WORDS[when]} already, so it is back in your inbox now (${wid})`;
-    return `bound to ${url} (${wid}): you get it back when the PR is ${WHEN_WORDS[when]}, and a reminder each day until then${now ? "" : ". No thread's environment shows this PR yet, so its notices can't wake you until one does"}`;
+    return `bound to ${url} (${wid}): you get it back when the PR is ${WHEN_WORDS[when]}, and a reminder each day until then${shown ? "" : ". No thread's environment shows this PR, so the plugin reads it by its URL on each PR check"}`;
   }
 
   /** Close `by`'s own open waits on `ref` (never another agent's) with `outcome`. Returns their PRs, or null when none. */
@@ -1709,7 +1729,7 @@ export class Engine {
 
   /** Wake the owners of the open waits on `url` whose condition the latest reading meets. Returns the waits it closed. */
   private checkWaits(url: string): string[] {
-    const pr = this.prByUrl(url);
+    const pr = this.waitPr(url);
     if (!pr) return [];
     const rows = this.db.prepare(`SELECT * FROM waits WHERE closed_at IS NULL AND pr_url = ?`).all(pr.url ?? url) as WaitRow[];
     const done: string[] = [];
@@ -1722,7 +1742,7 @@ export class Engine {
         sender: "orchestrator",
         kind: "message",
         ref: w.ref,
-        body: `${what}: ${pr.url ?? url}. You bound ${w.ref} to it ${ago(this.now() - w.created_at)} ago: ${w.about}. ${met === "never" ? "Decide what happens instead" : "Carry it out now"}, then ack this.`,
+        body: `${what}: ${pr.url ?? url}. ${w.ref === w.id ? `PR wait ${w.id} was set on it` : `You bound ${w.ref} to it`} ${ago(this.now() - w.created_at)} ago: ${w.about}. ${met === "never" ? "Decide what happens instead" : "Carry it out now"}, then ack this.`,
         key: `wait:${w.id}`,
         needsAck: true,
       });
@@ -1741,8 +1761,8 @@ export class Engine {
       tx(this.db, () => {
         this.db.prepare(`UPDATE waits SET nudged_at = ? WHERE id = ?`).run(t, w.id);
         if (!this.agentByAddress(w.owner)) return;
-        const pr = this.prByUrl(w.pr_url);
-        const seen = pr ? `unchanged for ${ago(t - pr.seenAt)}: ${pr.state ?? "?"}${pr.checks ? `, checks ${pr.checks}` : ""}${pr.review ? `, review ${pr.review.replace(/_/g, " ")}` : ""}${pr.attention ? `, ${pr.attention.replace(/_/g, " ")}` : ""}` : "no thread's environment shows it, so the plugin can't see it change";
+        const pr = this.waitPr(w.pr_url);
+        const seen = pr ? `unchanged for ${ago(t - pr.seenAt)}: ${pr.state ?? "?"}${pr.checks ? `, checks ${pr.checks}` : ""}${pr.review ? `, review ${pr.review.replace(/_/g, " ")}` : ""}${pr.attention ? `, ${pr.attention.replace(/_/g, " ")}` : ""}` : "the plugin hasn't been able to read it yet: no thread's environment shows it, and gh hasn't answered for it";
         this.put({
           recipient: w.owner,
           sender: "orchestrator",
@@ -1754,6 +1774,174 @@ export class Engine {
         });
       });
     }
+  }
+
+  /**
+   * The reading a wait on `url` goes by: the PR wait's own gh reading when there is one (kept only while no live
+   * environment's bb reading covers the PR: prSeen drops it), else bb's latest reading of it, else null.
+   */
+  waitPr(url: string): PrRow | null {
+    const bare = url.replace(/\/+$/, "");
+    const r = this.db.prepare(`SELECT * FROM pr_readings WHERE url = ?`).get(bare) as PrReadingRow | undefined;
+    return r ? { environmentId: "", threadId: "", url: r.url, number: r.number, state: r.state, attention: r.attention, checks: r.checks, review: r.sig.split("|")[4] || null, seenAt: r.seen_at } : this.prByUrl(bare);
+  }
+
+  /** The PRs the open waits are on, each once. */
+  openWaitUrls(): string[] {
+    return (this.db.prepare(`SELECT DISTINCT pr_url FROM waits WHERE closed_at IS NULL ORDER BY pr_url`).all() as { pr_url: string }[]).map((r) => r.pr_url);
+  }
+
+  /**
+   * A PR wait's own reading (gh pr view by URL, open-prs/host.ts), for a PR no live environment's bb reading covered
+   * this pass. Kept per URL (when it last changed and when it was read), then the waits on it are checked with the same
+   * rule as bb's readings (prFacts). Anything but an available reading writes nothing and closes nothing. Returns the
+   * waits it closed.
+   */
+  waitPrSeen(res: PrResult): string[] {
+    if (res.outcome !== "available") return [];
+    const pr = res.pullRequest;
+    const url = pr.url.replace(/\/+$/, "");
+    const old = this.db.prepare(`SELECT sig, seen_at FROM pr_readings WHERE url = ?`).get(url) as { sig: string; seen_at: number } | undefined;
+    const f = prFacts({ ...pr, url }, old ? old.sig.split("|")[5] || null : undefined);
+    const t = this.now();
+    return tx(this.db, () => {
+      this.db
+        .prepare(
+          `INSERT INTO pr_readings (url, number, state, attention, checks, sig, seen_at, read_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(url) DO UPDATE SET number = excluded.number, state = excluded.state, attention = excluded.attention, checks = excluded.checks,
+             sig = excluded.sig, seen_at = excluded.seen_at, read_at = excluded.read_at`,
+        )
+        .run(url, pr.number ?? null, pr.state, f.shown, f.checks, f.sig, old && old.sig === f.sig ? old.seen_at : t, t);
+      return this.checkWaits(url);
+    });
+  }
+
+  /** Drop the gh readings no open wait names any more (a wait met, moved or dropped). Returns how many went. */
+  pruneWaitReadings(): number {
+    return Number((this.db.prepare(`DELETE FROM pr_readings WHERE url NOT IN (SELECT pr_url FROM waits WHERE closed_at IS NULL)`).run() as { changes: number | bigint }).changes);
+  }
+
+  // ---------------------------------------------------------------- the Watchers list: PR waits for the owner and the CoS (2026-11-17)
+  // The owner (from the Board) and the CoS (orch_watch) may list, add, retarget, move or drop any open PR wait, for any
+  // recipient. Leads and threads keep only orch_ack's own-wait moves. Each change tells the wait's old and new owner in
+  // one line and logs a Board row. `by` null is the owner.
+
+  /** Who is changing a wait, in words: the owner, or the CoS. Anyone else is refused. */
+  private watcher(by: Agent | null): { who: string; from: string } {
+    if (by === null) return { who: this.owner.Name, from: "person" };
+    if (by.role !== "cos") throw new EngineError("forbidden", "only the CoS (orch_watch) and the owner (the Board) change PR waits; acks move your own (orch_ack with pr and when)");
+    return { who: "The CoS", from: by.address };
+  }
+
+  private openWait(id: string): WaitRow {
+    const w = this.db.prepare(`SELECT * FROM waits WHERE id = ?`).get(id) as WaitRow | undefined;
+    if (!w) throw new EngineError("not_found", `no PR wait ${id}`);
+    if (w.closed_at !== null) throw new EngineError("bad_state", `${id} is closed already (${w.outcome ?? "closed"})`);
+    return w;
+  }
+
+  private liveAddress(to: string): Agent {
+    const a = this.agentByAddress(to.trim());
+    if (!a) throw new EngineError("invalid", `${JSON.stringify(to)} is no live agent's address`);
+    return a;
+  }
+
+  /** One line to a wait's owner (skipped when the address has no live holder: no dead letter for a notice). */
+  private watchTell(to: string, body: string, key: string): void {
+    if (!this.agentByAddress(to)) return;
+    this.put({ recipient: to, sender: "orchestrator", kind: "notice", ref: null, body, key, needsAck: false });
+  }
+
+  /** When the tick's daily and hourly checks last ran, for the Watchers list (their own cursors; waits' nudges). */
+  watchRuns(): Record<string, number | undefined> {
+    const nudged = (this.db.prepare(`SELECT MAX(nudged_at) AS t FROM waits`).get() as { t: number | null }).t;
+    return { stale: this.cursor("stale.checked_at") ?? undefined, "dead-letters": this.cursor("dlq.checked_at") ?? undefined, "wait-nudges": nudged ?? undefined };
+  }
+
+  /** Every open PR wait with its latest reading, oldest first. */
+  watchList(): WaitView[] {
+    const rows = this.db.prepare(`SELECT * FROM waits WHERE closed_at IS NULL ORDER BY created_at, rowid`).all() as WaitRow[];
+    return rows.map((w) => {
+      const gh = this.db.prepare(`SELECT read_at FROM pr_readings WHERE url = ?`).get(w.pr_url) as { read_at: number } | undefined;
+      const pr = this.waitPr(w.pr_url);
+      return {
+        id: w.id,
+        owner: w.owner,
+        ownerLive: !!this.agentByAddress(w.owner),
+        ref: w.ref,
+        about: w.about,
+        prUrl: w.pr_url,
+        when: w.cond,
+        createdAt: w.created_at,
+        reading: pr ? { state: pr.state, checks: pr.checks, review: pr.review, attention: pr.attention, source: gh ? "gh" : "bb", changedAt: pr.seenAt, readAt: gh?.read_at ?? null } : null,
+      };
+    });
+  }
+
+  /** A new PR wait for `to`: when the PR gets there, `to` gets `note` back as work to carry out. */
+  watchAdd(by: Agent | null, input: { to: string; pr: string; when: string; note: string }): string {
+    const { who, from } = this.watcher(by);
+    const to = this.liveAddress(input.to);
+    const w = this.waitInput({ pr: input.pr, when: input.when });
+    const note = input.note.replace(/\s+/g, " ").trim();
+    if (!note) throw new EngineError("invalid", "give note: what the recipient carries out once the PR is there");
+    const wid = `w-${hex(4)}`;
+    return tx(this.db, () => {
+      this.db.prepare(`INSERT INTO waits (id, owner, ref, about, pr_url, cond, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`).run(wid, to.address, wid, `${who}'s note: ${JSON.stringify(note.slice(0, 600))}`, w.url, w.when, this.now());
+      const line = `${who} added PR wait ${wid} for ${to.address}: until ${w.url} is ${WHEN_WORDS[w.when]}`;
+      this.watchTell(to.address, `${who} added a PR wait for you (${wid}): once ${w.url} is ${WHEN_WORDS[w.when]}, carry out ${JSON.stringify(note.slice(0, 300))}. It comes back to you then.`, `watch:${wid}:add`);
+      this.boardAdd("notice", from, to.project, line, note.slice(0, 600), wid);
+      const woke = this.checkWaits(w.url);
+      return woke.includes(wid) ? `${line}; it is ${WHEN_WORDS[w.when]} already, so it went to ${to.address} at once` : line;
+    });
+  }
+
+  /** Point an open wait at another PR and/or condition; checked against the new PR at once. */
+  watchRetarget(by: Agent | null, id: string, input: { pr?: string | null; when?: string | null }): string {
+    const { who, from } = this.watcher(by);
+    const w = this.openWait(id);
+    if (!input.pr && !input.when) throw new EngineError("invalid", "give pr and/or when: the wait's new PR, condition or both");
+    const next = this.waitInput({ pr: input.pr || w.pr_url, when: input.when || w.cond });
+    if (next.url === w.pr_url && next.when === w.cond) return `${id} already waits until ${w.pr_url} is ${WHEN_WORDS[next.when]}; nothing changed`;
+    return tx(this.db, () => {
+      this.db.prepare(`UPDATE waits SET pr_url = ?, cond = ? WHERE id = ?`).run(next.url, next.when, id);
+      const was = `${w.pr_url} ${WHEN_WORDS[w.cond as WaitWhen]}`;
+      const now = `${next.url} ${WHEN_WORDS[next.when]}`;
+      this.watchTell(w.owner, `${who} retargeted your PR wait ${id} (${w.ref}): now until ${now}, was ${was}.`, `watch:${id}:retarget:${this.now()}`);
+      this.boardAdd("notice", from, this.agentByAddress(w.owner)?.project ?? null, `${who} retargeted PR wait ${id} (${w.owner}): ${now}, was ${was}`, "", id);
+      const woke = this.checkWaits(next.url);
+      return `${id} now waits until ${now} (was ${was})${woke.includes(id) ? `; it is there already, so it went to ${w.owner} at once` : ""}`;
+    });
+  }
+
+  /** Hand an open wait to another live agent: it gets the answer back when the PR gets there. */
+  watchMove(by: Agent | null, id: string, toAddress: string): string {
+    const { who, from } = this.watcher(by);
+    const w = this.openWait(id);
+    const to = this.liveAddress(toAddress);
+    if (to.address === w.owner) return `${id} is ${w.owner}'s already; nothing changed`;
+    return tx(this.db, () => {
+      this.db.prepare(`UPDATE waits SET owner = ? WHERE id = ?`).run(to.address, id);
+      const what = `${w.pr_url} ${WHEN_WORDS[w.cond as WaitWhen]}`;
+      this.watchTell(w.owner, `${who} moved your PR wait ${id} (${w.ref}, until ${what}) to ${to.address}.`, `watch:${id}:move-from:${this.now()}`);
+      this.watchTell(to.address, `${who} gave you PR wait ${id} from ${w.owner}: once ${what}, you get back ${w.about.replace(/\s+/g, " ").slice(0, 300)}.`, `watch:${id}:move-to:${this.now()}`);
+      this.boardAdd("notice", from, to.project, `${who} moved PR wait ${id} from ${w.owner} to ${to.address}: until ${what}`, "", id);
+      return `${id} moved from ${w.owner} to ${to.address}: until ${what}`;
+    });
+  }
+
+  /** Stop an open wait: nothing comes back for it. */
+  watchDrop(by: Agent | null, id: string): string {
+    const { who, from } = this.watcher(by);
+    const w = this.openWait(id);
+    return tx(this.db, () => {
+      this.db.prepare(`UPDATE waits SET closed_at = ?, outcome = 'dropped' WHERE id = ?`).run(this.now(), id);
+      const what = `${w.pr_url} ${WHEN_WORDS[w.cond as WaitWhen]}`;
+      this.watchTell(w.owner, `${who} dropped your PR wait ${id} (${w.ref}, until ${what}): nothing comes back for it.`, `watch:${id}:drop`);
+      this.boardAdd("notice", from, this.agentByAddress(w.owner)?.project ?? null, `${who} dropped PR wait ${id} (${w.owner}): until ${what}`, "", id);
+      this.ports.changed();
+      return `${id} dropped (${w.owner}, until ${what})`;
+    });
   }
 
   /** An agent's open waits, for its inbox and the stale-thread check. */
@@ -3756,23 +3944,14 @@ export class Engine {
   prSeen(a: Agent, environmentId: string, res: PrResult, label = ""): boolean {
     if (res.outcome !== "available") return false;
     const pr = res.pullRequest;
-    const checks = pr.checks?.state ?? null;
-    const attention = pr.attention ?? null;
+    // bb reads this PR now: a PR wait's own gh reading of it is older news (bb's reading is kept when it has one)
+    this.db.prepare(`DELETE FROM pr_readings WHERE url = ?`).run(pr.url.replace(/\/+$/, ""));
     const old = this.db.prepare(`SELECT url, state, checks, attention, sig FROM prs WHERE environment_id = ?`).get(environmentId) as
       | { url: string | null; state: string | null; checks: string | null; attention: string | null; sig: string }
       | undefined;
     const legacy = old !== undefined && !old.sig.startsWith("v2|"); // written before 1.3.0: url|state|attention|checks
     const prev = !old || old.url !== pr.url ? null : legacy ? { merge: old.attention === "conflicts" ? "conflicts" : null } : { merge: old.sig.split("|")[5] || null };
-    // an injected reading or an older bb has no mergeability or review: its attention stands in for both
-    const raw = pr.mergeability ? pr.mergeability.mergeable : undefined;
-    const merge = !pr.mergeability ? attention : raw && raw !== "UNKNOWN" ? (pr.mergeability.state ?? null) : (prev?.merge ?? "unknown");
-    const review = pr.mergeability || pr.review ? (pr.review?.state ?? null) : null;
-    const queued = pr.inMergeQueue === true;
-    const sig = ["v2", pr.url, pr.state, checks ?? "", review ?? "", merge ?? "", queued ? "queued" : ""].join("|");
-    // ready to merge, by bb's own order, from the signature's fields (bb's attention says "none" mid-recompute)
-    const ready = merge === "ready_to_merge" || (pr.state === "open" && merge === "mergeable" && checks === "passing" && !queued && !["changes_requested", "review_requested", "review_required"].includes(review ?? ""));
-    // what the lanes and deliverables show: as the notice says it, not bb's word of the moment
-    const shown = merge === "conflicts" && pr.state === "open" ? "conflicts" : ready ? "ready_to_merge" : attention;
+    const { checks, review, merge, queued, sig, ready, shown } = prFacts(pr, prev ? prev.merge : undefined);
     if (old?.sig === sig) return false;
     // the first reading after the upgrade only rewrites the signature: a changed format is no news
     const quiet = legacy && old.url === pr.url && old.state === pr.state && old.checks === checks;

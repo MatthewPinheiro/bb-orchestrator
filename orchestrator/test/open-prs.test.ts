@@ -25,7 +25,6 @@ import {
   parseCodeowners,
   parseExcluded,
   parseHandleMap,
-  parseOpenPrsPage,
   pruneCache,
   suggestReviewers,
   summaryFor,
@@ -83,34 +82,7 @@ test("with no review rule (no decision from GitHub), one approval or the rules' 
 
 // ---------------------------------------------------------------- reading GitHub's answer
 
-test("a GraphQL page flattens to PRs; bots' approvals don't count; the PULL_REQUEST rule gives the required count", () => {
-  const page = parseOpenPrsPage({
-    search: {
-      pageInfo: { hasNextPage: true, endCursor: "cur1" },
-      nodes: [
-        {
-          number: 7, title: "T", url: "https://github.com/acme-co/widgets/pull/7", body: "B", isDraft: false, updatedAt: "u",
-          headRefName: "b", headRefOid: "s1", reviewDecision: "REVIEW_REQUIRED", mergeable: "MERGEABLE", mergeStateStatus: "BLOCKED",
-          repository: { nameWithOwner: "acme-co/widgets" },
-          commits: { nodes: [{ commit: { statusCheckRollup: { state: "FAILURE" } } }] },
-          latestOpinionatedReviews: { nodes: [
-            { state: "APPROVED", author: { login: "rev-a", __typename: "User" } },
-            { state: "APPROVED", author: { login: "lint-helper", __typename: "Bot" } },
-            { state: "CHANGES_REQUESTED", author: { login: "rev-b", __typename: "User" } },
-          ] },
-          baseRef: { rules: { nodes: [{ type: "DELETION", parameters: null }, { type: "PULL_REQUEST", parameters: { requiredApprovingReviewCount: 2 } }] } },
-        },
-        {}, // an issue or anything else the search returns
-      ],
-    },
-  });
-  assert.equal(page.next, "cur1");
-  assert.equal(page.prs.length, 1);
-  assert.deepEqual(page.prs[0]!.approvedBy, ["rev-a"]);
-  assert.equal(page.prs[0]!.required, 2);
-  assert.equal(page.prs[0]!.checks, "FAILURE");
-  assert.equal(needsReview(page.prs[0]!), false);
-});
+// (the gh JSON shapes, bots and the required count: gh-reads.test.ts)
 
 // ---------------------------------------------------------------- the summary
 

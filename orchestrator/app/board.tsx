@@ -13,6 +13,7 @@ import { KIND_TONES, ROLE_TONES, ruleState } from "./palette.ts";
 import { Btn, Kind, Muted, PageError, Section, Tag, Who, cx, when } from "./ui.tsx";
 import { ownerOnScreen } from "../core/owner.ts";
 import { useIdentity } from "./identity.ts";
+import { WatchersSection } from "./watchers.tsx";
 
 type Query = { data: Board | undefined; error: { message: string } | null; refetch: () => Promise<void> };
 
@@ -162,6 +163,8 @@ export function BoardView({ q, refetchAll }: { q: Query; refetchAll: () => void 
           ))}
         </Rows>
       </Section>
+
+      {b.watchers ? <WatchersSection w={b.watchers} agents={b.agents} busy={busy} refetchAll={refetchAll} /> : null}
 
       <Section title="Activity" count={rows.length}>
         {rows.length === 0 ? <Muted>Nothing yet.</Muted> : null}

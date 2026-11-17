@@ -372,6 +372,19 @@ export const MIGRATIONS: string[] = [
   // 1.13.0: when the owner made a thread a task's scoping thread from the Projects view (null for one started with the
   // task): the newest pick plans the task, whenever the thread itself started.
   `ALTER TABLE spawns ADD COLUMN scoped_at INTEGER`,
+  // PR waits read their own PR (2026-11-17): a wait on a PR no live environment shows reads it by URL with gh. Its last
+  // reading per URL, in prs' terms (sig as prSeen writes it); seen_at is when it last changed, read_at when it was read.
+  // Rows go once no open wait names the URL (pruneWaitReadings), and when bb's own reading covers the PR (prSeen).
+  `CREATE TABLE pr_readings (
+     url TEXT PRIMARY KEY,
+     number INTEGER,
+     state TEXT,
+     attention TEXT,
+     checks TEXT,
+     sig TEXT NOT NULL,
+     seen_at INTEGER NOT NULL,
+     read_at INTEGER NOT NULL
+   )`,
 ];
 
 export function migrate(db: Db): void {

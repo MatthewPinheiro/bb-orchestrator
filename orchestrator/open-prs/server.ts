@@ -1,5 +1,5 @@
 // The Open PRs tab's server side. GitHub is read only through the plugin's host entry (open-prs/host.ts: the machine's own
-// gh login, read-only queries), and no more often than the board's PR checks (prPollMinutes): the page's read answers from
+// gh login, read-only gh commands), and no more often than the board's PR checks (prPollMinutes): the page's read answers from
 // what was fetched and starts a new fetch only once that is older than the poll interval. Nothing runs while nobody looks.
 //
 // Kept in plugin storage (kv): each PR's summary and changed files, by its head sha, so neither is read or recomputed until
@@ -20,6 +20,7 @@ import {
   pruneCache,
   reviewWords,
   summaryFor,
+  type BbPrReading,
   type RawPr,
   type RepoArea,
   type SummaryCache,
@@ -43,6 +44,8 @@ const FILES = "openPrs.files.v1";
 const AREA_MS = 6 * 3600_000;
 const BRANCH_MS = 3600_000;
 const MAX_FILE_READS = 30; // per refresh: a first look at many PRs spreads over a few polls
+// the list is a search and then one `gh pr view` per PR (4 at a time): more than the host call's 30 s default for many PRs
+const OPEN_PRS_TIMEOUT_MS = 5 * 60_000;
 
 type Files = Record<string, { sha: string; files: string[] }>;
 interface Snapshot {
@@ -108,7 +111,7 @@ export function registerOpenPrs(bb: BbPluginApi, engine: Engine, settings: () =>
   };
 
   async function refresh(login: string): Promise<void> {
-    const { prs, more } = await onHost((hostId) => host.call("prs.open", { login }, { hostId }));
+    const { prs, more } = await onHost((hostId) => host.call("prs.open", { login }, { hostId, timeoutMs: OPEN_PRS_TIMEOUT_MS }));
     // summaries: recomputed only for a new head
     const sums = pruneCache((await bb.storage.kv.get<SummaryCache>(SUMMARIES)) ?? {}, prs.map((p) => p.url));
     let changedSums = false;
@@ -127,7 +130,7 @@ export function registerOpenPrs(bb: BbPluginApi, engine: Engine, settings: () =>
     for (const p of wanted) {
       if (files[p.url]?.sha === p.sha || reads >= MAX_FILE_READS) continue;
       reads++;
-      const f = await onHost((hostId) => host.call("prs.files", { repo: p.repo, number: p.number }, { hostId })).catch((e: unknown) => {
+      const f = await onHost((hostId) => host.call("prs.files", { url: p.url }, { hostId })).catch((e: unknown) => {
         bb.log.warn(`open-prs: files of ${p.url}: ${redact(String(e))}`);
         return null;
       });
@@ -164,6 +167,12 @@ export function registerOpenPrs(bb: BbPluginApi, engine: Engine, settings: () =>
         bb.realtime.publish(OPEN_PRS_CHANNEL, {});
       });
   }
+
+  /**
+   * One PR wait's own reading (gh pr view on a connected machine), for a PR no live environment's bb reading covers.
+   * Throws when no machine answers: the caller then writes nothing and closes nothing.
+   */
+  const readWait = (url: string, signal?: AbortSignal): Promise<BbPrReading> => onHost((hostId) => host.call("prs.wait", { url }, { hostId, ...(signal ? { signal } : {}) }));
 
   bb.rpc.register(openPrsContract, {
     openPrs: async (): Promise<OpenPrsView> => {
@@ -220,4 +229,5 @@ export function registerOpenPrs(bb: BbPluginApi, engine: Engine, settings: () =>
       };
     },
   });
+  return { readWait };
 }

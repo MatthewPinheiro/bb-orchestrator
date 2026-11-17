@@ -126,13 +126,14 @@ test("two answers coming back to one lead are both kept: the second doesn't supe
   assert.deepEqual(s.wakes().map((w) => w.state), ["pending", "pending"], "both resent, neither closed as an old word");
 });
 
-test("a PR no thread shows still gets its daily reminder, which says the plugin can't see it", () => {
+test("a PR no thread shows still gets its daily reminder; until gh has read it, it says the plugin couldn't read it yet", () => {
   const s = setup();
   const out = s.e.ack(s.lead, s.d.id, "done", null, { pr: "https://github.com/o/r/pull/9999", when: "merged" });
-  assert.match(out, /No thread's environment shows this PR yet/);
+  // since 2026-11-17 such a PR is read by its URL with gh on each PR check (gh-reads.test.ts)
+  assert.match(out, /No thread's environment shows this PR, so the plugin reads it by its URL on each PR check/);
   s.advance(WAIT_NUDGE_MS);
   s.e.tick();
-  assert.match(s.nudges()[0]!.body, /can't see it change/);
+  assert.match(s.nudges()[0]!.body, /hasn't been able to read it yet/);
 });
 
 test("a bad PR or condition is refused before anything is acked, and an acked card can still be bound later", () => {

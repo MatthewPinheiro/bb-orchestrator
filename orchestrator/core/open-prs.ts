@@ -6,55 +6,79 @@
 // No model call anywhere: the summary is the body's TL;DR section (else its first paragraph), cut to about 200
 // characters, and recomputed only when the PR's head commit changes.
 
-// ---------------------------------------------------------------- what the host reads from GitHub (read-only GraphQL)
-
-/** The search for one login's open PRs, a page at a time. Read-only: a query, never a mutation. */
-export const OPEN_PRS_QUERY = `query($q: String!, $after: String) {
-  search(query: $q, type: ISSUE, first: 50, after: $after) {
-    pageInfo { hasNextPage endCursor }
-    nodes {
-      ... on PullRequest {
-        number title url body isDraft updatedAt headRefName headRefOid reviewDecision mergeable mergeStateStatus
-        repository { nameWithOwner }
-        commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
-        latestOpinionatedReviews(first: 30) { nodes { state author { login __typename } } }
-        baseRef { rules(first: 30) { nodes { type parameters { ... on PullRequestParameters { requiredApprovingReviewCount } } } } }
-      }
-    }
-  }
-}`;
-
-/** One PR's changed files at its head (fetched only for PRs that need review, once per head sha). */
-export const PR_FILES_QUERY = `query($owner: String!, $name: String!, $number: Int!) {
-  repository(owner: $owner, name: $name) {
-    pullRequest(number: $number) { headRefOid files(first: 100) { nodes { path } } }
-  }
-}`;
-
-/** A repo's CODEOWNERS (any of GitHub's three places) and its recently merged PRs with their files and reviewers. */
-export const REPO_AREA_QUERY = `query($owner: String!, $name: String!, $q: String!) {
-  repository(owner: $owner, name: $name) {
-    a: object(expression: "HEAD:.github/CODEOWNERS") { ... on Blob { text } }
-    b: object(expression: "HEAD:CODEOWNERS") { ... on Blob { text } }
-    c: object(expression: "HEAD:docs/CODEOWNERS") { ... on Blob { text } }
-  }
-  search(query: $q, type: ISSUE, first: 40) {
-    nodes {
-      ... on PullRequest {
-        files(first: 60) { nodes { path } }
-        reviews(first: 20) { nodes { author { login __typename } } }
-      }
-    }
-  }
-}`;
+// ---------------------------------------------------------------- what the host reads from GitHub (plain gh commands)
+//
+// Every read is one fixed gh argument list built here from validated values, run without a shell (open-prs/host.ts).
+// Only read commands: `gh search prs`, `gh pr view`, `gh pr list`, and two `gh api` REST GETs the CLI has no command
+// for (CODEOWNERS and the base branch's required approvals). Nothing here can comment, review, merge, edit or label.
 
 export const LOGIN_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
 export const REPO_RE = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/;
+/** A pull request's URL on a GitHub host: https://<host>/<owner>/<repo>/pull/<n>. */
+export const PR_URL_RE = /^https:\/\/[A-Za-z0-9.-]{1,253}\/[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}\/pull\/\d{1,9}$/;
+/** A branch name as git allows it (no spaces, no "..", no leading "-" that gh could read as a flag). */
+export const BRANCH_RE = /^(?!-)(?!.*\.\.)[A-Za-z0-9._\/-]{1,200}$/;
 
-/** The search for a login's open PRs. */
-export const openPrsSearch = (login: string) => `is:pr is:open author:${login} archived:false sort:updated-desc`;
-/** The search for a repo's recently merged PRs (who reviewed which area). */
-export const recentMergedSearch = (repo: string) => `repo:${repo} is:pr is:merged sort:updated-desc`;
+/** At most this many open PRs per read; one more is asked for, to know whether there are more. */
+export const OPEN_PRS_MAX = 250;
+/** How many recently merged PRs a repo's area reads (who reviewed what). */
+export const AREA_MERGED = 40;
+/** The three places GitHub looks for CODEOWNERS, in its order. */
+export const CODEOWNERS_PATHS = [".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"] as const;
+
+/** One PR's state fields a wait reads (approved, green, ready, merged). */
+const WAIT_FIELDS = "url,number,state,isDraft,reviewDecision,statusCheckRollup,mergeable,mergeStateStatus";
+/** What the search can't return about an open PR: review, checks, merge state, branches, body. */
+const VIEW_FIELDS = "url,body,isDraft,headRefName,headRefOid,baseRefName,reviewDecision,mergeable,mergeStateStatus,statusCheckRollup,reviews";
+
+const must = (ok: boolean, what: string, v: unknown) => {
+  if (!ok) throw new Error(`not a valid ${what}: ${JSON.stringify(v)}`);
+};
+/** A branch in a REST path: each segment encoded, the slashes kept (GitHub reads them as part of the name). */
+const branchPath = (b: string) => b.split("/").map(encodeURIComponent).join("/");
+
+/** The gh argument lists, each with fixed flags; a value that fails its pattern throws before gh runs. */
+export const ghArgs = {
+  /** The login's open PRs across repos, archived repos left out, newest update first. */
+  openPrs(login: string): string[] {
+    must(LOGIN_RE.test(login), "GitHub login", login);
+    return ["search", "prs", "--author", login, "--state", "open", "--archived=false", "--sort", "updated", "--order", "desc", "--limit", String(OPEN_PRS_MAX + 1), "--json", "url,number,title,repository,updatedAt,isDraft"];
+  },
+  /** One open PR's review, checks, merge state, branches and body. */
+  view(url: string): string[] {
+    must(PR_URL_RE.test(url), "pull request URL", url);
+    return ["pr", "view", url, "--json", VIEW_FIELDS];
+  },
+  /** One PR's changed files at its head. */
+  files(url: string): string[] {
+    must(PR_URL_RE.test(url), "pull request URL", url);
+    return ["pr", "view", url, "--json", "headRefOid,files"];
+  },
+  /** A repo's recently merged PRs, with their files and reviews. */
+  merged(repo: string): string[] {
+    must(REPO_RE.test(repo), "repo", repo);
+    return ["pr", "list", "--repo", repo, "--state", "merged", "--search", "sort:updated-desc", "--limit", String(AREA_MERGED), "--json", "files,reviews"];
+  },
+  /** The fields a PR wait reads. */
+  wait(url: string): string[] {
+    must(PR_URL_RE.test(url), "pull request URL", url);
+    return ["pr", "view", url, "--json", WAIT_FIELDS];
+  },
+  // The two `gh api` calls stay (agreed with the CoS): gh has no command that prints a file of a repo or a branch's
+  // rules. Both are REST GETs with --method GET and no -f/-F fields (fields would switch gh to a POST).
+  /** CODEOWNERS at one of its places, as raw text (a 404 means: not there). */
+  codeowners(repo: string, path: (typeof CODEOWNERS_PATHS)[number]): string[] {
+    must(REPO_RE.test(repo), "repo", repo);
+    must(CODEOWNERS_PATHS.includes(path), "CODEOWNERS place", path);
+    return ["api", "--method", "GET", "-H", "Accept: application/vnd.github.raw+json", `repos/${repo}/contents/${path}`];
+  },
+  /** The rules on a base branch (its required approving review count is in the pull_request rule). */
+  rules(repo: string, branch: string): string[] {
+    must(REPO_RE.test(repo), "repo", repo);
+    must(BRANCH_RE.test(branch), "branch", branch);
+    return ["api", "--method", "GET", `repos/${repo}/rules/branches/${branchPath(branch)}`];
+  },
+};
 
 /** One open PR as the host hands it to the server: GitHub's fields, flattened. */
 export interface RawPr {
@@ -70,7 +94,7 @@ export interface RawPr {
   reviewDecision: string | null; // APPROVED | CHANGES_REQUESTED | REVIEW_REQUIRED | null (no review rule on the base)
   mergeable: string | null; // MERGEABLE | CONFLICTING | UNKNOWN
   mergeState: string | null; // CLEAN | BLOCKED | BEHIND | DIRTY | UNSTABLE | HAS_HOOKS | DRAFT | UNKNOWN
-  checks: string | null; // the head commit's statusCheckRollup state; null: no checks
+  checks: string | null; // the head commit's checks rolled up: SUCCESS | FAILURE | PENDING; null: no checks
   approvedBy: string[]; // people (not bots) whose latest review approves
   required: number | null; // approvals the base branch's rules require, when GitHub says
 }
@@ -80,68 +104,207 @@ export interface RepoArea {
   recent: { files: string[]; reviewers: string[] }[];
 }
 
-type Json = Record<string, unknown> | null | undefined;
-const obj = (v: unknown): Record<string, unknown> => (v && typeof v === "object" ? (v as Record<string, unknown>) : {});
+type Json = unknown;
+const obj = (v: unknown): Record<string, unknown> => (v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {});
 const arr = (v: unknown): unknown[] => (Array.isArray(v) ? v : []);
 const str = (v: unknown): string | null => (typeof v === "string" ? v : null);
+/** gh prints "" for an empty enum (reviewDecision with no review rule): that is no value. */
+const enumOf = (v: unknown): string | null => (typeof v === "string" && v.trim() ? v : null);
+
+/**
+ * Bots among review authors. gh gives a review's author only as a login (GraphQL's Bot type is gone), so a bot is a
+ * login ending in [bot], or one of GitHub's own reviewer apps that don't.
+ */
+const BOT_LOGINS = new Set(["copilot-pull-request-reviewer", "copilot", "github-actions"]);
+export const isBot = (login: string): boolean => login.toLowerCase().endsWith("[bot]") || BOT_LOGINS.has(login.toLowerCase());
+
+/** Reviews by people (bots left out), in the order gh gives them (oldest first). */
 const people = (nodes: unknown[]): { login: string; state: string | null }[] =>
   nodes
-    .map((n) => ({ a: obj(obj(n).author), state: str(obj(n).state) }))
-    .filter(({ a }) => typeof a.login === "string" && a.__typename !== "Bot" && !String(a.login).endsWith("[bot]"))
-    .map(({ a, state }) => ({ login: String(a.login), state }));
+    .map((n) => ({ login: str(obj(obj(n).author).login), state: str(obj(n).state) }))
+    .filter((r): r is { login: string; state: string | null } => !!r.login && !isBot(r.login));
 
-/** One page of OPEN_PRS_QUERY's answer, flattened. */
-export function parseOpenPrsPage(data: Json): { prs: RawPr[]; next: string | null } {
-  const s = obj(obj(data).search);
-  const prs = arr(s.nodes)
+/**
+ * Who approves: each person's latest opinionated review (approved, changes requested or dismissed; a comment after
+ * an approval doesn't take it back) is an approval. gh's latestReviews counts the comment, so all reviews are read.
+ */
+export function approversOf(reviews: unknown): string[] {
+  const last = new Map<string, string>();
+  for (const r of people(arr(reviews))) if (r.state === "APPROVED" || r.state === "CHANGES_REQUESTED" || r.state === "DISMISSED") last.set(r.login, r.state);
+  return [...last].filter(([, s]) => s === "APPROVED").map(([l]) => l);
+}
+
+/**
+ * gh's statusCheckRollup is the head commit's checks one by one (CheckRun: status and conclusion; StatusContext:
+ * state), not GitHub's rolled-up state: this rolls them up. Failing if any fails, else pending if any is anything but
+ * passed, else SUCCESS; null when there are none. An unknown value is pending, never passing.
+ */
+export function rollupOf(contexts: unknown): "SUCCESS" | "FAILURE" | "PENDING" | null {
+  const cs = arr(contexts).map(obj);
+  if (cs.length === 0) return null;
+  let pending = false;
+  for (const c of cs) {
+    const s = checkOf(c);
+    if (s === "fail") return "FAILURE";
+    if (s !== "pass") pending = true;
+  }
+  return pending ? "PENDING" : "SUCCESS";
+}
+
+function checkOf(c: Record<string, unknown>): "pass" | "fail" | "pending" {
+  if (c.__typename === "StatusContext" || (c.state !== undefined && c.conclusion === undefined)) {
+    const st = str(c.state);
+    return st === "SUCCESS" ? "pass" : st === "FAILURE" || st === "ERROR" ? "fail" : "pending";
+  }
+  if (str(c.status) !== "COMPLETED") return "pending";
+  const k = str(c.conclusion);
+  if (k === "SUCCESS" || k === "NEUTRAL" || k === "SKIPPED") return "pass";
+  if (k === "FAILURE" || k === "TIMED_OUT" || k === "CANCELLED" || k === "ACTION_REQUIRED" || k === "STARTUP_FAILURE") return "fail";
+  return "pending";
+}
+
+/** One hit of `gh search prs`: what the list knows before each PR is viewed. */
+export interface SearchHit {
+  url: string;
+  number: number;
+  title: string;
+  repo: string;
+  updatedAt: string;
+}
+
+/** `gh search prs --json …`: the hits that are PRs with a URL, a number and a repo. */
+export function parseSearch(data: Json): SearchHit[] {
+  return arr(data)
     .map(obj)
-    .filter((n) => typeof n.url === "string" && typeof n.number === "number")
-    .map((n): RawPr => {
-      const rule = arr(obj(obj(obj(n.baseRef).rules)).nodes)
-        .map(obj)
-        .find((r) => r.type === "PULL_REQUEST");
-      const req = obj(rule?.parameters).requiredApprovingReviewCount;
-      const rollup = obj(obj(obj(arr(obj(n.commits).nodes)[0]).commit).statusCheckRollup);
-      return {
-        url: String(n.url),
-        number: n.number as number,
-        title: str(n.title) ?? "",
-        body: str(n.body) ?? "",
-        repo: str(obj(n.repository).nameWithOwner) ?? "",
-        draft: n.isDraft === true,
-        updatedAt: str(n.updatedAt) ?? "",
-        branch: str(n.headRefName) ?? "",
-        sha: str(n.headRefOid) ?? "",
-        reviewDecision: str(n.reviewDecision),
-        mergeable: str(n.mergeable),
-        mergeState: str(n.mergeStateStatus),
-        checks: str(rollup.state),
-        approvedBy: people(arr(obj(n.latestOpinionatedReviews).nodes))
-          .filter((p) => p.state === "APPROVED")
-          .map((p) => p.login),
-        required: typeof req === "number" ? req : null,
-      };
-    });
-  const info = obj(s.pageInfo);
-  return { prs, next: info.hasNextPage === true && typeof info.endCursor === "string" ? info.endCursor : null };
+    .filter((n) => typeof n.url === "string" && PR_URL_RE.test(n.url) && typeof n.number === "number" && !!str(obj(n.repository).nameWithOwner))
+    .map((n) => ({ url: String(n.url), number: n.number as number, title: str(n.title) ?? "", repo: str(obj(n.repository).nameWithOwner)!, updatedAt: str(n.updatedAt) ?? "" }));
 }
 
+/** What `gh pr view <url> --json VIEW_FIELDS` adds to a hit; `base` is where the required-approvals rule is read. */
+export type PrView = Omit<RawPr, "url" | "number" | "title" | "repo" | "updatedAt" | "required"> & { base: string | null };
+
+export function parsePrView(data: Json): PrView {
+  const n = obj(data);
+  return {
+    body: str(n.body) ?? "",
+    draft: n.isDraft === true,
+    branch: str(n.headRefName) ?? "",
+    sha: str(n.headRefOid) ?? "",
+    base: enumOf(n.baseRefName),
+    reviewDecision: enumOf(n.reviewDecision),
+    mergeable: enumOf(n.mergeable),
+    mergeState: enumOf(n.mergeStateStatus),
+    checks: rollupOf(n.statusCheckRollup),
+    approvedBy: approversOf(n.reviews),
+  };
+}
+
+/** A search hit, its view and its base's required approvals: the RawPr the page has always read. */
+export function rawPr(hit: SearchHit, view: PrView, required: number | null): RawPr {
+  const { base: _base, ...v } = view;
+  return { url: hit.url, number: hit.number, title: hit.title, repo: hit.repo, updatedAt: hit.updatedAt, ...v, required };
+}
+
+/** `gh api repos/{o}/{r}/rules/branches/{b}`: the pull_request rule's required approving review count, if any. */
+export function parseRequired(data: Json): number | null {
+  const counts = arr(data)
+    .map(obj)
+    .filter((r) => r.type === "pull_request")
+    .map((r) => obj(r.parameters).required_approving_review_count)
+    .filter((c): c is number => typeof c === "number");
+  return counts.length ? Math.max(...counts) : null;
+}
+
+/** `gh pr view <url> --json headRefOid,files`. */
 export function parsePrFiles(data: Json): { sha: string; files: string[] } {
-  const pr = obj(obj(obj(data).repository).pullRequest);
-  return { sha: str(pr.headRefOid) ?? "", files: arr(obj(pr.files).nodes).map((f) => str(obj(f).path)).filter((p): p is string => !!p) };
+  const pr = obj(data);
+  return { sha: str(pr.headRefOid) ?? "", files: arr(pr.files).map((f) => str(obj(f).path)).filter((p): p is string => !!p) };
 }
 
-export function parseRepoArea(data: Json): RepoArea {
-  const r = obj(obj(data).repository);
-  const codeowners = ["a", "b", "c"].map((k) => str(obj(r[k]).text)).find((t) => t !== null) ?? null;
-  const recent = arr(obj(obj(data).search).nodes)
+/** CODEOWNERS (the first place that has one, else null) and `gh pr list --state merged --json files,reviews`. */
+export function parseRepoArea(codeowners: string | null, merged: Json): RepoArea {
+  const recent = arr(merged)
     .map(obj)
     .map((n) => ({
-      files: arr(obj(n.files).nodes).map((f) => str(obj(f).path)).filter((p): p is string => !!p),
-      reviewers: [...new Set(people(arr(obj(n.reviews).nodes)).map((p) => p.login))],
+      files: arr(n.files).map((f) => str(obj(f).path)).filter((p): p is string => !!p),
+      reviewers: [...new Set(people(arr(n.reviews)).map((p) => p.login))],
     }))
     .filter((n) => n.files.length > 0 && n.reviewers.length > 0);
   return { codeowners, recent };
+}
+
+// ---------------------------------------------------------------- PR waits read through gh (2026-11-17)
+//
+// A PR wait whose PR no live environment's bb reading covered in a pass reads its own PR by URL, so a wait on anyone's
+// PR can fire. The reading is put in bb's PR-status shape, so the engine's one rule for each condition decides.
+
+/** A bb PR-status reading (bb--github-pr-status pullRequests), as the engine reads it. */
+export type BbPrReading =
+  | { outcome: "available"; pullRequest: { url: string; number?: number; state: string; attention?: string; checks?: { state?: string }; review?: { state?: string }; mergeability?: { state?: string; mergeable?: string | null; mergeStateStatus?: string | null }; inMergeQueue?: boolean | null } }
+  | { outcome: "absent" }
+  | { outcome: "unavailable"; message?: string };
+
+const BB_CHECKS: Record<string, string> = { SUCCESS: "passing", FAILURE: "failing", PENDING: "pending" };
+const BB_REVIEW: Record<string, string> = { APPROVED: "approved", CHANGES_REQUESTED: "changes_requested", REVIEW_REQUIRED: "review_required" };
+/**
+ * GitHub's merge state in bb's words. CLEAN and HAS_HOOKS are GitHub's own "can merge now" (required checks and
+ * reviews satisfied): ready to merge. A conflict wins over everything else.
+ */
+function bbMerge(mergeable: string | null, mergeState: string | null): string {
+  if (mergeable === "CONFLICTING" || mergeState === "DIRTY") return "conflicts";
+  switch (mergeState) {
+    case "CLEAN":
+    case "HAS_HOOKS":
+      return "ready_to_merge";
+    case "BLOCKED":
+      return "blocked";
+    case "BEHIND":
+      return "behind";
+    case "UNSTABLE":
+      return "unstable";
+    case "DRAFT":
+      return "draft";
+    default:
+      return "unknown";
+  }
+}
+
+/** `gh pr view <url> --json WAIT_FIELDS` as a bb reading; anything that isn't a PR reading is unavailable. */
+export function parseWaitReading(data: Json): BbPrReading {
+  const n = obj(data);
+  const url = str(n.url)?.replace(/\/+$/, "") ?? "";
+  const state = str(n.state);
+  if (!PR_URL_RE.test(url) || !state) return { outcome: "unavailable", message: "gh gave no PR state" };
+  const draft = n.isDraft === true;
+  const bbState = state === "MERGED" ? "merged" : state === "CLOSED" ? "closed" : draft ? "draft" : "open";
+  const rollup = rollupOf(n.statusCheckRollup);
+  const review = enumOf(n.reviewDecision);
+  const mergeable = enumOf(n.mergeable);
+  const mergeState = enumOf(n.mergeStateStatus);
+  const merge = draft ? "draft" : bbMerge(mergeable, mergeState); // a draft is never ready to merge
+  return {
+    outcome: "available",
+    pullRequest: {
+      url,
+      ...(typeof n.number === "number" ? { number: n.number } : {}),
+      state: bbState,
+      attention: merge,
+      checks: rollup ? { state: BB_CHECKS[rollup]! } : {},
+      review: { state: review ? (BB_REVIEW[review] ?? review.toLowerCase()) : "none" },
+      mergeability: { state: merge, mergeable: mergeable ?? "UNKNOWN", mergeStateStatus: mergeState },
+    },
+  };
+}
+
+const bare = (u: string) => u.trim().replace(/\/+$/, "");
+
+/**
+ * The open waits' PRs to read with gh this pass: those no available bb reading covered (bb's reading is kept when it
+ * has one). Each URL once; a URL that isn't a PR URL is never handed to gh.
+ */
+export function uncoveredWaitUrls(waitUrls: readonly string[], bbReadings: readonly BbPrReading[]): string[] {
+  const covered = new Set(bbReadings.flatMap((r) => (r.outcome === "available" ? [bare(r.pullRequest.url)] : [])));
+  return [...new Set(waitUrls.map(bare))].filter((u) => !covered.has(u) && PR_URL_RE.test(u));
 }
 
 // ---------------------------------------------------------------- state in plain words

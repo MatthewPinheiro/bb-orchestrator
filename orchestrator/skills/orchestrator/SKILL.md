@@ -73,6 +73,11 @@ from the app's Needs you page, and write to a lead only from its Projects row (a
   taken slug or folder and never starts the lead. `orch_start_lead(slug)` runs the owner's Start lead checks (project
   folder, a repo under `## Repos` that exists here, not on hold, no live lead) and the board shows "cos started
   lead:<slug>".
+- **The CoS sees and changes every PR wait** with `orch_watch`: `list` (the default) shows every open PR wait (whose,
+  which PR, condition, age, last reading) and every timed job (interval, last and next run). `add(to, pr, when, note)`,
+  `retarget(id, pr and/or when)`, `move(id, to)` and `drop(id)` work on any wait, for any live agent; the wait's old and
+  new owner are told and the owner's board shows it. Intervals are the owner's settings: the CoS only lists them. Leads
+  and threads still move only their own waits, with `orch_ack`.
 - **A project can start in scoping mode** (`orch_new_project` with `mode: "scoping"`, or `orch_project_mode(slug, mode)`
   from the CoS). While it scopes, its lead's cards and deliverables wait in the owner's Scope tab only: no CoS triage,
   no Needs you, no standing rule; the CoS gets read-only copies. The lead starts no build threads (read-only

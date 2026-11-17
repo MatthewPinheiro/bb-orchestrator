@@ -75,6 +75,34 @@ export const needsYouSchema = z.object({
 });
 export type NeedsYou = z.infer<typeof needsYouSchema>;
 
+// The Watchers list on the Board (2026-11-17, core/watchers.ts): every open PR wait and every timed job
+export const watchWaitSchema = z.object({
+  id: z.string(),
+  owner: z.string(),
+  ownerLive: z.boolean(),
+  ref: z.string(),
+  about: z.string(),
+  prUrl: z.string(),
+  when: z.string(),
+  createdAt: z.number(),
+  reading: z.object({ state: z.string().nullable(), checks: z.string().nullable(), review: z.string().nullable(), attention: z.string().nullable(), source: z.enum(["bb", "gh"]), changedAt: z.number(), readAt: z.number().nullable() }).nullable(),
+});
+export const watchJobSchema = z.object({
+  id: z.string(),
+  what: z.string(),
+  kind: z.enum(["every", "after"]),
+  interval: z.string(),
+  setting: z.string().nullable(),
+  value: z.number().nullable(),
+  unit: z.enum(["min", "s"]).nullable(),
+  off: z.boolean(),
+  last: z.number().nullable(),
+  next: z.number().nullable(),
+  command: z.string().nullable(),
+});
+export const watchersSchema = z.object({ waits: z.array(watchWaitSchema), jobs: z.array(watchJobSchema), conditions: z.array(z.string()) });
+export type Watchers = z.infer<typeof watchersSchema>;
+
 export const boardSchema = z.object({
   rows: z.array(z.object({ id: z.string(), kind: z.string(), from: z.string().nullable(), project: z.string().nullable(), title: z.string(), body: z.string(), ref: z.string().nullable(), at: z.number() })),
   dead: z.array(z.object({ id: z.string(), recipient: z.string(), sender: z.string(), kind: z.string(), body: z.string(), note: z.string().nullable(), createdAt: z.number() })),
@@ -82,6 +110,7 @@ export const boardSchema = z.object({
   rules: z.array(z.object({ id: z.string(), text: z.string(), project: z.string().nullable(), kinds: z.array(z.string()), expiresAt: z.number().nullable(), source: z.string(), createdAt: z.number(), revokedAt: z.number().nullable() })),
   decisions: z.array(z.object({ id: z.string(), state: z.string(), title: z.string(), origin: z.string(), asker: z.string(), level: z.string(), answer: z.string().nullable(), ack: z.string().nullable(), updatedAt: z.string() })),
   directUnread: z.array(z.string()).optional(), // projects with a lead's note the owner hasn't opened: the Projects tab's dot
+  watchers: watchersSchema.optional(), // the Watchers list (core/watchers.ts): open PR waits and timed jobs
 });
 export type Board = z.infer<typeof boardSchema>;
 
@@ -411,6 +440,12 @@ export const requestChangesBody = z.object({ id: z.string(), rev: z.number().int
 export const projectModeBody = z.object({ slug: z.string().min(1).max(40), mode: z.enum(["scoping", "active"]) }).strict();
 export const scopeThreadBody = z.object({ threadId: z.string().min(1), task: z.string().max(80).nullable().optional(), name: z.string().max(200).nullable().optional() }).strict();
 export const unscopeThreadBody = z.object({ threadId: z.string().min(1) }).strict();
+// the owner's PR-wait changes from the Watchers list (the CoS's are orch_watch): any wait, for any live agent
+const waitWhen = z.enum(["approved", "green", "ready", "merged"]);
+export const watchAddBody = z.object({ to: z.string().min(1).max(120), pr: z.string().trim().min(1).max(300), when: waitWhen, note: z.string().trim().min(1).max(600) }).strict();
+export const watchRetargetBody = z.object({ id: z.string().min(1).max(40), pr: z.string().trim().max(300).nullable().optional(), when: waitWhen.nullable().optional() }).strict();
+export const watchMoveBody = z.object({ id: z.string().min(1).max(40), to: z.string().min(1).max(120) }).strict();
+export const watchDropBody = z.object({ id: z.string().min(1).max(40) }).strict();
 
 export const WRITES = {
   answer: "/answer",
@@ -438,4 +473,8 @@ export const WRITES = {
   projectMode: "/projects/mode",
   scopeThread: "/threads/scope",
   unscopeThread: "/threads/unscope",
+  watchAdd: "/watchers/add",
+  watchRetarget: "/watchers/retarget",
+  watchMove: "/watchers/move",
+  watchDrop: "/watchers/drop",
 } as const;
