@@ -10,7 +10,7 @@ import { type BbRun, setupSidebar } from "./core/sidebar.ts";
 import { chmodSync, closeSync, cpSync, createReadStream, openSync, readdirSync, readSync, rmSync, statSync } from "node:fs";
 import { Readable } from "node:stream";
 import { approveBody, type Deliverables, PROOF_ROUTE, type ProjectOrder, requestChangesBody, secretBody } from "./contract.ts";
-import { type DeliverPlace, type ProofInput, SECRET_TTL_MS } from "./core/engine.ts";
+import { type DeliverPlace, type OutputPlace, type ProofInput, SECRET_TTL_MS } from "./core/engine.ts";
 import { deliverBlocks, deliverPoints, fromJson, inputBlocksSchema, lessTextRefusal, looksLikeCode } from "./blocks.ts";
 import { CARD_CAPS, DELIVER_BUDGET, deliverBudgetRefusal } from "./core/caps.ts";
 import { statusParams, statusLine } from "./core/status.ts";
@@ -26,6 +26,8 @@ import {
   answerBody,
   archiveBody,
   outputRemoveBody,
+  pinBody,
+  unpinBody,
   type Outputs,
   CHANGED_CHANNEL,
   holdBody,
@@ -51,6 +53,7 @@ import {
 } from "./contract.ts";
 import type { Db } from "./core/db.ts";
 import { type DeliverResult, Engine, OUTPUT_KINDS, parseSince, type PrResult, WAIT_WHEN } from "./core/engine.ts";
+import { PINS_MAX } from "./core/pins.ts";
 import { AlarmState, describe as describeAlarm, sample, type Snapshot, type Thresholds } from "./core/host.ts";
 import {
   LIMIT_DEFAULT, LIMIT_MAX, LINES_DEFAULT, LINES_MAX, liveProjects, loadMemory, mapArgv, configEnvName, PROJECT_RECORD, mapOutcome, memoryConfigPath, memoryProjects,
@@ -997,6 +1000,18 @@ export default async function plugin(bb: BbPluginApi) {
     return { roots };
   }
 
+  /**
+   * Where a project's file pins may come from, whoever pins: its lead's proof folders (deliverPlace, unchanged), on the
+   * lead's host. No lead: the shared folders only, and no host, so a file pin is refused (a link or deliverable is fine).
+   */
+  async function pinPlace(slug: string): Promise<OutputPlace> {
+    const lead = engine.agentByAddress(`lead:${slug}`);
+    if (!lead) return { roots: sharedRoots(), hostId: null };
+    const { roots } = await deliverPlace(lead);
+    // each root keeps its own host: a file opens on the machine of the folder it is in (engine.pin, hostOfPath)
+    return { roots: roots.map((r) => r.path), hostId: roots.find((r) => r.hostId)?.hostId ?? null, hosts: roots };
+  }
+
   bb.agents.registerTool({
     name: "orch_deliver",
     description:
@@ -1081,7 +1096,8 @@ export default async function plugin(bb: BbPluginApi) {
     name: "orch_output",
     description:
       `Record a finished artefact (a doc, video, image, report or link) for use as deliverable proof. It is listed on the Deliverables tab (inside the deliverable that uses it as proof, else under Files) and in Activity; it does not notify ${O.name}. ` +
-      `A file is an absolute path inside your worktree, ${sharedRoots().join(" or ")}; ${O.name} opens it in bb's preview. A link is an http(s) URL.`,
+      `A file is an absolute path inside your worktree, ${sharedRoots().join(" or ")}; ${O.name} opens it in bb's preview. A link is an http(s) URL. ` +
+      `Lead only: pin: true also pins it to your project's Pinned strip (at most ${PINS_MAX}); \`bb orchestrator unpin <project> <path|url|pin id>\` unpins it.`,
     presentation: { label: { pending: "Recording an output", completed: "Recorded an output" } },
     parameters: z.object({
       title: z.string().min(1).max(200),
@@ -1089,10 +1105,12 @@ export default async function plugin(bb: BbPluginApi) {
       path: z.string().min(1).max(4000).optional().describe("Absolute path of the file (give this or url)"),
       url: z.string().min(1).max(4000).optional().describe("An http(s) link (give this or path)"),
       note: z.string().max(2000).optional().describe(`One or two lines for ${O.name}: what it is, what to look at`),
+      pin: z.boolean().optional().describe("Lead only: also pin it to your project's Pinned strip, under the message box"),
     }),
     execute: async (p, { threadId }) => {
       try {
         const a = caller(threadId);
+        if (p.pin && (a.role !== "lead" || !a.project)) throw new EngineError("forbidden", "only a lead pins to its project");
         const roots = sharedRoots();
         let hostId: string | null = null;
         if (p.path) {
@@ -1106,7 +1124,10 @@ export default async function plugin(bb: BbPluginApi) {
           if (!hostId) throw new EngineError("bad_state", `your thread has no environment on a bb host, so ${ownerWords(cfg.ownerName).name} couldn't open the file`);
         }
         const { output, created } = engine.addOutput(a, { title: p.title, kind: p.kind, path: p.path ?? null, url: p.url ?? null, note: p.note ?? null }, { roots, hostId });
-        return ok(created ? `Recorded ${output.id}: on ${ownerWords(cfg.ownerName).name}'s Deliverables tab (Files until a deliverable uses it as proof) and the Board.` : `Already recorded as ${output.id}.`);
+        // the output's own path already passed the proof check against these roots; a repeat output still pins
+        const pinned = p.pin ? engine.pin(a.project!, output.path ?? output.url!, { title: p.title, by: a }, { roots, hostId: output.hostId ?? hostId }) : null;
+        const pinNote = pinned ? (pinned.created ? ` Pinned as ${pinned.pin.id}.` : ` Already pinned as ${pinned.pin.id}.`) : "";
+        return ok((created ? `Recorded ${output.id}: on ${ownerWords(cfg.ownerName).name}'s Deliverables tab (Files until a deliverable uses it as proof) and the Board.` : `Already recorded as ${output.id}.`) + pinNote);
       } catch (e) {
         return fail(errText(e));
       }
@@ -1800,7 +1821,7 @@ export default async function plugin(bb: BbPluginApi) {
         return c.json({ ok: false, error: { kind: "invalid", message: errText(e) } }, 400);
       }
       try {
-        const result = fn(body);
+        const result = await fn(body);
         void flush();
         return c.json({ ok: true, result: result ?? null });
       } catch (e) {
@@ -1846,6 +1867,9 @@ export default async function plugin(bb: BbPluginApi) {
   write(WRITES.directMessage, directMessageBody, (b) => engine.ownerMessage(b.slug, b.text, b.followUp ?? null).id);
   write(WRITES.directSeen, directSeenBody, (b) => engine.markDirectSeen(b.slug, b.upTo));
   write(WRITES.outputRemove, outputRemoveBody, (b) => engine.removeOutput(b.id));
+  // pinned documents: the owner pins a pasted path or URL, or a deliverable (core/pins.ts); paths get the proof check
+  write(WRITES.pin, pinBody, async (b) => engine.pin(b.slug, b.target, { title: b.title ?? null, by: "owner" }, await pinPlace(b.slug)).pin.id);
+  write(WRITES.unpin, unpinBody, (b) => engine.unpinDoc(b.id, { by: "owner" }).id);
   write(WRITES.approve, approveBody, (b) => engine.personApprove(b.id, b.rev, b.note, b.next ?? null).rev);
   write(WRITES.requestChanges, requestChangesBody, (b) => engine.personRequestChanges(b.id, b.rev, b.text).rev);
   // A registered proof file's bytes, by proof id only (engine.proofFile decides). Read-only, so bb's "local" auth is the
@@ -2173,6 +2197,8 @@ export default async function plugin(bb: BbPluginApi) {
     "bb orchestrator dreams run-now [--dry-run] | dreams status",
     "bb orchestrator sweep [--apply]",
     "bb orchestrator setup sidebar",
+    "bb orchestrator pin <project> <path|url|deliverable> [--title T]",
+    "bb orchestrator unpin <project> <path|url|deliverable|pin id>",
   ];
   bb.cli.register({
     name: "orchestrator",
@@ -2188,6 +2214,17 @@ export default async function plugin(bb: BbPluginApi) {
         if (privileged(cmd, rest))
           engine.boardAdd("notice", "orchestrator", null, `CLI: bb orchestrator ${argv.join(" ")}`.slice(0, 200), `Run from ${self ? self.address : ctx.threadId ? `thread ${ctx.threadId}` : "no bb thread (a terminal, or a caller that dropped BB_THREAD_ID)"}${ctx.cwd ? ` in ${ctx.cwd}` : ""}.`, null);
         switch (cmd) {
+          case "pin":
+          case "unpin": {
+            // the owner from a terminal, or the project's own lead; a file gets the same proof check as from the page
+            const [slug, target] = rest;
+            if (!slug || !target || target.startsWith("--")) throw new EngineError("invalid", cmd === "pin" ? "pin <project> <path|url|deliverable> [--title T]" : "unpin <project> <path|url|deliverable|pin id>");
+            const by = self ?? "owner";
+            if (cmd === "unpin") return out(`unpinned ${engine.unpinDoc(target, { by, project: slug }).id}`);
+            const ti = rest.indexOf("--title");
+            const r = engine.pin(slug, target, { title: ti >= 0 ? (rest[ti + 1] ?? null) : null, by }, await pinPlace(slug));
+            return out(`${r.created ? "pinned" : "already pinned"} ${r.pin.id}: ${r.pin.title}`);
+          }
           case "status": {
             const lines = engine.agents().map((a) => `${a.address.padEnd(24)} ${a.role.padEnd(8)} ${a.status.padEnd(8)} ${a.threadId} parent=${a.parentThreadId ?? "none"}`);
             const ny = engine.needsYou();
@@ -2433,6 +2470,8 @@ export function privileged(cmd: string | undefined, rest: string[]): boolean {
     case "pr-check":
     case "setup":
     case "sweep":
+    case "pin":
+    case "unpin":
       return true;
     case "integration":
       return rest[0] === "import";

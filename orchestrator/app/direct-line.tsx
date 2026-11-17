@@ -21,6 +21,10 @@ export const directCss = /* css */ `
 [data-orch] .orch-cc .hint { margin-left: 16px; font-size: 12px; line-height: 16px; color: var(--orch-muted); max-width: 576px; cursor: default; }
 [data-orch] .orch-cc .hint label { display: inline-flex; gap: 4px; align-items: center; margin-right: 8px; color: var(--orch-ink); cursor: pointer; }
 [data-orch] .orch-cc .hint input { margin: 0; }
+[data-orch] .orch-cc .compact .compose { margin: 0; align-items: center; }
+[data-orch] .orch-cc .compact .compose textarea { min-height: 40px; padding: 8px 12px; border-radius: 8px; box-shadow: inset 0 0 0 1px var(--k-border, var(--cc-edge)); }
+[data-orch] .orch-cc .compact .compose .btn.primary { padding: 8px 12px; border-radius: 8px; }
+[data-orch] .orch-cc .compact .hint { margin: 4px 0 0; }
 @container orchcc (max-width: 640px) {
   [data-orch] .orch-cc .compose { flex-direction: column; align-items: stretch; }
   [data-orch] .orch-cc .compose textarea { width: 100%; }
@@ -119,7 +123,7 @@ const setDraft = (slug: string, d: Draft | null) => {
  * empty the follow-up is the latest message (while in force), so after a send it is the one just sent; the first
  * keystroke fixes it, and a newer message elsewhere never retargets a draft. It never takes focus by itself.
  */
-export function Composer({ project, now, cos, busy, refetchAll, onFocus }: { project: Project; now: number; cos: string; busy: boolean; refetchAll: () => void; onFocus: () => void }) {
+export function Composer({ project, now, cos, busy, refetchAll, onFocus, compact = false }: { project: Project; now: number; cos: string; busy: boolean; refetchAll: () => void; onFocus: () => void; compact?: boolean }) {
   const slug = project.slug;
   useSyncExternalStore(subscribe, () => version);
   const draft = drafts.get(slug) ?? null;
@@ -159,15 +163,20 @@ export function Composer({ project, now, cos, busy, refetchAll, onFocus }: { pro
     box.current?.focus(); // the Send button it was on is disabled now: back to the box, for the next message
   };
   const left = MAX - text.length;
+  const rules = `Goes to the ${project.slug} lead; the ${cos} gets a copy. Not an approval: merges, production changes and public pushes still need their card. No secrets here.`;
+  // compact (the detail, 2026-11-17): one line until typed in; the rules move to the box's title and the placeholder
+  // keeps "not an approval"; the follow-up switch shows once there is a draft to follow up with
+  const hint = !compact || (!!text && !!followUp) || left < 500;
   return (
-    <div role="group" aria-label={`Message the ${project.slug} lead`} data-composer={project.slug}>
+    <div role="group" aria-label={`Message the ${project.slug} lead`} data-composer={project.slug} className={compact ? "compact" : undefined}>
       <div className="compose">
         <textarea
           ref={box}
           value={text}
           maxLength={MAX}
-          rows={2}
-          placeholder={`Message the ${project.slug} lead…`}
+          rows={compact && !text ? 1 : 2}
+          title={compact ? rules : undefined}
+          placeholder={compact ? `Message the ${project.slug} lead… (not an approval)` : `Message the ${project.slug} lead…`}
           aria-label={`Message to lead:${project.slug}`}
           onFocus={onFocus}
           onChange={(e) => update(e.target.value)}
@@ -180,16 +189,18 @@ export function Composer({ project, now, cos, busy, refetchAll, onFocus }: { pro
           Send to lead
         </button>
       </div>
+      {hint ? (
       <div className="hint">
-        {followUp ? (
+        {followUp && (!compact || text) ? (
           <label title={followUp.text}>
             <input type="checkbox" checked={follow} onChange={(e) => update(text, e.target.checked)} data-direct-follow={followUp.id} />
             a follow-up of your last message
           </label>
         ) : null}
-        Goes to the {project.slug} lead; the {cos} gets a copy. Not an approval: merges, production changes and public pushes still need their card. No secrets here.
+        {compact ? null : rules}
         {left < 500 ? ` ${left} characters left.` : ""}
       </div>
+      ) : null}
     </div>
   );
 }

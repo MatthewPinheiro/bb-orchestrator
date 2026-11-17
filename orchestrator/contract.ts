@@ -145,6 +145,22 @@ export const projectBookSchema = z.object({
   merged: z.array(z.object({ number: z.number().nullable(), url: z.string().nullable(), at: z.number() })),
   mergedTotal: z.number(),
   since: z.array(z.object({ text: z.string(), since: z.number(), bound: z.boolean() })),
+  // pinned documents (core/pins.ts): the live pins, "updated" read at this read
+  pins: z.array(
+    z.object({
+      id: z.string(),
+      kind: z.enum(["file", "link", "deliverable"]),
+      title: z.string(),
+      icon: z.enum(["page", "doc", "link", "box"]),
+      path: z.string().nullable(),
+      hostId: z.string().nullable(),
+      url: z.string().nullable(),
+      deliverable: z.string().nullable(),
+      updatedAt: z.number().nullable(),
+      rev: z.number().nullable(),
+      missing: z.boolean(),
+    }),
+  ).optional(), // optional: a page served by an older plugin process during an update draws no strip
 });
 export type ProjectBook = z.infer<typeof projectBookSchema>;
 export const cardHitsSchema = z.array(z.object({ id: z.string(), project: z.string().nullable(), title: z.string(), answer: z.string(), at: z.number() }));
@@ -337,6 +353,9 @@ export const directSeenBody = z.object({ slug: z.string(), upTo: z.number() }).s
 export const archiveBody = z.object({ threadId: z.string() }).strict();
 export const archiveProjectBody = z.object({ slug: z.string().min(1).max(40) }).strict();
 export const outputRemoveBody = z.object({ id: z.string() }).strict();
+// pinned documents: target is a pasted path or URL, or a deliverable id of the project; title is optional
+export const pinBody = z.object({ slug: z.string().min(1).max(40), target: z.string().trim().min(1).max(4000), title: z.string().max(120).nullable().optional() }).strict();
+export const unpinBody = z.object({ id: z.string().min(1).max(40) }).strict();
 export const startLeadBody = z.object({ slug: z.string().min(1).max(40) }).strict();
 export const cosMessageBody = z.object({ text: z.string().trim().min(1).max(8000) }).strict();
 export const interactionAnswerBody = z
@@ -366,6 +385,8 @@ export const WRITES = {
   archive: "/archive",
   archiveProject: "/projects/archive",
   outputRemove: "/outputs/remove",
+  pin: "/projects/pin",
+  unpin: "/projects/unpin",
   startLead: "/projects/start-lead",
   roleStart: "/roles/start",
   cosMessage: "/cos/message",

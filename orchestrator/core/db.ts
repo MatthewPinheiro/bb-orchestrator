@@ -317,6 +317,25 @@ export const MIGRATIONS: string[] = [
    CREATE INDEX deliverables_project ON deliverables (project, updated_at);
    CREATE INDEX board_project ON board (project, at);
    CREATE INDEX events_merged_ref ON events (ref, project, at) WHERE kind = 'pr' AND value = 'merged'`,
+  // Pinned documents (2026-11-17, core/pins.ts): what a project keeps at hand under its message box. A pin names its
+  // target (a file and its host, a URL, or a deliverable), never its content; "updated" is read when the tab loads.
+  // Unpinning sets unpinned_at (the row stays, for the record). At most PINS_MAX live per project.
+  `CREATE TABLE project_pins (
+     id TEXT PRIMARY KEY,
+     project TEXT NOT NULL,
+     kind TEXT NOT NULL CHECK (kind IN ('file', 'link', 'deliverable')),
+     path TEXT,
+     host_id TEXT,
+     url TEXT,
+     deliverable TEXT,
+     title TEXT NOT NULL,
+     icon TEXT NOT NULL,
+     pinned_by TEXT NOT NULL,
+     pinned_at INTEGER NOT NULL,
+     position INTEGER NOT NULL,
+     unpinned_at INTEGER
+   );
+   CREATE INDEX project_pins_live ON project_pins (project, unpinned_at, position)`,
 ];
 
 export function migrate(db: Db): void {

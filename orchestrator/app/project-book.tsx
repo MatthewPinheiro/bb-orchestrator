@@ -1,164 +1,158 @@
-// One project as a source of truth (2026-11-16, layout B): seven sections, each line with its age and its source.
-// Goal (the lead's status, flagged when stale or contradicted), Now (the live lanes), Needs <owner>, Blocked by (since
-// the lead first said it), PRs in flight (and merged today), Decided (the owner's own answers on it) and Done. On a wide
-// tab it fills the panel beside the list, two columns under the goal; narrower, it opens in place under the project's
-// row. Decided, Done, the merges and the blockers' start are read for this project only (core/book.ts), refreshed on
-// the same change signal as the list, so the two sides never disagree.
-import { useCallback, useContext, useRef, type MouseEvent, type ReactNode } from "react";
+// One project as a source of truth (2026-11-16, layout B; the detail layout of 2026-11-17, proposal 5). Under the message
+// box: the Pinned strip, then the goal with its step meter, then what needs the owner and what blocks, side by side, so
+// the answer is in the first row; then Now (thread cards) and what else it waits on, beside the PRs in flight and the
+// record (Done | Decided). Each section is one card (kit-ui.tsx SectionCard); empty ones collapse to their head. A PR
+// shows once: a wait on it folds into its row (kit.ts prRows). Every line keeps its age and its source.
+// Decided, Done, the merges, the blockers' start and the pins are read for this project only (core/book.ts, pins.ts),
+// refreshed on the same change signal as the list, so the two sides never disagree.
+import { Fragment, useCallback, useContext, useRef, useState, type MouseEvent, type ReactNode } from "react";
+import type { z } from "zod";
 import { experimental_useRpcQuery, useBbNavigate, useRealtime } from "@get-bb/plugin-sdk/app";
-import { CHANGED_CHANNEL, rpcContract, type NeedsYou, type ProjectBook as Book, type Projects } from "../contract.ts";
+import { CHANGED_CHANNEL, WRITES, rpcContract, type NeedsYou, type ProjectBook as Book, type Projects, type pinBody } from "../contract.ts";
 import { position } from "../core/status.ts";
 import { outOfDateLine, statusStale, waitLine } from "./command-center.ts";
-import { WaitLineView } from "./cc-lines.tsx";
-import { PrChip, RefText, RefsContext } from "./ref-text.tsx";
+import { RefText, RefsContext } from "./ref-text.tsx";
 import { openInBb, plainClick, type Openable } from "./open-proof.ts";
 import { panel } from "./refs.ts";
 import { age, type Lane } from "./lanes.ts";
-import { blockerLines, dayStart, mergedToday, mergedTodayCount, needLines, otherWaits, prsInFlight, type NeedLine } from "./source.ts";
+import { write } from "./store.ts";
+import { blockerLines, dayStart, mergedTodayCount, needLines, type NeedLine } from "./source.ts";
+import { DETAIL_LAYOUT, ROWS_SHOWN, THREADS_SHOWN, ageSpec, prRows, type DetailSection } from "./kit.ts";
+import { Age, AllButton, Chip, Icon, SectionCard, Steps } from "./kit-ui.tsx";
+import { ThreadCards } from "./thread-card.tsx";
+import { PinStrip } from "./pins.tsx";
+import type { OpenCard } from "./projects.tsx";
 
 type Project = Projects[number];
 
 export const bookCss = /* css */ `
-[data-orch] .orch-cc .book { display: flex; flex-direction: column; gap: 24px; cursor: default; min-width: 0; }
-[data-orch] .orch-cc .book .cols { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 24px 48px; }
-[data-orch] .orch-cc .book .col { display: flex; flex-direction: column; gap: 24px; min-width: 0; }
-[data-orch] .orch-cc .book .sec { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-[data-orch] .orch-cc .book .sec-h { margin: 0 0 4px; font-size: 12px; line-height: 16px; font-weight: 600; color: var(--orch-muted); }
-[data-orch] .orch-cc .book .empty { color: var(--orch-muted); padding-left: 16px; }
-[data-orch] .orch-cc .book .goal { padding-left: 16px; }
-[data-orch] .orch-cc .book .ln .tx { max-width: none; }
-[data-orch] .orch-cc .book .ln .tx.wrap { white-space: normal; }
-[data-orch] .orch-cc .book .answer { font-weight: 600; }
-[data-orch] .orch-cc .book .lanes { margin-left: 0; }
-[data-orch] .orch-cc .ln .tx > button.ref, [data-orch] .orch-cc .ln .tx > .rest > button.ref { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
-/* A lead-in (the project's name, the Needs you pill) then the words: the words shorten on their own. Without this the
-   line's ellipsis hides a long question button whole (an ellipsis drops an inline-block entirely), leaving "name …". */
-[data-orch] .orch-cc .ln .tx.fit { display: flex; align-items: baseline; }
-[data-orch] .orch-cc .ln .tx.fit > * { flex: none; }
-[data-orch] .orch-cc .ln .tx.fit > .rest { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-@container orchcc (max-width: 640px) {
-  [data-orch] .orch-cc .ln .tx > button.ref, [data-orch] .orch-cc .ln .tx > .rest > button.ref { white-space: normal; overflow: visible; }
-  [data-orch] .orch-cc .ln .tx.fit { display: block; }
-  [data-orch] .orch-cc .ln .tx.fit > .rest { display: inline; white-space: normal; overflow: visible; }
+[data-orch] .orch-cc .k-detail { display: flex; flex-direction: column; gap: 16px; min-width: 0; cursor: default; }
+[data-orch] .orch-cc .k-attn { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+[data-orch] .orch-cc .k-attn[data-one="true"] { grid-template-columns: minmax(0, 1fr); }
+[data-orch] .orch-cc .k-cols { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px 24px; align-items: start; }
+[data-orch] .orch-cc .k-col { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+[data-orch] .orch-cc .k-goal { display: flex; align-items: flex-start; gap: 16px; min-width: 0; }
+[data-orch] .orch-cc .k-goal .k-g { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+[data-orch] .orch-cc .k-goal .k-step { display: flex; align-items: center; gap: 8px; font-size: 12px; line-height: 16px; color: var(--orch-muted); }
+[data-orch] .orch-cc .k-goal .k-side { display: flex; align-items: center; gap: 8px; flex: none; }
+[data-orch] .orch-cc .k-row a.k-ref, [data-orch] .orch-cc .k-row button.k-ref { flex: none; }
+[data-orch] .orch-cc .k-t > a.ref, [data-orch] .orch-cc .k-t > button.ref { font-weight: inherit; }
+@container orchcc (max-width: 760px) {
+  [data-orch] .orch-cc .k-attn, [data-orch] .orch-cc .k-cols { grid-template-columns: minmax(0, 1fr); }
+  [data-orch] .orch-cc .k-goal { flex-direction: column; gap: 8px; }
 }
-[data-orch] .orch-cc.narrow-book .book .cols { grid-template-columns: minmax(0, 1fr); }
+@container orchcc (max-width: 640px) {
+  [data-orch] .orch-cc .k-row { flex-wrap: wrap; }
+  [data-orch] .orch-cc .k-row .k-t { flex-basis: 100%; white-space: normal; }
+}
 `;
 
 /** A link to something the page knows, opened in bb (openInBb): a card, a deliverable, a PR. */
-export function OpenRef({ open, children, title, data }: { open: Openable; children: ReactNode; title: string; data: string }) {
+export function OpenRef({ open, children, title, data, className = "ref" }: { open: Openable; children: ReactNode; title: string; data: string; className?: string }) {
   const nav = useBbNavigate();
   const click = (e: MouseEvent) => {
     if (plainClick(e) && openInBb(nav, open)) e.preventDefault();
   };
   return open.url ? (
-    <a className="ref" href={open.url} target="_blank" rel="noopener noreferrer" data-ref={data} data-open-in-bb="" title={title} onClick={click}>
+    <a className={className} href={open.url} target="_blank" rel="noopener noreferrer" data-ref={data} data-open-in-bb="" title={title} onClick={click}>
       {children}
     </a>
   ) : (
-    <button type="button" className="ref" data-ref={data} data-open-in-bb="" title={title} onClick={click}>
+    <button type="button" className={className} data-ref={data} data-open-in-bb="" title={title} onClick={click}>
       {children}
     </button>
   );
 }
 
+const shortDay = (t: number) => new Date(t).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" });
 const stamp = (t: number) => new Date(t).toLocaleString([], { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
 
-function Section({ name, head, children }: { name: string; head: ReactNode; children: ReactNode }) {
-  return (
-    <section className="sec" data-book-section={name}>
-      <h4 className="sec-h">{head}</h4>
-      {children}
-    </section>
-  );
-}
-
+/** The goal, a step meter with "7 of 7 · the step", and on the right the status's age (amber when old) and Ask for status. */
 function Goal({ p, now, askStatus }: { p: Project; now: number; askStatus: (() => void) | null }) {
   const s = p.status;
   const out = outOfDateLine(p);
   const stale = statusStale(p, now) && p.heldAt === null;
+  const ask = askStatus ? (
+    <button type="button" className="k-btn" data-ask-status={p.slug} onClick={askStatus}>
+      Ask for status
+    </button>
+  ) : null;
   if (!s)
     return (
-      <Section name="goal" head="Goal">
-        <div className="empty" data-no-status="">
+      <div className="k-goal" data-goal-row="">
+        <div className="k-g muted" data-no-status="">
           {p.lead ? "No status from the lead yet" : "No lead"}
-          {askStatus ? (
-            <>
-              {" · "}
-              <button type="button" className="link" data-ask-status={p.slug} onClick={askStatus}>
-                Ask for status
-              </button>
-            </>
-          ) : null}
         </div>
-      </Section>
+        <div className="k-side">{ask}</div>
+      </div>
     );
   const pos = position(s);
   return (
-    <Section name="goal" head="Goal">
-      <div className="goal" data-goal="">
-        <RefText text={s.goal} />
-      </div>
-      <div className="ln quietly">
-        <span className="tx">
-          {pos.total ? `step ${pos.at} of ${pos.total}${pos.title && pos.kind !== "done" ? `: ${pos.title}` : ""}` : "no steps"}
-        </span>
-        <span className="tail">lead said {age(s.updatedAt, now)} ago</span>
-      </div>
-      {/* a stale or contradicted status is flagged, never drawn as current */}
-      {out ? (
-        <div className="ln" data-status-outdated="">
-          <i className="dot old" />
-          <span className="tx">{out}: a line it names is over, so that line is hidden</span>
+    <div className="k-goal" data-goal-row="">
+      <div className="k-g">
+        <div data-goal="">
+          <RefText text={s.goal} />
         </div>
-      ) : stale ? (
-        <div className="ln" data-status-stale="true">
-          <i className="dot old" />
-          <span className="tx">
-            <b className="warn">Status is {age(s.updatedAt, now)} old</b>: the lead hasn't said since
-            {askStatus ? (
-              <>
-                {" · "}
-                <button type="button" className="link" data-ask-status={p.slug} onClick={askStatus}>
-                  Ask for status
-                </button>
-              </>
-            ) : null}
+        {pos.total ? (
+          <div className="k-step">
+            <Steps at={pos.kind === "done" ? pos.total : pos.at} total={pos.total} />
+            <span>
+              {pos.at} of {pos.total}
+              {pos.title && pos.kind !== "done" ? ` · ${pos.title}` : ""}
+            </span>
+          </div>
+        ) : null}
+      </div>
+      <div className="k-side">
+        {/* a stale or contradicted status is flagged, never drawn as current */}
+        {out ? (
+          <span data-status-outdated="" title={`${out}: a line it names is over, so that line is hidden`}>
+            <Chip spec={{ tone: "warn", icon: "wait", word: "status out of date" }} />
           </span>
-        </div>
-      ) : null}
-    </Section>
+        ) : stale ? (
+          <span data-status-stale="true" title="the lead hasn't said since">
+            <Chip spec={{ tone: "warn", icon: "wait", word: `status ${age(s.updatedAt, now)} old` }} />
+          </span>
+        ) : (
+          <span data-status-stale="false">
+            <Age spec={ageSpec(s.updatedAt, now, "lead", Infinity)} />
+          </span>
+        )}
+        {ask}
+      </div>
+    </div>
   );
 }
 
-function NeedRow({ l, now, cos, openCard }: { l: NeedLine; now: number; cos: string; openCard: (selector: string) => void }) {
+function NeedRow({ l, now, cos, openCard }: { l: NeedLine; now: number; cos: string; openCard: OpenCard }) {
   if (l.kind === "wait") {
     const w = waitLine(l.wait, now, cos);
     return (
-      <div className="ln" data-need="wait" data-wait-source={l.wait.source}>
-        {w.old ? <i className="dot old" /> : null}
-        <span className="tx" title={w.text}>
-          <RefText text={w.text} exact={l.wait.ref} />
-          {l.noCard ? <span className="lead"> (no card)</span> : null}
+      <div className="k-row" data-need="wait" data-wait-source={l.wait.source}>
+        <span className="k-t" title={w.text}>
+          {/* the card's head already says whom it needs: "you: " would say it twice */}
+          <RefText text={w.text.replace(/^you: /, "")} exact={l.wait.ref} />
         </span>
-        <span className="tail">{w.tail}</span>
+        {l.noCard ? <Chip spec={{ tone: "quiet", icon: "quiet", word: "no card" }} /> : null}
+        <Age spec={ageSpec(l.wait.since, now, l.wait.source, Infinity)} />
       </div>
     );
   }
   const sel = l.kind === "card" ? `[data-card="${l.id}"]` : `[data-interaction="${l.threadId}"]`;
   return (
-    <div className="ln need" data-need={l.kind}>
-      <span className="tx" title={l.text}>
-        <button type="button" className="q ref" data-open-card={l.kind === "card" ? l.id : ""} onClick={() => openCard(sel)}>
-          {l.text}
-        </button>
-        {l.kind === "prompt" ? <span className="lead"> · a prompt in {l.address.replace(/^thread:[^:]+:/, "thread ")}</span> : null}
+    <div className="k-row" data-need={l.kind}>
+      <span className="k-t" title={l.text}>
+        {l.text}
       </span>
-      {l.since ? <span className="tail">asked {age(l.since, now)} ago · live</span> : <span className="tail">live</span>}
+      <button type="button" className="k-btn solid" data-open-card={l.kind === "card" ? l.id : ""} onClick={() => openCard(sel)}>
+        {l.kind === "card" ? "Answer" : "Open"}
+      </button>
+      <Age spec={ageSpec(l.since, now, "live", Infinity)} />
     </div>
   );
 }
 
-/** The seven sections of one project. `lanesView`: the Now section's lanes, drawn by the tab (projects.tsx). */
+/** The sections of one project. `top`: the direct line's notes, drawn between the Pinned strip and the goal. */
 export function ProjectBook({
   project: p,
   lanes,
@@ -168,8 +162,10 @@ export function ProjectBook({
   ownerName,
   openCard,
   askStatus,
-  lanesView,
-  wide,
+  top,
+  pinning,
+  setPinning,
+  busy,
 }: {
   project: Project;
   lanes: Lane[] | undefined;
@@ -177,10 +173,12 @@ export function ProjectBook({
   cards: NeedsYou["cards"];
   cos: string;
   ownerName: string;
-  openCard: (selector: string) => void;
+  openCard: OpenCard;
   askStatus: (() => void) | null;
-  lanesView: ReactNode;
-  wide: boolean;
+  top?: ReactNode;
+  pinning: boolean;
+  setPinning: (x: boolean) => void;
+  busy: boolean;
 }) {
   const q = experimental_useRpcQuery({ contract: rpcContract, method: "projectBook", input: { slug: p.slug, dayStart: dayStart(now) } });
   const refetch = useRef(q.refetch);
@@ -189,161 +187,207 @@ export function ProjectBook({
     CHANGED_CHANNEL,
     useCallback(() => void refetch.current(), []),
   );
+  const reload = () => void refetch.current();
   const shared = useContext(RefsContext);
+  const [allThreads, setAllThreads] = useState(false);
+  const [allPrs, setAllPrs] = useState(false);
+  const [allRecord, setAllRecord] = useState(false);
+  const [record, setRecord] = useState<"done" | "decided">("done");
   const book: Book | undefined = q.data;
+  const pins = book?.pins ?? [];
   const needs = needLines(p, lanes, cards);
-  const others = otherWaits(p);
   const blockers = blockerLines(p, book);
-  const prs = prsInFlight(p);
-  const today = mergedToday(book, now);
+  const { rows: prs, loose } = prRows(p, lanes);
   const todayCount = mergedTodayCount(book, now);
   const live = (lanes ?? []).filter((l) => l.state !== "released");
   const working = live.filter((l) => l.state === "working").length;
-  const loading = !book ? <div className="empty">{q.error ? `Couldn't read it: ${q.error.message}` : "Reading…"}</div> : null;
+  const loading = !book ? <div className="k-empty">{q.error ? `Couldn't read it: ${q.error.message}` : "Reading…"}</div> : null;
+  const pinned = new Set(pins.map((x) => x.deliverable).filter(Boolean));
+  const pinDeliverable = (id: string) => {
+    const body: z.input<typeof pinBody> = { slug: p.slug, target: id };
+    void write(WRITES.pin, body, { kind: "other", where: `pins:${p.slug}`, after: reload });
+  };
 
-  const goal = <Goal p={p} now={now} askStatus={askStatus} />;
-  const nowSec = (
-    <Section name="now" head={`Now · ${working} of ${live.length} working`}>
-      {live.length ? lanesView : <div className="empty">No live lead or threads</div>}
-    </Section>
-  );
-  const needSec = (
-    <Section name="needs" head={`Needs ${ownerName}`}>
-      {needs.length ? needs.map((l, i) => <NeedRow key={`${l.kind}|${i}`} l={l} now={now} cos={cos} openCard={openCard} />) : <div className="empty">Nothing waits on {ownerName === "you" ? "you" : ownerName}</div>}
-    </Section>
-  );
-  const blockedSec = (
-    <Section name="blocked" head="Blocked by · waiting on">
+  const needCard = needs.length ? (
+    <SectionCard name="needs" title={`Needs ${ownerName}`} count={needs.length} tone="need" icon="you">
+      {needs.map((l, i) => (
+        <NeedRow key={`${l.kind}|${i}`} l={l} now={now} cos={cos} openCard={openCard} />
+      ))}
+    </SectionCard>
+  ) : null;
+  const blockedCard = blockers.length ? (
+    <SectionCard name="blocked" title="Blocked by" count={blockers.length} tone="blocked" icon="blocked">
       {blockers.map((b, i) => (
-        <div key={`b${i}`} className="ln blocker" data-blocker="">
-          <i className="dot blocked" />
-          <span className="tx" title={`Blocked by ${b.text}`}>
+        <div key={`b${i}`} className="k-row" data-blocker="">
+          <span className="k-t" title={`Blocked by ${b.text}`}>
             <RefText text={b.text} />
           </span>
           {b.since ? (
-            <span className="tail" data-blocker-since={b.bound ? "at-least" : b.first ? "first-said" : "status"}>
-              {b.bound ? `for over ${age(b.since, now)} · lead said` : b.first ? `since ${age(b.since, now)} · lead said` : `lead said ${age(b.since, now)} ago`}
+            <span data-blocker-since={b.bound ? "at-least" : b.first ? "first-said" : "status"}>
+              <Age spec={{ ...ageSpec(b.since, now, "lead", Infinity)!, text: `${b.bound ? ">" : ""}${age(b.since, now)}`, title: b.bound ? `for over ${age(b.since, now)} · lead said` : b.first ? `since ${age(b.since, now)} · lead said` : `lead said ${age(b.since, now)} ago` }} />
             </span>
           ) : null}
         </div>
       ))}
-      {others.map((w, i) => (
-        <WaitLineView key={`w${w.kind}|${w.ref ?? i}`} w={w} now={now} cos={cos} />
-      ))}
-      {!blockers.length && !others.length ? <div className="empty">Nothing blocks it</div> : null}
-    </Section>
+    </SectionCard>
+  ) : null;
+  // nothing for the owner and nothing blocking: one quiet head says both
+  const clear = !needCard && !blockedCard ? <SectionCard name="clear" title={`Nothing needs ${ownerName}`} sub="nothing blocks it" empty /> : null;
+
+  const nowCard = (
+    <SectionCard
+      name="now"
+      title="Now"
+      sub={live.length ? `${working} of ${live.length} working` : "no live lead or threads"}
+      empty={!live.length}
+      right={live.length > THREADS_SHOWN ? <AllButton n={live.length} open={allThreads} onClick={() => setAllThreads((x) => !x)} data-now-all={String(live.length)} /> : null}
+    >
+      <ThreadCards lanes={lanes} now={now} owner={ownerName} openCard={openCard} all={allThreads} />
+    </SectionCard>
   );
-  const prSec = (
-    <Section name="prs" head={`PRs in flight · ${prs.length}${todayCount ? ` · ${todayCount} merged today` : ""}`}>
-      {prs.map((x) => (
-        <div key={x.url} className="ln" data-pr-line={x.number}>
-          <span className="tx">
-            <OpenRef open={{ url: x.url }} title={x.url} data="pr">
-              PR #{x.number}
+  const waitsCard = loose.length ? (
+    <SectionCard name="waits" title="Waiting on" count={loose.length}>
+      {loose.map((w, i) => {
+        const l = waitLine(w, now, cos);
+        return (
+          <div key={`${w.kind}|${w.ref ?? i}`} className="k-row" data-wait-line={w.kind} data-wait-source={w.source}>
+            <span className="k-lead">
+              <Icon name="wait" />
+            </span>
+            <span className="k-t" title={`${l.text}${l.note ? ` (${l.note})` : ""}`}>
+              <RefText text={l.text} exact={w.ref} />
+              {l.note ? <b className="warn"> ({l.note})</b> : null}
+            </span>
+            <Age spec={ageSpec(w.since, now, w.source)} />
+          </div>
+        );
+      })}
+    </SectionCard>
+  ) : null;
+  const prsShown = allPrs ? prs : prs.slice(0, ROWS_SHOWN);
+  const prCard = (
+    <SectionCard
+      name="prs"
+      title="PRs in flight"
+      count={prs.length || null}
+      sub={[prs.length ? "" : "none open", todayCount ? `${todayCount} merged today` : ""].filter(Boolean).join(" · ") || null}
+      empty={!prs.length}
+      right={prs.length > ROWS_SHOWN ? <AllButton n={prs.length} open={allPrs} onClick={() => setAllPrs((x) => !x)} data-prs-all={String(prs.length)} /> : null}
+    >
+      {prsShown.map((r) => (
+        <div key={r.pr.url} className="k-row" data-pr-line={r.pr.number} data-pr-wait={r.waits.map((w) => w.kind).join(" ")}>
+          {/* what its waits say: the row's text when no thread names the PR, else on hover (the Blocked card often says it too) */}
+          <span className="k-t" title={[`#${r.pr.number}${r.title ? ` ${r.title}` : ""}`, ...r.waits.map((w) => waitLine(w, now, cos).text)].join("\n")}>
+            <OpenRef open={{ url: r.pr.url }} title={r.pr.url} data="pr" className="k-ref">
+              #{r.pr.number}
             </OpenRef>
-            <PrChip pr={x} />
+            {r.title ? <span className="q"> {r.title}</span> : r.waits.length ? <span className="q"> {waitLine(r.waits[0]!, now, cos).text}</span> : null}
           </span>
-          <span className="tail">live</span>
+          {r.chips.map((c) => (
+            <Chip key={c.word} spec={c} />
+          ))}
+          <Age spec={r.waits[0] ? ageSpec(r.waits[0].since, now, r.waits[0].source) : null} />
         </div>
       ))}
-      {today.map((m, i) => (
-        <div key={`m${i}`} className="ln quietly" data-merged-today="">
-          <span className="tx">
-            {m.url ? (
-              <OpenRef open={{ url: m.url }} title={m.url} data="pr">
-                PR {m.number ? `#${m.number}` : ""}
-              </OpenRef>
-            ) : (
-              `PR ${m.number ? `#${m.number}` : ""}`
-            )}{" "}
-            merged
-          </span>
-          <span className="tail">{age(m.at, now)} ago · live</span>
-        </div>
-      ))}
-      {!prs.length && !today.length ? <div className="empty">No open PRs</div> : null}
-    </Section>
+    </SectionCard>
   );
-  const decidedSec = (
-    <Section name="decided" head={`Decided · ${ownerName === "you" ? "your" : `${ownerName}'s`} answers`}>
+  const doneRows = book?.done ?? [];
+  const decidedRows = book?.decided ?? [];
+  const recordRows = record === "done" ? doneRows : decidedRows;
+  const recordShown = allRecord ? recordRows : recordRows.slice(0, ROWS_SHOWN);
+  const recordCard = (
+    <SectionCard
+      name="record"
+      title={
+        <span className="k-seg" role="tablist" aria-label="Record">
+          <button type="button" role="tab" aria-selected={record === "done"} data-record-tab="done" onClick={() => setRecord("done")}>
+            Done {doneRows.length}
+          </button>
+          <button type="button" role="tab" aria-selected={record === "decided"} data-record-tab="decided" onClick={() => setRecord("decided")}>
+            Decided {decidedRows.length}
+          </button>
+        </span>
+      }
+      right={recordRows.length > ROWS_SHOWN ? <AllButton n={recordRows.length} open={allRecord} onClick={() => setAllRecord((x) => !x)} /> : null}
+    >
       {loading ??
-        (book!.decided.length ? (
-          book!.decided.map((d) => (
-            <div key={d.id} className="ln" data-decided={d.id}>
-              <span className="tx" title={`${d.title} → ${d.answer}`}>
-                {shared?.cards.has(d.id) ? (
-                  <OpenRef open={panel("board", `[data-decision="${d.id}"]`)} title="Open the answered card in Activity" data="card">
-                    {d.title}
-                  </OpenRef>
-                ) : (
-                  d.title
-                )}{" "}
-                → <span className="answer">{d.answer}</span>
-              </span>
-              <span className="tail">{stamp(d.at)}</span>
-            </div>
-          ))
+        (record === "done" ? (
+          doneRows.length ? (
+            recordShown.map((d, i) => {
+              const row = d as (typeof doneRows)[number];
+              return (
+                <div key={`${row.kind}|${row.ref ?? i}`} className="k-row" data-done-line={row.kind}>
+                  <span className="k-lead">
+                    <Icon name={row.kind === "merged" ? "merged" : row.kind === "deliverable" ? "box" : "report"} />
+                  </span>
+                  <span className="k-t" title={row.text}>
+                    {row.kind === "deliverable" && row.ref && shared?.deliverables.has(row.ref) ? (
+                      <OpenRef open={panel("deliverables", `[data-deliverable="${row.ref}"], [data-tree-key="d:${row.ref}"]`, row.ref)} title="Open in Deliverables" data="deliverable">
+                        {row.text}
+                      </OpenRef>
+                    ) : row.kind === "merged" && row.ref ? (
+                      <OpenRef open={{ url: row.ref }} title={row.ref} data="pr">
+                        {row.text}
+                      </OpenRef>
+                    ) : (
+                      <RefText text={row.text} />
+                    )}
+                  </span>
+                  {row.kind === "deliverable" && row.state === "review" ? <Chip spec={{ tone: "info", icon: "eye", word: "your review" }} /> : null}
+                  {row.kind === "deliverable" && row.ref && !pinned.has(row.ref) ? (
+                    <button type="button" className="k-btn" data-pin-deliverable={row.ref} disabled={busy} title="Pin it under the message box" onClick={() => pinDeliverable(row.ref!)}>
+                      <Icon name="pin" />
+                      Pin
+                    </button>
+                  ) : null}
+                  <Age spec={ageSpec(row.at, now, row.kind === "report" ? "thread" : "live", Infinity)} />
+                </div>
+              );
+            })
+          ) : (
+            <div className="k-empty">Nothing finished yet</div>
+          )
+        ) : decidedRows.length ? (
+          recordShown.map((d) => {
+            const row = d as (typeof decidedRows)[number];
+            return (
+              <div key={row.id} className="k-row" data-decided={row.id}>
+                <span className="k-t" title={`${row.title} → ${row.answer}`}>
+                  {shared?.cards.has(row.id) ? (
+                    <OpenRef open={panel("board", `[data-decision="${row.id}"]`)} title="Open the answered card in Activity" data="card">
+                      {row.title}
+                    </OpenRef>
+                  ) : (
+                    row.title
+                  )}
+                </span>
+                <Chip spec={{ tone: "quiet", icon: "you", word: row.answer }} />
+                <span className="k-when" title={stamp(row.at)}>
+                  {shortDay(row.at)}
+                </span>
+              </div>
+            );
+          })
         ) : (
-          <div className="empty">No answers on this project yet</div>
+          <div className="k-empty">No answers on this project yet</div>
         ))}
-    </Section>
+    </SectionCard>
   );
-  const doneSec = (
-    <Section name="done" head="Done">
-      {loading ??
-        (book!.done.length ? (
-          book!.done.map((d, i) => (
-            <div key={`${d.kind}|${d.ref ?? i}`} className="ln" data-done-line={d.kind}>
-              <span className="tx" title={d.text}>
-                {d.kind === "deliverable" && d.ref && shared?.deliverables.has(d.ref) ? (
-                  <OpenRef open={panel("deliverables", `[data-deliverable="${d.ref}"], [data-tree-key="d:${d.ref}"]`, d.ref)} title="Open in Deliverables" data="deliverable">
-                    {d.text}
-                  </OpenRef>
-                ) : d.kind === "merged" && d.ref ? (
-                  <OpenRef open={{ url: d.ref }} title={d.ref} data="pr">
-                    {d.text}
-                  </OpenRef>
-                ) : (
-                  <RefText text={d.text} />
-                )}
-                {d.kind === "deliverable" ? <span className="lead"> · {d.state === "approved" ? "approved" : "in your review"}</span> : null}
-              </span>
-              <span className="tail">
-                {age(d.at, now)} ago · {d.kind === "report" ? "thread said" : "live"}
-              </span>
-            </div>
-          ))
-        ) : (
-          <div className="empty">Nothing finished yet</div>
-        ))}
-    </Section>
-  );
+
+  const sections: Record<DetailSection, ReactNode> = { needs: needCard ?? clear, blocked: blockedCard, now: nowCard, waits: waitsCard, prs: prCard, record: recordCard };
+  const place = (keys: readonly DetailSection[]) => keys.map((k) => <Fragment key={k}>{sections[k]}</Fragment>);
   return (
-    <div className="book" data-book={p.slug}>
-      {goal}
-      {wide ? (
-        <div className="cols">
-          <div className="col">
-            {needSec}
-            {blockedSec}
-            {nowSec}
-          </div>
-          <div className="col">
-            {prSec}
-            {decidedSec}
-            {doneSec}
-          </div>
-        </div>
-      ) : (
-        <>
-          {needSec}
-          {blockedSec}
-          {nowSec}
-          {prSec}
-          {decidedSec}
-          {doneSec}
-        </>
-      )}
+    <div className="k-detail" data-book={p.slug}>
+      <PinStrip slug={p.slug} pins={pins} now={now} refetch={reload} busy={busy} adding={pinning} setAdding={setPinning} />
+      {top}
+      <Goal p={p} now={now} askStatus={askStatus} />
+      <div className="k-attn" data-attention="" data-one={needCard && blockedCard ? "false" : "true"}>
+        {place(DETAIL_LAYOUT.attention)}
+      </div>
+      <div className="k-cols">
+        <div className="k-col">{place(DETAIL_LAYOUT.left)}</div>
+        <div className="k-col">{place(DETAIL_LAYOUT.right)}</div>
+      </div>
     </div>
   );
 }

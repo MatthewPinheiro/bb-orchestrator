@@ -19,6 +19,7 @@ import { cardRefusal } from "./caps.ts";
 import { type LeadStatus, normalizeStatus, sameWait, type StatusParams, STATUS_STALE_MS, statusLine } from "./status.ts";
 import { backfillEvents, buildHistory, buildSummary, logEvent, logSince, SUMMARY_DONE_MS, type DecisionLite, type EventIn, type EventRow, type HistoryInput, type ProjectHistory, type ProjectSummary, type SummaryInput } from "./history.ts";
 import { waitsOf } from "./status.ts";
+import { addPin, findPin, getPin, pinViews, unpin, type Pin, type PinTarget, type PinView } from "./pins.ts";
 import { SUMMARY_ANSWERED_SQL, projectBook, searchAnswered, type CardHit, type ProjectBook } from "./book.ts";
 
 type HistoryAgent = HistoryInput["agents"][number];
@@ -324,6 +325,26 @@ export interface OutputInput {
 export interface OutputPlace {
   roots: string[];
   hostId: string | null;
+  /** each root's own host, when they differ (a project's lead and threads on different machines); else `hostId` */
+  hosts?: { path: string; hostId: string | null }[];
+}
+
+/**
+ * The host of the root that holds `real` (a realpath), the deepest when roots nest: that root's own host, null when it
+ * has none, undefined when no root holds it.
+ */
+export function hostOfPath(real: string, hosts: { path: string; hostId: string | null }[]): string | null | undefined {
+  let best: { len: number; hostId: string | null } | null = null;
+  for (const h of hosts) {
+    let r: string;
+    try {
+      r = realpathSync(h.path);
+    } catch {
+      continue;
+    }
+    if (real.startsWith(r.endsWith(sep) ? r : r + sep) && (!best || r.length > best.len)) best = { len: r.length, hostId: h.hostId };
+  }
+  return best ? best.hostId : undefined;
 }
 export interface OutputRow {
   id: string;
@@ -366,7 +387,8 @@ const toOutput = (r: OutputDbRow): OutputRow => ({
 });
 
 /** A recorded file's realpath, or `invalid`: absolute, an existing file, and inside one of `roots` after symlinks. */
-export function outputPath(p: string, roots: string[]): string {
+/** `whose`: how the error names the first root, for whoever reads it (the agent's own folder, or a project's for the owner). */
+export function outputPath(p: string, roots: string[], whose = "your environment folder"): string {
   if (!isAbsolute(p)) throw new EngineError("invalid", `the path must be absolute: ${p}`);
   let real: string;
   try {
@@ -384,7 +406,7 @@ export function outputPath(p: string, roots: string[]): string {
     }
     return real.startsWith(r.endsWith(sep) ? r : r + sep);
   });
-  if (!inside) throw new EngineError("invalid", `${p} is outside your environment folder and the shared folders (${roots.join(", ")})`);
+  if (!inside) throw new EngineError("invalid", `${p} is outside ${whose} and the shared folders (${roots.join(", ")})`);
   return real;
 }
 
@@ -3157,9 +3179,9 @@ export class Engine {
   }
 
   /** One project's Decided, Done, merges since the page's day start and blockers' start (book.ts): for the project opened. */
-  projectBook(slug: string, dayStart?: number): ProjectBook {
+  projectBook(slug: string, dayStart?: number): ProjectBook & { pins: PinView[] } {
     if (!this.project(slug)) throw new EngineError("not_found", `no project ${slug}`);
-    return projectBook(this.db, slug, this.leadStatus(slug), this.now(), dayStart);
+    return { ...projectBook(this.db, slug, this.leadStatus(slug), this.now(), dayStart), pins: pinViews(this.db, slug) };
   }
 
   /** Older answered cards for the Projects search (book.ts). */
@@ -3407,7 +3429,19 @@ export class Engine {
 
   /** Points an output at a kept copy of its file, so the Deliverables tab still opens it once the worktree is gone. */
   repointOutput(id: string, path: string): void {
+    const o = this.output(id);
+    const was = o?.path ?? null;
     this.db.prepare(`UPDATE outputs SET path = ? WHERE id = ?`).run(path, id);
+    // a live pin of that file follows it to the kept copy: the worktree it was in goes after archive's grace period
+    // stored as its realpath, as pinning does: pinViews treats a path that resolves elsewhere as gone
+    let real = path;
+    try {
+      real = realpathSync(path);
+    } catch {
+      /* not there (yet): kept as given */
+    }
+    // only the output's own project and host: the same path in another project, or on another machine, is another file
+    if (o && was) this.db.prepare(`UPDATE project_pins SET path = ? WHERE kind = 'file' AND path = ? AND project IS ? AND host_id IS ? AND unpinned_at IS NULL`).run(real, was, o.project, o.hostId);
     this.ports.changed();
   }
 
@@ -3416,6 +3450,50 @@ export class Engine {
     if (!this.output(id)) throw new EngineError("not_found", `no output ${id}`);
     this.db.prepare(`DELETE FROM outputs WHERE id = ?`).run(id);
     this.ports.changed();
+  }
+
+  // ---------------------------------------------------------------- pinned documents (core/pins.ts)
+
+  /**
+   * Pins a document to a project's strip. `target`: an http(s) URL (outputUrl), a deliverable id of this project, or an
+   * absolute path, checked exactly as proof is (outputPath: realpath, inside `place.roots`) and opened on `place.hostId`.
+   * `by`: the owner (the page or the CLI), or the project's own lead. Threads don't pin: the strip is the lead's shortlist.
+   */
+  pin(project: string, target: string, o: { title?: string | null; by: Agent | "owner" }, place: OutputPlace): { pin: Pin; created: boolean } {
+    if (!this.project(project)) throw new EngineError("not_found", `no project ${project}`);
+    if (o.by !== "owner" && (o.by.role !== "lead" || o.by.project !== project)) throw new EngineError("forbidden", `only ${project}'s lead or the owner pins to ${project}`);
+    const raw = target.trim();
+    let t: PinTarget;
+    if (/^[a-z][a-z0-9+.-]*:/i.test(raw) && !raw.startsWith("/")) t = { kind: "link", url: outputUrl(raw) };
+    else if (/^v-[0-9a-f]{6,}$/.test(raw)) t = { kind: "deliverable", id: raw };
+    else {
+      const path = outputPath(raw, place.roots, o.by === "owner" ? `${project}'s folders` : undefined);
+      // the machine of the folder it is in: a thread's worktree on another host must open there, not on the lead's. A
+      // folder without a host never borrows another's: the same path there could be a different file.
+      const own = place.hosts ? hostOfPath(path, place.hosts) : undefined;
+      const hostId = own === undefined ? place.hostId : own;
+      if (!hostId) throw new EngineError("bad_state", `no bb host for ${project}'s folders, so the file couldn't be opened`);
+      t = { kind: "file", path, hostId };
+    }
+    const r = addPin(this.db, project, t, { title: o.title, by: o.by === "owner" ? "owner" : o.by.address, now: this.now(), id: `pin-${hex(6)}` });
+    if (r.created) this.ports.changed();
+    return r;
+  }
+
+  /** Unpins by id, or by its path, URL or deliverable id within `project`. A lead unpins only in its own project. */
+  unpinDoc(ref: string, o: { by: Agent | "owner"; project?: string | null }): Pin {
+    const p = o.project ? findPin(this.db, o.project, ref) : getPin(this.db, ref);
+    if (!p) throw new EngineError("not_found", `no pin ${ref}${o.project ? ` in ${o.project}` : ""}`);
+    if (o.by !== "owner" && (o.by.role !== "lead" || o.by.project !== p.project)) throw new EngineError("forbidden", `only ${p.project}'s lead or the owner unpins there`);
+    const was = p.unpinnedAt;
+    const out = unpin(this.db, p.id, this.now());
+    if (was === null) this.ports.changed();
+    return out;
+  }
+
+  /** A project's live pins, with "updated" read now (file mtimes, deliverables' latest revision). */
+  pins(project: string): PinView[] {
+    return pinViews(this.db, project);
   }
 
   // ---------------------------------------------------------------- deliverables: a lead's finished work, with proof, for the owner

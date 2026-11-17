@@ -134,32 +134,61 @@ On a wide screen, Projects is a list of projects on the left and the selected pr
 
 The list is ordered by what needs attention. Each row shows:
 
-- the project's name and its state: **Needs you** when a card from it waits for you, else Blocked, Moving, Waiting,
-  Quiet, On hold or No lead;
+- the project's lead and name;
+- one state chip: Blocked, Moving, Waiting, Quiet, On hold or No lead (each with its icon and word);
 - how many threads are working;
-- what is open (cards for you, blockers, waits, PRs) and how long ago the lead last published its status.
+- the one number that matters most, as a chip: what is for you, else what blocks it, its waits or its PRs;
+- how long ago the lead last published its status (amber when old).
 
-Quiet projects sit together below the rest, and archived ones sit behind a toggle. The filters are **All**,
-**Needs me**, **Blocked** and **With waits**. The search box finds a project by PR number, ticket id or words.
+Quiet projects sit together below the rest as one dim line each, and archived ones sit behind a toggle. The filters
+are **All**, **Needs me**, **Blocked** and **With waits**. The search box finds a project by PR number, ticket id or
+words.
 
 The selected project shows, from the top:
 
+- its name, its state and what is for you, with **Timeline** and the **⋯** menu;
 - its message box (see below);
-- its goal and current step;
-- what needs you;
-- its PRs in flight;
-- what blocks it or what it waits on;
-- your past answers on it;
-- one lane per agent, saying what it is doing now;
-- what it finished.
+- **Pinned**: the documents pinned to it (see below);
+- the lead's notes, then its goal with a step meter (and **Ask for status** when the status is old);
+- **Needs** and **Blocked**, side by side: what waits on you, and what blocks the project;
+- **Now**: one card per agent, what it works on, its state, its PR and its context. The first five show, then
+  **all N**; idle threads recede;
+- **PRs in flight**, each PR once, with what it waits on folded into its row;
+- the record: **Done** and **Decided** (your past answers) as two tabs.
 
 **Timeline** opens the project's own page: its timeline, flow and dependencies.
 
-The **⋯** menu asks the lead for its status, sets the priority (urgent, high, normal, low), puts the project on hold
-or resumes it, and archives it. While a project is on hold, its lead's mail waits and the lead can't start threads.
+The **⋯** menu pins a document, asks the lead for its status, sets the priority (urgent, high, normal, low), puts the
+project on hold or resumes it, and archives it. While a project is on hold, its lead's mail waits and the lead can't
+start threads.
 
 The **Standing agents** line above the list shows the CoS and the Steward, with **Start** when one isn't running. On
-a narrow screen, each project is one row that opens in place with **Details ▾**.
+a narrower screen the same rows make one column, and a tapped row opens its project in place under it.
+
+### Pinned documents
+
+A project keeps up to 12 documents at hand, under its message box: a file, a link or a deliverable. The strip shows
+four cards (two per row on a narrower screen), then **+N more**. Each card shows the document's kind, its title and
+how fresh it is: a file's last change, a deliverable's latest revision, or when a link was pinned. A click opens it
+inside bb: a file in bb's preview, a link through bb, a deliverable on the Deliverables tab. A card's **⋯** opens it,
+copies its path or link, or unpins it.
+
+To pin one yourself:
+
+- **⋯ › Pin a document…** or the strip's **+**: paste a file's absolute path, a link or a deliverable id;
+- **Pin** on a deliverable in the project's **Done** tab.
+
+A lead pins with `orch_output` and `pin: true` when it records a file or a link, and only in its own project; threads
+don't pin. From a terminal:
+
+```
+bb orchestrator pin <project> <path|url|deliverable> [--title T]
+bb orchestrator unpin <project> <path|url|deliverable|pin id>
+```
+
+A file must be inside the project's folders (its lead's worktree, its threads' worktrees, or the shared folders),
+checked exactly as proof is; a link must be http or https. A file that is gone, or now resolves somewhere else, shows
+"file not found" and doesn't open. A 13th pin is refused: unpin one first.
 
 ### Messaging a lead
 

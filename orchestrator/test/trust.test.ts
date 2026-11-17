@@ -57,7 +57,7 @@ test("`bb orchestrator decision` from an agent shows only its own decisions: a t
 });
 
 test("every command that changes roles, threads or projects is privileged (audited on the Board); reads are not", () => {
-  for (const argv of [["role", "set"], ["spawn", "lead"], ["stop", "x"], ["start", "x"], ["compact-cos"], ["pr-check"], ["project", "a", "--hold"], ["dreams", "run-now"]])
+  for (const argv of [["role", "set"], ["spawn", "lead"], ["stop", "x"], ["start", "x"], ["compact-cos"], ["pr-check"], ["project", "a", "--hold"], ["dreams", "run-now"], ["pin", "a", "/x"], ["unpin", "a", "pin-1"]])
     assert.equal(privileged(argv[0], argv.slice(1)), true, argv.join(" "));
   for (const argv of [["status"], ["inbox"], ["host"], ["decision", "d-1"], ["tick"], ["project", "a"], ["dreams", "status"], ["dreams", "run-now", "--dry-run"]])
     assert.equal(privileged(argv[0], argv.slice(1)), false, argv.join(" "));

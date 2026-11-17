@@ -9,7 +9,7 @@ import { test } from "node:test";
 // every component the tab renders (projects.tsx's, project-book.tsx's and search.tsx's own imports included)
 const FILES = [
   "projects.tsx", "cc-lines.tsx", "project-detail.tsx", "direct-line.tsx", "ref-text.tsx", "project-book.tsx", "search.tsx",
-  "agent-bits.tsx", "mon.tsx", "status-bar.tsx", "ui.tsx",
+  "agent-bits.tsx", "mon.tsx", "status-bar.tsx", "ui.tsx", "kit-ui.tsx", "thread-card.tsx", "pins.tsx",
   "affect/badge-clean.tsx", "affect/dropdown-menu-clean.tsx", "affect/empty-state-clean.tsx", "affect/segmented-control-clean.tsx",
 ];
 // a left or inline-start border, Tailwind's border-l/border-s, or an inset shadow with an x offset (inset 2px 0 0 …)
