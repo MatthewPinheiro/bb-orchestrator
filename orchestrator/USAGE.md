@@ -150,6 +150,8 @@ The selected project shows, from the top:
 - its message box (see below);
 - **Pinned**: the documents pinned to it (see below);
 - the lead's notes, then its goal with a step meter (and **Ask for status** when the status is old);
+- **Lead status**: the lead's last update: a few bullets on what it has been working on, where it is, and what it
+  needs, with how long ago it was posted. Leads post one when a thread finishes and at each milestone; each replaces the last;
 - **Needs** and **Blocked**, side by side: what waits on you, and what blocks the project;
 - **Now**: one card per agent, what it works on, its state, its PR and its context. The first five show, then
   **all N**; idle threads recede;

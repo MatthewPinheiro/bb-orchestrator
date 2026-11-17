@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { Engine } from "../core/engine.ts";
-import { isStale, normalizeStatus, STATUS_CAPS, STATUS_STALE_MS, statusLine, statusParams, stepHeadline, waitTarget } from "../core/status.ts";
+import { ignoredTopLevelUpdate, isStale, normalizeStatus, STATUS_CAPS, STATUS_STALE_MS, statusLine, statusParams, stepHeadline, waitTarget } from "../core/status.ts";
 
 const T0 = Date.parse("2026-11-16T10:00:00Z");
 const PR = "https://github.com/o/r/pull/1301";
@@ -191,4 +191,44 @@ test("the words for a plan with no current step never say step 0", () => {
   assert.equal(stepHeadline(done.status), "All 2 steps done");
   assert.equal(statusLine(done.status, "you"), "done 2/2");
   assert.equal(stepHeadline({ ...base, steps: [{ title: "A", state: "done" }, { title: "B", state: "next" }] }), "Next: step 2 of 2: B");
+});
+
+// The Lead status card (2026-11-17): the owner reads the lead's last word on the project, so a new update must replace
+// the old one (never pile up), a publish that only moves a step must not wipe it or its time, and null clears it.
+test("an update replaces the last one, a publish without one keeps it and its time, null clears it", () => {
+  const s = setup();
+  s.publish({ goal: "Ship it", steps: FIVE, update: { working_on: ["Engine field", "Card"], at: "tests pass", needs: "a screenshot" } });
+  s.advance(60_000);
+  const next = s.publish({ update: { working_on: ["Screenshot"], at: "shot taken", needs: "nothing" } });
+  assert.deepEqual(next.update, { workingOn: ["Screenshot"], at: "shot taken", needs: "nothing", updateAt: T0 + 60_000 }, "replaced, stamped by the server");
+  s.advance(60_000);
+  const kept = s.publish({ steps: FIVE.map((x) => ({ ...x, state: "done" })) });
+  assert.deepEqual(kept.update, next.update, "a step change keeps the card and when it was said");
+  assert.equal(kept.updatedAt, T0 + 120_000);
+  assert.equal(s.publish({ update: null }).update, null);
+  assert.throws(() => s.publish({ update: { working_on: ["a", "b", "c", "d"], at: "x" } }), /cap is 3/);
+});
+
+test("an update sent as a JSON string (an agent on the old schema) is read as the object it encodes", () => {
+  const s = setup();
+  const st = s.publish({ goal: "g", steps: ["Plan"], update: JSON.stringify({ working_on: JSON.stringify(["One", "Two"]), at: "halfway", needs: "Robin's go" }) });
+  assert.deepEqual(st.update?.workingOn, ["One", "Two"]);
+  assert.equal(st.update?.needs, "Robin's go");
+});
+
+// A lead whose session loaded orch_status before `update` sends working_on, at and needs at the top level; zod used to
+// strip them, so the call "succeeded" and the owner's card silently kept the old word. They must land as the update,
+// be refused (not dropped) when malformed, and lose to `update` when both are given, with the result saying so.
+test("top-level working_on, at and needs (a lead on the schema before update) are the update; malformed ones are refused", () => {
+  const s = setup();
+  const st = s.publish({ goal: "g", steps: ["Plan"], working_on: JSON.stringify(["Alias", "Fix"]), at: "tests pass", needs: "a review" });
+  assert.deepEqual(st.update, { workingOn: ["Alias", "Fix"], at: "tests pass", needs: "a review", updateAt: T0 }, "stored as the card, not stripped");
+  assert.throws(() => s.publish({ working_on: ["a", "b", "c", "d"] }), /working_on has 4 bullets; the cap is 3/);
+  assert.throws(() => s.publish({ at: "x".repeat(STATUS_CAPS.updateLine + 1) }), /working_on is empty/, "an at without working_on is refused, not dropped");
+  assert.throws(() => s.publish({ working_on: "ok", needs: "x".repeat(STATUS_CAPS.updateLine + 1) }), /needs is 161 characters/);
+  assert.deepEqual(s.e.leadStatus("demo")?.update?.workingOn, ["Alias", "Fix"], "a refused call keeps the last card");
+  const both = statusParams.parse({ update: { working_on: "Inside" }, working_on: "Outside", needs: "n" });
+  assert.deepEqual(s.publish(both).update?.workingOn, ["Inside"], "update wins");
+  assert.deepEqual(ignoredTopLevelUpdate(both), ["working_on", "needs"], "the result text names what was ignored");
+  assert.deepEqual(ignoredTopLevelUpdate(statusParams.parse({ working_on: "x" })), [], "nothing is ignored without update");
 });

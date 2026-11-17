@@ -5,7 +5,7 @@
 // shows once: a wait on it folds into its row (kit.ts prRows). Every line keeps its age and its source.
 // Decided, Done, the merges, the blockers' start and the pins are read for this project only (core/book.ts, pins.ts),
 // refreshed on the same change signal as the list, so the two sides never disagree.
-import { Fragment, useCallback, useContext, useRef, useState, type MouseEvent, type ReactNode } from "react";
+import { Fragment, useCallback, useContext, useLayoutEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import type { z } from "zod";
 import { experimental_useRpcQuery, useBbNavigate, useRealtime } from "@get-bb/plugin-sdk/app";
 import { CHANGED_CHANNEL, WRITES, rpcContract, type NeedsYou, type ProjectBook as Book, type Projects, type pinBody } from "../contract.ts";
@@ -37,6 +37,18 @@ export const bookCss = /* css */ `
 [data-orch] .orch-cc .k-goal .k-side { display: flex; align-items: center; gap: 8px; flex: none; }
 [data-orch] .orch-cc .k-row a.k-ref, [data-orch] .orch-cc .k-row button.k-ref { flex: none; }
 [data-orch] .orch-cc .k-t > a.ref, [data-orch] .orch-cc .k-t > button.ref { font-weight: inherit; }
+[data-orch] .orch-cc .k-update { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 8px 16px; padding: 4px 8px; font-size: 14px; line-height: 20px; min-width: 0; }
+[data-orch] .orch-cc .k-update .k-lbl { font-weight: 600; }
+[data-orch] .orch-cc .k-update ul { margin: 0; padding-left: 20px; list-style: disc outside; display: flex; flex-direction: column; gap: 4px; }
+[data-orch] .orch-cc .k-update li { display: list-item; margin: 0; }
+[data-orch] .orch-cc .k-update .k-clamp { overflow-wrap: anywhere; min-width: 0; }
+[data-orch] .orch-cc .k-update .k-clamp[data-clamped="true"] .k-txt { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+[data-orch] .orch-cc .k-update .k-clamp .k-more { margin-left: 0; font-size: 12px; line-height: 16px; }
+[data-orch] .orch-cc .k-update code { font-family: var(--font-mono, ui-monospace, monospace); font-size: 12px; padding: 0 4px; border-radius: 4px; background: var(--orch-subtle, rgba(127, 127, 127, 0.12)); }
+[data-orch] .orch-cc .k-update [data-empty-needs] { color: var(--orch-muted); }
+@container orchcc (max-width: 480px) {
+  [data-orch] .orch-cc .k-update { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+}
 @container orchcc (max-width: 760px) {
   [data-orch] .orch-cc .k-attn, [data-orch] .orch-cc .k-cols { grid-template-columns: minmax(0, 1fr); }
   [data-orch] .orch-cc .k-goal { flex-direction: column; gap: 8px; }
@@ -121,6 +133,100 @@ function Goal({ p, now, askStatus }: { p: Project; now: number; askStatus: (() =
         {ask}
       </div>
     </div>
+  );
+}
+
+// Light markdown in a lead's update (2026-11-17, "horribly formatted"): **bold**, `code` and [label](https://…); the rest
+// of each run goes through RefText, so PR numbers and refs become the usual links and chips. Unmatched marks stay text.
+const MD = /`([^`\n]+)`|\*\*([^*\n]+?)\*\*|\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g;
+function MdText({ text }: { text: string }) {
+  const out: ReactNode[] = [];
+  let at = 0;
+  for (const m of text.matchAll(MD)) {
+    const [whole, code, bold, label, url] = m;
+    if (m.index! > at) out.push(<RefText key={`t${at}`} text={text.slice(at, m.index)} />);
+    if (code) out.push(<code key={m.index}>{code}</code>);
+    else if (bold)
+      out.push(
+        <strong key={m.index}>
+          <RefText text={bold} />
+        </strong>,
+      );
+    else
+      out.push(
+        <OpenRef key={m.index} open={{ url: url! }} title={url!} data="url">
+          {label}
+        </OpenRef>,
+      );
+    at = m.index! + whole.length;
+  }
+  if (at < text.length) out.push(<RefText key={`t${at}`} text={text.slice(at)} />);
+  return <>{out}</>;
+}
+
+/** A field at most two lines tall, with "more" when the words run past them. */
+function Clamped({ text, ...data }: { text: string; [d: `data-${string}`]: string | undefined }) {
+  const ref = useRef<HTMLSpanElement>(null);
+  const [open, setOpen] = useState(false);
+  const [over, setOver] = useState(false);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const measure = () => setOver(el.scrollHeight > el.clientHeight + 1);
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [text]);
+  return (
+    <div className="k-clamp" data-clamped={open ? "false" : "true"} {...data}>
+      <span className="k-txt" ref={ref}>
+        <MdText text={text} />
+      </span>
+      {over || open ? (
+        <button type="button" className="k-more" aria-expanded={open} onClick={() => setOpen((o) => !o)}>
+          {open ? "less" : "more"}
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+/** Needs that says nothing: empty, "nothing", "none" or "n/a", drawn muted. */
+const saysNothing = (s: string) => /^\s*(?:nothing|none|n\/a|-)?\s*[.!]?\s*$/i.test(s);
+
+/** The Lead status card: the lead's last update (what it worked on, where it is, what it needs). None until the first. */
+function LeadUpdate({ p, now }: { p: Project; now: number }) {
+  const u = p.status?.update;
+  if (!u) return null;
+  return (
+    <SectionCard name="lead-update" title="Lead status" sub={`updated ${age(u.updateAt, now)} ago`}>
+      <div className="k-update" data-lead-update="">
+        <div className="k-lbl">Working on</div>
+        <ul>
+          {u.workingOn.map((b, i) => (
+            <li key={i}>
+              <Clamped text={b} data-update-bullet="" />
+            </li>
+          ))}
+        </ul>
+        {u.at ? (
+          <>
+            <div className="k-lbl">Where it's at</div>
+            <Clamped text={u.at} data-update-at="" />
+          </>
+        ) : null}
+        <div className="k-lbl">Needs</div>
+        {saysNothing(u.needs) ? (
+          <div data-update-needs="" data-empty-needs="">
+            {u.needs.trim() || "Nothing"}
+          </div>
+        ) : (
+          <Clamped text={u.needs} data-update-needs="" />
+        )}
+      </div>
+    </SectionCard>
   );
 }
 
@@ -381,6 +487,7 @@ export function ProjectBook({
       <PinStrip slug={p.slug} pins={pins} now={now} refetch={reload} busy={busy} adding={pinning} setAdding={setPinning} />
       {top}
       <Goal p={p} now={now} askStatus={askStatus} />
+      <LeadUpdate p={p} now={now} />
       <div className="k-attn" data-attention="" data-one={needCard && blockedCard ? "false" : "true"}>
         {place(DETAIL_LAYOUT.attention)}
       </div>

@@ -21,7 +21,7 @@ export type ListWaitKind = (typeof LIST_WAIT_KINDS)[number];
 /** A status older than this is stale: the page says so, and the lead is nudged once. */
 export const STATUS_STALE_MS = 2 * 3_600_000;
 /** Short caps ("way less text"). Enforced here, never in the tool schema: a running agent keeps the schema it started with. */
-export const STATUS_CAPS = { goal: 100, steps: 8, step: 48, label: 60, ref: 300, who: 40, waits: 3, blockers: 3, blocker: 100 } as const;
+export const STATUS_CAPS = { goal: 100, steps: 8, step: 48, label: 60, ref: 300, who: 40, waits: 3, blockers: 3, blocker: 100, workingOn: 3, bullet: 120, updateLine: 160 } as const;
 
 /** One thing the lead waits on. `since`: when this kind and ref were first published (kept while they stay the same). */
 export interface Wait {
@@ -39,8 +39,20 @@ export interface LeadStatus {
   /** Up to STATUS_CAPS.waits, the first one mirrored in waitingOn. Absent in statuses stored before 2026-11-16: waitsOf. */
   waits?: Wait[];
   blockers: string[];
+  /**
+   * The Lead status card (2026-11-17): what the lead has been working on, where it is, what it needs. A new one replaces
+   * the last; a publish without one keeps it. `updateAt`: when it was set. Absent until the lead's first update.
+   */
+  update?: StatusUpdate | null;
   updatedAt: number;
   by: string;
+}
+
+export interface StatusUpdate {
+  workingOn: string[];
+  at: string;
+  needs: string;
+  updateAt: number;
 }
 
 // Every parameter optional, nullable, and accepted as a JSON string too: agents on an older schema send what they can.
@@ -63,8 +75,33 @@ export const statusParams = z.object({
     .preprocess(fromJson, z.union([z.string(), z.array(z.string())]))
     .nullish()
     .describe(`What stops you, at most ${STATUS_CAPS.blockers}, one line each (at most ${STATUS_CAPS.blocker}); [] clears them`),
+  update: z
+    .preprocess(
+      fromJson,
+      z.object({
+        working_on: z.preprocess(fromJson, z.union([z.string(), z.array(z.string()).max(20)])).nullish(),
+        at: z.string().max(4000).nullish(),
+        needs: z.string().max(4000).nullish(),
+      }),
+    )
+    .nullish()
+    .describe(
+      `The Lead status card on your project: {working_on: 1-${STATUS_CAPS.workingOn} bullets of what you have been working on (at most ${STATUS_CAPS.bullet} each), ` +
+        `at: where it stands (at most ${STATUS_CAPS.updateLine}), needs: what it needs (at most ${STATUS_CAPS.updateLine})}. Replaces the last one; null clears it`,
+    ),
+  // leads whose session loaded the tool before `update` send its fields at the top level: kept (not stripped) and read as
+  // the update when `update` is absent; `update` wins when both are given
+  working_on: z.preprocess(fromJson, z.union([z.string(), z.array(z.string()).max(20)])).nullish().describe("Same as update.working_on; prefer update"),
+  at: z.string().max(4000).nullish().describe("Same as update.at; prefer update"),
+  needs: z.string().max(4000).nullish().describe("Same as update.needs; prefer update"),
 });
 export type StatusParams = z.infer<typeof statusParams>;
+
+const TOP_LEVEL_UPDATE = ["working_on", "at", "needs"] as const;
+/** The top-level update fields given (working_on, at, needs), in that order. */
+export const topLevelUpdateFields = (p: StatusParams): string[] => TOP_LEVEL_UPDATE.filter((k) => p[k] !== undefined);
+/** The top-level update fields ignored because `update` was given too; the tool's result text names them. */
+export const ignoredTopLevelUpdate = (p: StatusParams): string[] => (p.update !== undefined ? topLevelUpdateFields(p) : []);
 
 const STATE_ALIAS: Record<string, StepState> = { todo: "next", pending: "next", active: "current", doing: "current", in_progress: "current", complete: "done", completed: "done", skip: "skipped" };
 const line = (s: string) => s.replace(/\s+/g, " ").trim();
@@ -157,6 +194,25 @@ export function normalizeStatus(
     if (list.length > STATUS_CAPS.blockers) return { refusal: `${list.length} blockers; the cap is ${STATUS_CAPS.blockers}. Keep the ones that stop you now` };
     for (const [i, b] of list.entries()) if (b.length > STATUS_CAPS.blocker) return { refusal: over(`blocker ${i + 1}`, b.length, STATUS_CAPS.blocker, "One line: what stops you") };
     out.blockers = list;
+  }
+  // no update but its fields at the top level (a lead on the schema before update): those are the update
+  const top = p.update === undefined && topLevelUpdateFields(p).length > 0;
+  const upd = top ? { working_on: p.working_on, at: p.at, needs: p.needs } : p.update;
+  const f = top ? "" : "update.";
+  if (upd !== undefined) {
+    if (upd === null) out.update = null;
+    else {
+      const u = upd;
+      const workingOn = (typeof u.working_on === "string" ? [u.working_on] : (u.working_on ?? [])).map(line).filter(Boolean);
+      if (!workingOn.length) return { refusal: `${f}working_on is empty: give 1-3 bullets of what you have been working on` };
+      if (workingOn.length > STATUS_CAPS.workingOn) return { refusal: `${f}working_on has ${workingOn.length} bullets; the cap is ${STATUS_CAPS.workingOn}. Keep the main ones` };
+      for (const [i, b] of workingOn.entries()) if (b.length > STATUS_CAPS.bullet) return { refusal: over(`${f}working_on[${i}]`, b.length, STATUS_CAPS.bullet, "One short line per bullet") };
+      const at = line(u.at ?? "");
+      const needs = line(u.needs ?? "");
+      if (at.length > STATUS_CAPS.updateLine) return { refusal: over(`${f}at`, at.length, STATUS_CAPS.updateLine, "Say where it stands in one line") };
+      if (needs.length > STATUS_CAPS.updateLine) return { refusal: over(`${f}needs`, needs.length, STATUS_CAPS.updateLine, "Say what it needs in one line") };
+      out.update = { workingOn, at, needs, updateAt: ctx.now };
+    }
   }
   const current = out.steps.filter((s) => s.state === "current").length;
   if (current > 1) return { refusal: `${current} steps are current; at most one is. Mark the others done or next` };

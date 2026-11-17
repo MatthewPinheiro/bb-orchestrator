@@ -187,7 +187,7 @@ test("a thread bb already archived, or with no worktree, isn't refused for good:
   h.threads.get("T-w")!.lastReadAt = Date.now() + 1000; // the owner read its report: the gate passes, only the worktree check is left
   assert.match(await h.call("orch_resolve", { to: "thread:demo:1" }), /isn't clean: its git status is unavailable \(the worktree is gone\)/);
   h.threads.get("T-w")!.archivedAt = Date.now();
-  assert.match(await h.call("orch_resolve", { to: "thread:demo:1" }), /Resolved thread:demo:1 .*bb already archived it.*\. bb had already archived it\.$/);
+  assert.match(await h.call("orch_resolve", { to: "thread:demo:1" }), /Resolved thread:demo:1 .*bb already archived it.*\. bb had already archived it\. Post an update with orch_status/);
   assert.deepEqual(h.rec.archived, [], "bb archived it already: no second archive");
   assert.equal(h.roleOf("T-w"), false);
 });

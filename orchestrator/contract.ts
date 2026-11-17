@@ -90,6 +90,8 @@ export const leadStatusSchema = z.object({
   // up to three waits, newer kinds only here (status.ts); absent in statuses stored before it: waitsOf
   waits: z.array(z.object({ kind: z.enum(LIST_WAIT_KINDS), ref: z.string().nullable(), label: z.string().nullable(), who: z.string().nullable(), since: z.number() })).optional(),
   blockers: z.array(z.string()),
+  // the Lead status card (2026-11-17); absent until the lead's first update
+  update: z.object({ workingOn: z.array(z.string()), at: z.string(), needs: z.string(), updateAt: z.number() }).nullish(),
   updatedAt: z.number(),
   by: z.string(),
 });
