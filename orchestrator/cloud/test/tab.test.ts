@@ -10,8 +10,9 @@ test("a default install lists the Cloud tab: the orchestrator page never filters
   const src = readFileSync(new URL("../../app.tsx", import.meta.url), "utf8");
   assert.match(src, /\{ id: "cloud", subPath: "cloud", label: "Cloud" \}/, "Cloud is one of the page's tabs");
   // 2026-11-17: the only filter is the owner's hiddenTabs setting, and it is empty by default
-  assert.match(src, /VIEWS\.filter\(\(v\) => !isHidden\(v\)\)/, "tabs are hidden only by the owner's choice");
-  assert.match(src, /const isHidden = .*=> hiddenTabs\.has\(v\.id\) \|\| hiddenTabs\.has\(v\.label\.toLowerCase\(\)\);/, "nothing but hiddenTabs decides");
+  const tabs = readFileSync(new URL("../../app/hidden-tabs.ts", import.meta.url), "utf8");
+  assert.match(src, /const visible = shownTabs\(VIEWS, new Set\(config\.data\?\.hiddenTabs \?\? \[\]\), /, "tabs are hidden only by the owner's choice");
+  assert.match(tabs, /const named = .*=> hidden\.has\(v\.id\) \|\| hidden\.has\(v\.label\.toLowerCase\(\)\);/, "nothing but hiddenTabs decides");
   assert.doesNotMatch(src, /cs\.available[^\n]*filter|filter[^\n]*cs\.available/, "no tab is hidden by a machine check");
 });
 

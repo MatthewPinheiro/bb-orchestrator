@@ -21,7 +21,7 @@ import { BoardView, RulesView } from "./app/board.tsx";
 import { NeedsYouView, ZONE } from "./app/needs-you.tsx";
 import { ProjectsView } from "./app/projects.tsx";
 import type { SharedRefs } from "./app/ref-text.tsx";
-import { DeliverablesView, inReview } from "./app/deliverables.tsx";
+import { DeliverablesView, inReview, inScope } from "./app/deliverables.tsx";
 import { OpenPrsView } from "./app/open-prs.tsx";
 import { ScopeView } from "./app/scope.tsx";
 import { scopeEntryOf } from "./app/kit.ts";
@@ -35,6 +35,7 @@ import { decide, where, type TargetLike } from "./app/keys.ts";
 import { emitKeys, handlerFor, keyState } from "./app/key-state.ts";
 import { ShortcutUi } from "./app/shortcut-help.tsx";
 import { PANEL_PATH } from "./app/open-proof.ts";
+import { shownTabs } from "./app/hidden-tabs.ts";
 
 // Deliverables first (what the owner reviews); the Board is "Activity", last (process, for when they want to look). Its id
 // and sub-path stay "board", so links keep working.
@@ -190,6 +191,8 @@ function OrchestratorPanel({ subPath }: PluginNavPanelProps) {
   const cloud = experimental_useRpcQuery({ contract: pageContract, method: "cs.available", input: null });
   const cloudOn = cloud.data?.available === true;
   const reviewCount = inReview(deliverables.data).length;
+  // what waits in the Scope tab, as it lists it: its open cards and its projects' scoping deliverables to review
+  const scopeWaiting = (scope.data?.badge ?? 0) + (deliverables.data ?? []).filter((d) => inScope(d) && !!scope.data?.projects.some((p) => p.slug === d.project)).length;
   const latest = useRef({ needs, board, projects, agents, shown, deliverables, config, scope });
   latest.current = { needs, board, projects, agents, shown, deliverables, config, scope };
   const refetchAll = useCallback(() => {
@@ -263,9 +266,7 @@ function OrchestratorPanel({ subPath }: PluginNavPanelProps) {
     };
   }, [board.data, needs.data, projects.data, config.data, deliverables.data]);
   // Requested 2026-11-17: the hiddenTabs setting drops tabs by id or label (lower-cased by the server); it never hides them all
-  const hiddenTabs = new Set(config.data?.hiddenTabs ?? []);
-  const isHidden = (v: (typeof VIEWS)[number]) => hiddenTabs.has(v.id) || hiddenTabs.has(v.label.toLowerCase());
-  const visible = VIEWS.some((v) => !isHidden(v)) ? VIEWS.filter((v) => !isHidden(v)) : VIEWS;
+  const visible = shownTabs(VIEWS, new Set(config.data?.hiddenTabs ?? []), scopeWaiting, new Set(panes(layout.root).map((p) => p.view)));
   // a pane left on a tab that is now hidden moves to the first visible tab
   useEffect(() => {
     const stale = panes(layout.root).filter((p) => !visible.some((v) => v.id === p.view));
@@ -280,8 +281,8 @@ function OrchestratorPanel({ subPath }: PluginNavPanelProps) {
         ? needs.data.badge
         : v.id === "deliverables" && reviewCount > 0
           ? reviewCount
-          : v.id === "scope" && scope.data && scope.data.badge > 0
-            ? scope.data.badge // every unanswered card in the Scope tab, whole projects and tasks alike
+          : v.id === "scope" && scopeWaiting > 0
+            ? scopeWaiting // every unanswered card and deliverable to review in the Scope tab, whole projects and tasks alike
           : v.id === "projects" && board.data?.directUnread?.length
             ? "•" // a lead's note you haven't opened (PLAN 3.4); never a phone notification
             : undefined,
