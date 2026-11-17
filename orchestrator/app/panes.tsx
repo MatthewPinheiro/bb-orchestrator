@@ -9,12 +9,15 @@ import { Btn, cx } from "./ui.tsx";
 /** `counted`: the tab can carry a count, so its slot stays while there is none and a count coming or going moves no tab */
 export type ViewDef = { id: string; label: string; count?: number | string; counted?: boolean };
 
-/** A counted tab's label: its count sits in a slot that is always there, hidden while empty, at least two digits wide (paneCss). */
+/**
+ * A counted tab's label: its count sits in a slot that is always there, hidden while empty, at least two digits wide (paneCss).
+ * While the slot is empty the label is centred across the whole box, not left of a blank gap (2026-11-17, the owner).
+ */
 function CountedLabel({ label, count }: { label: string; count?: number | string }) {
   const text = typeof count === "number" ? count.toLocaleString("en-US") : (count ?? "");
   return (
-    <span className="orch-tab-label">
-      {label}
+    <span className="orch-tab-label" data-label={label} data-empty={text === "" || undefined}>
+      <span className="orch-tab-name">{label}</span>
       <span key={text} className="ui-segc__count orch-tab-count" data-empty={text === "" || undefined} aria-hidden={text === "" || undefined}>
         {text}
       </span>
@@ -220,6 +223,12 @@ export const paneCss = /* css */ `
 [data-orch] .orch-pane__scroll { scrollbar-gutter: stable; }
 /* The strip's counts: at least two digits wide ("2" → "10" moves no tab), and a counted tab keeps its slot while empty */
 [data-orch] [data-pane] > header .ui-segc .ui-segc__count { min-width: calc(2ch + 6px); }
-[data-orch] .orch-tab-label { display: inline-flex; align-items: center; gap: 5px; }
+/* A counted tab's box is its label, the gap and the slot, count or none. A hidden copy of the label holds column one, so
+   with the slot empty the label itself spans both columns, centred, and the box keeps its width */
+[data-orch] .orch-tab-label { display: inline-grid; grid-template-columns: auto auto; align-items: center; column-gap: 5px; }
+[data-orch] .orch-tab-label::before { content: attr(data-label); grid-area: 1 / 1; visibility: hidden; }
+[data-orch] .orch-tab-name { grid-area: 1 / 1; }
+[data-orch] .orch-tab-count { grid-area: 1 / 2; }
+[data-orch] .orch-tab-label[data-empty] .orch-tab-name { grid-column: 1 / -1; justify-self: center; }
 [data-orch] .orch-tab-count[data-empty] { visibility: hidden; }
 `;

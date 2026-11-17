@@ -46,3 +46,16 @@ test("every tab that can show a count keeps its slot, two digits wide", () => {
   // "2" → "10" keeps the width: the strip's counts are at least two digits wide
   assert.match(src("app/panes.tsx"), /\[data-pane\] > header \.ui-segc \.ui-segc__count \{ min-width: calc\(2ch \+ 6px\); \}/);
 });
+
+// 2026-11-17, the owner: "the tab name should be text centered". 1.11.0 kept the empty slot after the label, so a counted
+// tab with no count drew its label at the left of its box beside a blank gap. The box stays as wide (the slot's room is
+// held), and the label is centred in it.
+test("a counted tab with no count centres its label in a box as wide as with one", () => {
+  const panes = src("app/panes.tsx");
+  // the box: a hidden copy of the label holds column one, so the label itself is free to move
+  assert.match(panes, /<span className="orch-tab-label" data-label=\{label\} data-empty=\{text === "" \|\| undefined\}>/);
+  assert.match(panes, /\.orch-tab-label::before \{ content: attr\(data-label\); grid-area: 1 \/ 1; visibility: hidden; \}/);
+  assert.match(panes, /\.orch-tab-count\[data-empty\] \{ visibility: hidden; \}/, "the empty slot keeps its room: a count coming moves no tab");
+  // no count: the label spans both columns, centred
+  assert.match(panes, /\.orch-tab-label\[data-empty\] \.orch-tab-name \{ grid-column: 1 \/ -1; justify-self: center; \}/);
+});

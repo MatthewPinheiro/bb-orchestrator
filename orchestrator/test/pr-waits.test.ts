@@ -9,11 +9,11 @@ import { Engine, type DeliverResult, type PrResult, WAIT_NUDGE_MS } from "../cor
 import type { Item } from "../core/model.ts";
 
 const URL = "https://github.com/o/r/pull/1234";
-const reading = (p: Partial<{ state: string; checks: string; review: string; mergeable: string; mstate: string }>): PrResult => ({
+const reading = (p: Partial<{ state: string; checks: string; review: string; mergeable: string; mstate: string }>, url = URL): PrResult => ({
   outcome: "available",
   pullRequest: {
-    url: URL,
-    number: 1234,
+    url,
+    number: Number(url.split("/").pop()),
     state: p.state ?? "open",
     checks: { state: p.checks ?? "passing" },
     review: { state: p.review ?? "review_requested" },
@@ -24,7 +24,8 @@ const reading = (p: Partial<{ state: string; checks: string; review: string; mer
 function setup() {
   let clock = Date.parse("2026-11-14T02:34:00Z");
   const sent: Item[] = [];
-  const e = new Engine(new DatabaseSync(":memory:") as never, {
+  const db = new DatabaseSync(":memory:");
+  const e = new Engine(db as never, {
     now: () => clock,
     async deliver(_t, _text, item): Promise<DeliverResult> {
       sent.push(item);
@@ -44,7 +45,9 @@ function setup() {
   e.personAnswer(d.id, e.decision(d.id)!.rev, "1", null, "phone");
   const wakes = () => e.items(500).filter((i) => i.recipient === lead.address && i.sender === "orchestrator" && i.kind === "message");
   const nudges = () => e.items(500).filter((i) => i.recipient === lead.address && i.sender === "orchestrator" && i.kind === "notice" && i.body.startsWith("Still waiting"));
-  return { e, lead, worker, d, wakes, nudges, see: (r: PrResult) => e.prSeen(e.agentByThread("T-w1")!, "env-1", r), advance: (ms: number) => (clock += ms) };
+  // every wait on a ref, closed ones too (openWaits shows only the open ones): how each one ended is the point
+  const waitsOn = (ref: string) => db.prepare(`SELECT owner, pr_url AS url, cond, outcome FROM waits WHERE ref = ? ORDER BY created_at, rowid`).all(ref) as { owner: string; url: string; cond: string; outcome: string | null }[];
+  return { e, lead, worker, d, wakes, nudges, waitsOn, see: (r: PrResult) => e.prSeen(e.agentByThread("T-w1")!, "env-1", r), advance: (ms: number) => (clock += ms) };
 }
 
 test("the bound answer comes back to the lead once, when the PR is approved, carrying the owner's choice", () => {
@@ -140,4 +143,99 @@ test("a bad PR or condition is refused before anything is acked, and an acked ca
   s.e.ack(s.lead, s.d.id, "done", "merging later");
   assert.match(s.e.ack(s.lead, s.d.id, "done", null, { pr: URL, when: "approved" }), /already acked; bound/, "a lead that acked first binds afterwards");
   assert.match(s.e.inbox(s.lead).text, /Waiting on PRs \(1\):\n- d-\S+: until .*1234 is approved/);
+});
+
+// A watch its owner can move or drop (2026-11-17). A PR bound to an answer was closed unmerged and replaced by another
+// that no thread's environment showed, so the plugin never read the first one closed: the lead was reminded each day,
+// told to "ack again", and acking again changed nothing. The owner's second ack now moves the watch or drops it.
+const OTHER = "https://github.com/o/r/pull/1240";
+
+test("the owner's second ack without pr drops the watch: no more reminders, and the card's ack stays as it was", () => {
+  const s = setup();
+  // the PR no thread shows: nothing will ever read it closed, so only the owner can end this wait
+  s.e.ack(s.lead, s.d.id, "done", "merge once approved", { pr: "https://github.com/o/r/pull/9999", when: "approved" });
+  s.advance(WAIT_NUDGE_MS);
+  s.e.tick();
+  assert.equal(s.nudges().length, 1);
+  assert.match(s.nudges()[0]!.body, /ack d-\S+ again with pr and when to watch another PR, or with no pr to stop watching/, "the reminder names both ways out");
+  const ack = s.e.decision(s.d.id)!.ack;
+  const out = s.e.ack(s.lead, s.d.id, "superseded", "replaced by another PR");
+  assert.match(out, /stopped watching https:\/\/github\.com\/o\/r\/pull\/9999/);
+  assert.deepEqual(s.waitsOn(s.d.id).map((w) => w.outcome), ["dropped"]);
+  assert.deepEqual(s.e.decision(s.d.id)!.ack, ack, "the answer was handled when it was acked; dropping the watch doesn't re-ack it");
+  assert.doesNotMatch(s.e.inbox(s.lead).text, /Waiting on PRs/);
+  for (let i = 0; i < 2; i++) {
+    s.advance(WAIT_NUDGE_MS);
+    s.e.tick();
+  }
+  assert.equal(s.nudges().length, 1, "dropped: the daily reminder stops");
+});
+
+test("the owner's second ack with a new pr and when moves the watch: the new PR wakes the lead once, the old one never", () => {
+  const s = setup();
+  s.see(reading({}));
+  s.e.ack(s.lead, s.d.id, "done", null, { pr: URL, when: "approved" });
+  const ack = s.e.decision(s.d.id)!.ack;
+  const out = s.e.ack(s.lead, s.d.id, "done", null, { pr: OTHER, when: "merged" });
+  assert.match(out, new RegExp(`stopped watching ${URL}.*bound to ${OTHER}`));
+  assert.deepEqual(
+    s.waitsOn(s.d.id).map((w) => [w.url, w.cond, w.outcome]),
+    [
+      [URL, "approved", "rebound"],
+      [OTHER, "merged", null],
+    ],
+    "one watch open, on the new PR",
+  );
+  assert.deepEqual(s.e.decision(s.d.id)!.ack, ack, "the card's ack stands");
+  s.see(reading({ review: "approved" }, OTHER));
+  assert.equal(s.wakes().length, 0, "the new condition is merged, not approved");
+  s.see(reading({ state: "merged" }, OTHER));
+  assert.equal(s.wakes().length, 1);
+  assert.match(s.wakes()[0]!.body, /PR #1240 is merged/);
+  s.see(reading({ review: "approved" }));
+  s.see(reading({ state: "closed" }));
+  assert.equal(s.wakes().length, 1, "the old PR's readings wake nobody: its watch was moved");
+});
+
+test("another agent's second ack leaves the owner's watch and its reminders alone", () => {
+  const s = setup();
+  s.e.ack(s.lead, s.d.id, "done", null, { pr: URL, when: "approved" });
+  assert.throws(() => s.e.ack(s.worker, s.d.id, "done", null), /only lead:cd/);
+  assert.throws(() => s.e.ack(s.worker, s.d.id, "done", null, { pr: OTHER, when: "merged" }), /only lead:cd/);
+  assert.deepEqual(s.waitsOn(s.d.id).map((w) => [w.owner, w.url, w.outcome]), [["lead:cd", URL, null]]);
+  s.advance(WAIT_NUDGE_MS);
+  s.e.tick();
+  assert.equal(s.nudges().length, 1, "still the lead's to chase");
+});
+
+test("a second ack with no open watch still says already acked and changes nothing", () => {
+  const s = setup();
+  s.see(reading({}));
+  s.e.ack(s.lead, s.d.id, "done", null, { pr: URL, when: "approved" });
+  s.see(reading({ review: "approved" }));
+  assert.equal(s.wakes().length, 1, "met: the watch is over");
+  const ack = s.e.decision(s.d.id)!.ack;
+  assert.equal(s.e.ack(s.lead, s.d.id, "failed", "a stray retry"), `${s.d.id} was already acked`);
+  assert.deepEqual(s.waitsOn(s.d.id).map((w) => w.outcome), ["met"], "the met watch is left as it ended");
+  assert.deepEqual(s.e.decision(s.d.id)!.ack, ack);
+});
+
+test("a message acked with pr is moved and dropped the same way by its recipient, and only by it", () => {
+  const s = setup();
+  const it = s.e.send(s.worker, "lead:cd", "Ready: merge my PR once it is approved", null);
+  s.e.ack(s.lead, it.id, "done", null, { pr: URL, when: "approved" });
+  assert.throws(() => s.e.ack(s.worker, it.id, "done", null), /not you/);
+  assert.deepEqual(s.waitsOn(it.id).map((w) => w.outcome), [null], "the sender can't touch the recipient's watch");
+  s.e.ack(s.lead, it.id, "done", null, { pr: OTHER, when: "green" });
+  assert.deepEqual(s.waitsOn(it.id).map((w) => [w.url, w.outcome]), [
+    [URL, "rebound"],
+    [OTHER, null],
+  ]);
+  assert.match(s.e.ack(s.lead, it.id, "done", null), new RegExp(`${it.id}: stopped watching ${OTHER}`));
+  assert.deepEqual(s.waitsOn(it.id).map((w) => w.outcome), ["rebound", "dropped"]);
+  assert.equal(s.e.items(500).find((i) => i.id === it.id)!.outcome, "done", "the message stays acked as it was");
+  assert.equal(s.e.ack(s.lead, it.id, "done", null), `${it.id} was already closed`, "nothing open left: as before");
+  s.advance(WAIT_NUDGE_MS);
+  s.e.tick();
+  assert.equal(s.nudges().length, 0);
 });

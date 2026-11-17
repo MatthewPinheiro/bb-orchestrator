@@ -1401,10 +1401,16 @@ export class Engine {
         throw new EngineError("forbidden", `${id} is untrusted external mail, not an approval: it can't be bound to a PR. Ack it without pr and when`);
       const w = this.waitInput(wait);
       return tx(this.db, () => {
+        // the owner acking again moves its watch: the old one closes first (bindWait checks the PR), the ack stands
+        const moved = this.closeOwnWaits(by, id, "rebound");
+        if (moved) return `${id}: stopped watching ${moved}; ${this.bindWait(by, id, w.url, w.when)}`;
         const out = this.ack(by, id, outcome, note);
         return `${out}; ${this.bindWait(by, id, w.url, w.when)}`;
       });
     }
+    // the owner acking again without pr drops its watch (a PR replaced, or one no environment shows): the ack stands
+    const dropped = tx(this.db, () => this.closeOwnWaits(by, id, "dropped"));
+    if (dropped) return `${id}: stopped watching ${dropped}; its ack is unchanged`;
     if (id.startsWith("d-")) return this.ackDecision(by, id, outcome, note);
     const it = this.item(id);
     if (!it) throw new EngineError("not_found", `no item ${id}`);
@@ -1653,6 +1659,15 @@ export class Engine {
     return `bound to ${url} (${wid}): you get it back when the PR is ${WHEN_WORDS[when]}, and a reminder each day until then${now ? "" : ". No thread's environment shows this PR yet, so its notices can't wake you until one does"}`;
   }
 
+  /** Close `by`'s own open waits on `ref` (never another agent's) with `outcome`. Returns their PRs, or null when none. */
+  private closeOwnWaits(by: Agent, ref: string, outcome: "rebound" | "dropped"): string | null {
+    const rows = this.db.prepare(`SELECT * FROM waits WHERE closed_at IS NULL AND owner = ? AND ref = ? ORDER BY created_at`).all(by.address, ref) as WaitRow[];
+    if (!rows.length) return null;
+    this.db.prepare(`UPDATE waits SET closed_at = ?, outcome = ? WHERE closed_at IS NULL AND owner = ? AND ref = ?`).run(this.now(), outcome, by.address, ref);
+    this.ports.changed();
+    return rows.map((w) => `${w.pr_url} (${w.id})`).join(", ");
+  }
+
   /** Whether a PR reading meets a wait's condition: true, false, or "never" (closed without merging). */
   private waitMet(pr: PrRow, when: WaitWhen): boolean | "never" {
     if (pr.state === "merged") return true;
@@ -1704,7 +1719,7 @@ export class Engine {
           sender: "orchestrator",
           kind: "notice",
           ref: w.ref,
-          body: `Still waiting (${ago(t - w.created_at)}): ${w.pr_url} isn't ${WHEN_WORDS[w.cond as WaitWhen]} yet (${seen}). It holds ${w.about}. Chase it, or ack ${w.ref} again with another PR or condition.`,
+          body: `Still waiting (${ago(t - w.created_at)}): ${w.pr_url} isn't ${WHEN_WORDS[w.cond as WaitWhen]} yet (${seen}). It holds ${w.about}. Chase it, or ack ${w.ref} again with pr and when to watch another PR, or with no pr to stop watching.`,
           key: `wait-nudge:${w.id}:${t}`,
           needsAck: false,
         });
