@@ -369,6 +369,9 @@ export const MIGRATIONS: string[] = [
    );
    CREATE UNIQUE INDEX scoping_tasks_open_name ON scoping_tasks (project, name COLLATE NOCASE) WHERE state = 'scoping';
    ALTER TABLE spawns ADD COLUMN scope_task TEXT`,
+  // 1.13.0: when the owner made a thread a task's scoping thread from the Projects view (null for one started with the
+  // task): the newest pick plans the task, whenever the thread itself started.
+  `ALTER TABLE spawns ADD COLUMN scoped_at INTEGER`,
 ];
 
 export function migrate(db: Db): void {

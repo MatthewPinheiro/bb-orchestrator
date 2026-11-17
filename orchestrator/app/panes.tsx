@@ -177,6 +177,7 @@ function PaneView({ pane, views, render, fill, wide, onView, onFocus, onSplit, o
             kind="tabs"
             variant="tray"
             size="sm"
+            fullWidth
             value={pane.view}
             options={views.map((v) => (v.counted ? { value: v.id, label: <CountedLabel label={v.label} count={v.count} /> } : { value: v.id, label: v.label, count: v.count }))}
             onChange={(id) => onView(pane.id, id)}
@@ -231,4 +232,9 @@ export const paneCss = /* css */ `
 [data-orch] .orch-tab-count { grid-area: 1 / 2; }
 [data-orch] .orch-tab-label[data-empty] .orch-tab-name { grid-column: 1 / -1; justify-self: center; }
 [data-orch] .orch-tab-count[data-empty] { visibility: hidden; }
+/* Every tab one width, the widest tab's (2026-11-17, the owner: "make all the tab widths the same"). The strip uses the
+   control's equal mode (fullWidth): columns of minmax(widest, 1fr) in a max-content track, so each is the widest label
+   with its count slot, its label centred. Kept at that natural width here (the mode would otherwise stretch the strip
+   across the row); too narrow for them all, the strip scrolls sideways with the tabs still equal, none cut short */
+[data-orch] [data-pane] > header .ui-segc[data-full] { display: inline-flex; width: auto; }
 `;

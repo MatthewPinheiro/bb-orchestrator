@@ -191,6 +191,8 @@ export const projectsSchema = z.array(
     prs: z.array(z.object({ number: z.number(), url: z.string(), state: z.string(), checks: z.string().nullable(), review: z.string().nullable(), attention: z.string().nullable() })).optional(),
     // open PRs whose threads were resolved as handed off (orch_resolve handed_off), newest first
     handedOff: z.array(z.object({ pr: z.string(), owner: z.string(), note: z.string().nullable(), at: z.number(), thread: z.string() })).optional(),
+    // its open scoping tasks (1.13.0), oldest first, each with its live scoping thread's address (none: the lead plans it)
+    tasks: z.array(z.object({ id: z.string(), name: z.string(), planner: z.string().nullable() })).optional(),
   }),
 );
 export type Projects = z.infer<typeof projectsSchema>;
@@ -224,6 +226,7 @@ export const agentsSchema = z.array(
     pr: prSchema.extend({ review: z.string().nullable() }).nullable(),
     unread: z.boolean(), // something happened since the owner last looked at the thread
     flags: z.array(z.string()), // "unplanned"
+    scopeTask: z.object({ id: z.string(), name: z.string() }).nullable().optional(), // the open task it is the scoping thread of (1.13.0)
   }),
 );
 export type Agents = z.infer<typeof agentsSchema>;
@@ -335,7 +338,8 @@ export const scopeSchema = z.object({
       slug: z.string(),
       cards: z.array(cardSchema),
       whole: z.boolean().optional(),
-      tasks: z.array(z.object({ id: z.string(), name: z.string(), openedAt: z.number() })).optional(),
+      // planner (1.13.0): the task's live scoping thread (bb's title, the engine's status), none while the lead plans it
+      tasks: z.array(z.object({ id: z.string(), name: z.string(), openedAt: z.number(), planner: z.object({ address: z.string(), threadId: z.string(), title: z.string().nullable(), status: z.string() }).nullable().optional() })).optional(),
     }),
   ),
   badge: z.number(),
@@ -402,6 +406,11 @@ export const roleStartBody = z.object({ role: z.enum(["cos", "steward"]) }).stri
 // next: what the lead does with it next ("forward this to the team"); it reaches the lead as an item they must ack
 export const approveBody = z.object({ id: z.string(), rev: z.number().int(), note: z.string().max(4000).nullable(), next: z.string().max(4000).nullable().optional() }).strict();
 export const requestChangesBody = z.object({ id: z.string(), rev: z.number().int(), text: z.string().min(1).max(4000) }).strict();
+// the owner's scoping switches in the Projects view (1.13.0): a project's mode, as orch_project_mode sets it; a thread made
+// the scoping thread of an open task (task: its id or name) or of a new one (name), or stopped
+export const projectModeBody = z.object({ slug: z.string().min(1).max(40), mode: z.enum(["scoping", "active"]) }).strict();
+export const scopeThreadBody = z.object({ threadId: z.string().min(1), task: z.string().max(80).nullable().optional(), name: z.string().max(200).nullable().optional() }).strict();
+export const unscopeThreadBody = z.object({ threadId: z.string().min(1) }).strict();
 
 export const WRITES = {
   answer: "/answer",
@@ -426,4 +435,7 @@ export const WRITES = {
   interactionAnswer: "/interactions/answer",
   approve: "/deliverables/approve",
   requestChanges: "/deliverables/changes",
+  projectMode: "/projects/mode",
+  scopeThread: "/threads/scope",
+  unscopeThread: "/threads/unscope",
 } as const;

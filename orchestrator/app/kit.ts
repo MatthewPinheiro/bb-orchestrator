@@ -234,10 +234,13 @@ export function pinWhen(p: { kind: string; updatedAt: number | null; rev: number
 // exactly one entry, so no card shows twice and none goes missing.
 
 type ScopeProject = Scope["projects"][number];
+type Planner = NonNullable<NonNullable<ScopeProject["tasks"]>[number]["planner"]>;
 export interface ScopeEntry {
   key: string;
   slug: string;
   task: { id: string; name: string } | null;
+  /** The task's live scoping thread (1.13.0); none for the whole project, or while the lead plans the task itself. */
+  planner?: Planner | null;
 }
 export const scopeKey = (slug: string, task: string | null) => (task ? `${slug}/${task}` : slug);
 
@@ -245,8 +248,24 @@ export const scopeKey = (slug: string, task: string | null) => (task ? `${slug}/
 export function scopeEntries(projects: ScopeProject[]): ScopeEntry[] {
   return projects.flatMap((p) => [
     ...(p.whole !== false ? [{ key: p.slug, slug: p.slug, task: null }] : []),
-    ...(p.tasks ?? []).map((t) => ({ key: scopeKey(p.slug, t.id), slug: p.slug, task: { id: t.id, name: t.name } })),
+    ...(p.tasks ?? []).map((t) => ({ key: scopeKey(p.slug, t.id), slug: p.slug, task: { id: t.id, name: t.name }, planner: t.planner ?? null })),
   ]);
+}
+
+/** An agent's state in the planner line: what the owner reads, not the engine's word. */
+const PLANNER_STATE: Record<string, string> = { active: "working", idle: "idle", error: "stuck on an error", unknown: "starting" };
+
+/**
+ * Who plans a Scope entry (1.13.0), as its list row and its header say it: the lead (the whole project, or a task with
+ * no live scoping thread), or the task's scoping thread, by its title and address, and whether it is working. The
+ * owner reads this to know whose chat to watch; the lead's inbox names the same planner (engine taskPlanner).
+ */
+export function plannerOf(e: ScopeEntry): { kind: "lead"; text: string } | { kind: "thread"; text: string; name: string; address: string; threadId: string; state: string } {
+  const p = e.planner;
+  if (!p) return { kind: "lead", text: "Planned by the lead" };
+  const name = p.title ?? p.address;
+  const state = PLANNER_STATE[p.status] ?? p.status;
+  return { kind: "thread", text: `Planned by ${name}${p.title ? ` (${p.address})` : ""} · ${state}`, name, address: p.address, threadId: p.threadId, state };
 }
 
 /** Whether something filed under `scopeTask` shows in the entry for `task`: the task's own, or the whole project's (under no open task). */
@@ -258,4 +277,63 @@ export function inScopeEntry(p: ScopeProject, task: string | null, scopeTask: st
 /** The entry a card of `p` shows in: where a link to it opens the Scope tab. */
 export function scopeEntryOf(p: ScopeProject, scopeTask: string | null | undefined): string {
   return scopeKey(p.slug, scopeTask && (p.tasks ?? []).some((t) => t.id === scopeTask) ? scopeTask : null);
+}
+
+/**
+ * The entry header's one line on what happens next (1.13.0), so the owner never has to work out the flow: answer the
+ * "Scoping done?" card when it is there, else the open cards, else nothing waits and the lead brings questions here.
+ */
+export function scopeNext(e: ScopeEntry, o: { cards: readonly { title: string; scopingDone?: unknown }[]; delivered: number; hasLead: boolean }): string {
+  if (!o.hasLead) return `No lead is running for ${e.slug}: start it from Projects, and its chat opens here.`;
+  const done = o.cards.find((c) => !!c.scopingDone);
+  if (done) return e.task ? `Next: answer ${JSON.stringify(done.title)}. Yes closes this task; anything still open under it goes the normal way.` : `Next: answer ${JSON.stringify(done.title)}. Yes makes ${e.slug} active; its cards go the normal way from then on.`;
+  const planner = plannerOf(e);
+  const filesDone = e.task ? `the lead files "Scoping done?" when the findings and plan are written` : `the lead files "Scoping done?" when the goal, constraints and first plan are in PROJECT.md`;
+  if (o.cards.length || o.delivered) return `Next: ${o.cards.length ? "answer the cards" : "review what was handed over"}; ${filesDone}.`;
+  return planner.kind === "thread" ? `Nothing waits on you. ${planner.name} is investigating; the lead brings its questions here.` : `Nothing waits on you. The lead brings its questions here; write to it below.`;
+}
+
+// ---------------------------------------------------------------- the owner's scoping switches (1.13.0)
+// Direct owner actions in the Projects view, with no card and no model step: the lead's row (and the project's ⋯ menu)
+// switches the whole project, as orch_project_mode does; a thread's row makes it a task's scoping thread, or stops it.
+
+/** A scoping task's name, as the engine caps it (SCOPING_TASK_NAME_MAX). */
+export const TASK_NAME_MAX = 60;
+
+export type ScopeAction =
+  | { kind: "project"; mode: "scoping" | "active"; label: "Start scoping" | "End scoping" }
+  | { kind: "pick"; label: "Scope this thread…" }
+  | { kind: "stop"; label: "Stop scoping"; task: { id: string; name: string } };
+
+/** The whole project's switch: Start scoping while it is active, End scoping while it scopes as a whole. */
+export const projectScopeAction = (mode: "scoping" | "active" | undefined): ScopeAction =>
+  mode === "scoping" ? { kind: "project", mode: "active", label: "End scoping" } : { kind: "project", mode: "scoping", label: "Start scoping" };
+
+/**
+ * What a row's menu offers: a lead's row switches its whole project; a live thread's row scopes it (a new task or an open
+ * one; also to move it to another task) and, while it scopes one, stops it. A stopped or archived thread offers nothing:
+ * the engine would refuse it.
+ */
+export function scopeActions(a: { role: string; engineStatus?: string; scopeTask?: { id: string; name: string } | null }, mode: "scoping" | "active" | undefined): ScopeAction[] {
+  if (a.role === "lead") return [projectScopeAction(mode)];
+  if (a.role !== "thread" || a.engineStatus === "stopped" || a.engineStatus === "archived") return [];
+  return [{ kind: "pick", label: "Scope this thread…" }, ...(a.scopeTask ? [{ kind: "stop" as const, label: "Stop scoping" as const, task: a.scopeTask }] : [])];
+}
+
+/** The picker's "New task" name, from the thread's title: one line, cut to the engine's cap at a word where it can be. */
+export function taskNameFor(title: string | null): string {
+  const t = (title ?? "").replace(/\s+/g, " ").trim();
+  if (t.length <= TASK_NAME_MAX) return t;
+  const cut = t.slice(0, TASK_NAME_MAX);
+  const sp = cut.lastIndexOf(" ");
+  return (sp > TASK_NAME_MAX / 2 ? cut.slice(0, sp) : cut).trim();
+}
+
+/** The open tasks the picker lists: the project's, less the one the thread already scopes. */
+export const pickableTasks = <T extends { id: string }>(tasks: readonly T[] | undefined, current: { id: string } | null | undefined): T[] => (tasks ?? []).filter((t) => t.id !== current?.id);
+
+/** The project row's Scoping chip for an active project with open scoping tasks (a project scoping as a whole says it in its state chip). */
+export function tasksScoping(p: { mode?: "scoping" | "active"; tasks?: readonly unknown[] }): string | null {
+  const n = p.tasks?.length ?? 0;
+  return p.mode !== "scoping" && n ? `${n} ${n === 1 ? "task" : "tasks"} scoping` : null;
 }

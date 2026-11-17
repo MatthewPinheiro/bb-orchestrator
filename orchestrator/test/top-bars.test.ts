@@ -59,3 +59,28 @@ test("a counted tab with no count centres its label in a box as wide as with one
   // no count: the label spans both columns, centred
   assert.match(panes, /\.orch-tab-label\[data-empty\] \.orch-tab-name \{ grid-column: 1 \/ -1; justify-self: center; \}/);
 });
+
+// 2026-11-17, the owner: "make all the tab widths the same. i hate that they're all different widths. it just looks
+// weird." Each tab took its own label's width, so the strip read ragged. Now every tab is the widest tab's natural width
+// (its label and count slot), labels centred, and a count coming or going moves nothing. Too narrow for them all, the
+// strip scrolls sideways with the tabs still equal (never some labels cut short). It must keep its natural width: a strip
+// stretched across the row would make every tab as wide as a tenth of a wide pane.
+test("every tab in the strip has one width, the widest tab's, and the strip keeps its natural width", () => {
+  const panes = src("app/panes.tsx");
+  const strip = /<SegmentedControl\b[\s\S]*?\/>/;
+  const control = panes.match(strip)?.[0] ?? "";
+  assert.ok(control, "the strip's control is found");
+  assert.match(control, /\bfullWidth\b/, "the control's equal mode");
+  // the line that drew a ragged strip
+  assert.doesNotMatch('<SegmentedControl\n            kind="tabs"\n            variant="tray"\n            size="sm"\n            value={pane.view}\n          />'.match(strip)![0], /\bfullWidth\b/);
+  // the equal mode: columns of minmax(the widest tab, 1fr) in a max-content track, so each is the widest tab's width
+  const seg = src("app/affect/segmented-control-clean.tsx");
+  assert.match(seg, /\.ui-segc\[data-full\] \.ui-segc__track \{ display: grid; grid-auto-flow: column; grid-auto-columns: minmax\(var\(--ui-segc-min\), 1fr\); \}/);
+  assert.match(seg, /setProperty\("--ui-segc-min", `\$\{Math\.max\(\.\.\.widths\)\}px`\)/);
+  assert.match(seg, /\.ui-segc__track \{[^}]*width: max-content;/);
+  // its own "display: flex; width: 100%" would stretch the strip and every tab across the row: the pane keeps it natural
+  assert.match(seg, /\.ui-segc\[data-full\] \{ display: flex; width: 100%; \}/);
+  assert.match(panes, /\[data-orch\] \[data-pane\] > header \.ui-segc\[data-full\] \{ display: inline-flex; width: auto; \}/);
+  // labels centred in the wider box
+  assert.match(seg, /\.ui-segc__opt \{[^}]*justify-content: center;/);
+});

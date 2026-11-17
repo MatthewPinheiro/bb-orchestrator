@@ -3,11 +3,14 @@
 // dead message says it is with the CoS and offers Resend. Never a phone notification: the row's dot is the signal.
 // Since 2026-11-17 the composer is always open under the project's name, wherever the project is open (the detail
 // beside the list, or a row opened in place); the owner: "the message input bar should just always be there".
-import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type RefObject } from "react";
+// 1.13.0: open, the chat draws the lead's own thread as the Chat tab draws the CoS's (lead-chat.ts says when), and the
+// composer under it is a chat input; the 1.10.0 log is what shows while the lead has no live thread.
+import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type CSSProperties, type ReactNode, type RefObject } from "react";
 import type { z } from "zod";
-import { Markdown, experimental_useRpcQuery, useRealtime } from "@get-bb/plugin-sdk/app";
-import { CHANGED_CHANNEL, WRITES, rpcContract, type Projects, type directMessageBody, type directSeenBody, type resendBody } from "../contract.ts";
+import { Markdown, ThreadChat, experimental_useRpcQuery, useRealtime } from "@get-bb/plugin-sdk/app";
+import { CHANGED_CHANNEL, WRITES, rpcContract, type Projects, type directSeenBody, type resendBody } from "../contract.ts";
 import { chatOrder, chatPreview, directState, followUpOf, seenUpTo } from "./command-center.ts";
+import { directWrite, leadChatView, messageStates } from "./lead-chat.ts";
 import { age } from "./lanes.ts";
 import { write } from "./store.ts";
 import { when } from "./ui.tsx";
@@ -16,16 +19,21 @@ type Project = Projects[number];
 const MAX = 4000;
 
 export const directCss = /* css */ `
-[data-orch] .orch-cc .compose { margin: 4px 0 0 16px; display: flex; gap: 8px; align-items: flex-end; cursor: default; }
-[data-orch] .orch-cc .compose textarea { flex: 1; min-width: 0; min-height: 48px; max-height: 240px; padding: 4px 8px; border: 0; border-radius: 6px; box-shadow: inset 0 0 0 1px var(--cc-edge); background: transparent; color: var(--orch-ink); font: inherit; resize: vertical; }
-[data-orch] .orch-cc .compose textarea:focus { outline: 2px solid var(--orch-ink); outline-offset: 0; }
-[data-orch] .orch-cc .hint { margin-left: 16px; font-size: 12px; line-height: 16px; color: var(--orch-muted); max-width: 576px; cursor: default; }
-[data-orch] .orch-cc .hint label { display: inline-flex; gap: 4px; align-items: center; margin-right: 8px; color: var(--orch-ink); cursor: pointer; }
-[data-orch] .orch-cc .hint input { margin: 0; }
-[data-orch] .orch-cc .compact .compose { margin: 0; align-items: center; }
-[data-orch] .orch-cc .compact .compose textarea { min-height: 40px; padding: 8px 12px; border-radius: 8px; box-shadow: inset 0 0 0 1px var(--k-border, var(--cc-edge)); }
-[data-orch] .orch-cc .compact .compose .btn.primary { padding: 8px 12px; border-radius: 8px; }
-[data-orch] .orch-cc .compact .hint { margin: 4px 0 0; }
+/* the composer (1.13.0): a chat input under the transcript, as bb draws its own: one box, the text on top, the
+   follow-up switch and Send in a bar inside it; the rules in one quiet line under it */
+[data-orch] .orch-cc .k-input { display: flex; flex-direction: column; gap: 2px; padding: 8px 8px 8px 12px; border-radius: 12px; box-shadow: inset 0 0 0 1px var(--k-border, var(--cc-edge)); background: light-dark(#fff, rgba(255, 255, 255, 0.04)); cursor: text; }
+[data-orch] .orch-cc .k-input:focus-within { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--orch-ink) 45%, transparent); }
+[data-orch] .orch-cc .k-input textarea { width: 100%; min-width: 0; max-height: 240px; padding: 4px 0; border: 0; background: transparent; color: var(--orch-ink); font: inherit; font-size: 14px; line-height: 20px; resize: none; outline: none; }
+[data-orch] .orch-cc .k-input__bar { display: flex; align-items: center; gap: 8px; min-height: 28px; cursor: default; }
+[data-orch] .orch-cc .k-input__follow { display: inline-flex; gap: 4px; align-items: center; min-width: 0; font-size: 12px; line-height: 16px; color: var(--orch-muted); cursor: pointer; }
+[data-orch] .orch-cc .k-input__follow input { margin: 0; }
+[data-orch] .orch-cc .k-input__send { margin-left: auto; padding: 4px 12px; border-radius: 8px; }
+[data-orch] .orch-cc .k-input__hint { margin: 4px 12px 0; font-size: 12px; line-height: 16px; color: var(--orch-muted); cursor: default; }
+[data-orch] .orch-cc .k-input__hint .warn { color: var(--k-need, #9d174d); font-weight: 600; }
+/* the lead's own thread (1.13.0): the host's transcript in a bounded box, which it fills and scrolls inside */
+[data-orch] .orch-cc .k-leadthread { display: flex; flex-direction: column; height: var(--k-leadthread-h, 480px); min-height: 0; border-radius: 8px; box-shadow: inset 0 0 0 1px var(--k-border, var(--cc-edge)); overflow: hidden; }
+[data-orch] .orch-cc .k-leadthread > * { flex: 1 1 auto; min-height: 0; }
+[data-orch] .orch-cc .k-leadthread__note { margin: 0 0 8px; font-size: 12px; line-height: 16px; color: var(--orch-muted); }
 /* the chat log (1.10.0): sizes 12/14/16, weights 400/600; the owner's messages on the right in a tint, the lead's on the left */
 [data-orch] .orch-cc .k-chat { display: flex; flex-direction: column; gap: 8px; min-width: 0; margin-bottom: 8px; }
 [data-orch] .orch-cc .k-chat__bar { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 6px 8px; border: 0; border-radius: 6px; background: none; font: inherit; font-size: 14px; line-height: 20px; color: var(--orch-ink); text-align: start; cursor: pointer; }
@@ -49,11 +57,6 @@ export const directCss = /* css */ `
 [data-orch] .orch-cc .k-chat__older { align-self: center; border: 0; padding: 4px 10px; border-radius: 6px; background: none; font: inherit; font-size: 12px; color: var(--orch-muted); cursor: pointer; }
 [data-orch] .orch-cc .k-chat__older:hover { color: var(--orch-ink); background: var(--orch-wash); }
 [data-orch] .orch-cc .k-chat__empty { margin: 0; font-size: 12px; color: var(--orch-muted); }
-@container orchcc (max-width: 640px) {
-  [data-orch] .orch-cc .compose { flex-direction: column; align-items: stretch; }
-  [data-orch] .orch-cc .compose textarea { width: 100%; }
-  [data-orch] .orch-cc .compose .btn { align-self: flex-end; }
-}
 `;
 
 /**
@@ -107,8 +110,27 @@ export function ChatLog({ project, now, cos, busy, refetchAll, onPick, startOpen
         ) : null}
         {pre?.unread ? <span className="k-chat__dot" data-chat-unread="" role="img" aria-label="New reply from the lead" /> : null}
       </button>
-      {open ? <ChatPages project={project} now={now} cos={cos} busy={busy} refetchAll={refetchAll} /> : null}
+      {open ? <ChatBody project={project} now={now} cos={cos} busy={busy} refetchAll={refetchAll} /> : null}
     </section>
+  );
+}
+
+/** The chat itself: the lead's live thread, else the direct-message log (lead-chat.ts leadChatView). */
+export function ChatBody({ project, now, cos, busy, refetchAll, height }: { project: Project; now: number; cos: string; busy: boolean; refetchAll: () => void; height?: string }) {
+  const view = leadChatView(project.lead);
+  if (view.kind === "thread") return <ThreadBox threadId={view.threadId} label={`lead:${project.slug}`} height={height} note={`The ${project.slug} lead's own thread. What you send below reaches it as a direct message.`} />;
+  return <ChatPages project={project} now={now} cos={cos} busy={busy} refetchAll={refetchAll} />;
+}
+
+/**
+ * One agent's bb thread as the Chat tab draws it, transcript only (the host's ThreadChat, variant timeline), in a box of
+ * a fixed height that it fills and scrolls inside. No composer of its own: one there would send untracked.
+ */
+export function ThreadBox({ threadId, label, height, note }: { threadId: string; label: string; height?: string; note?: ReactNode }) {
+  return (
+    <div className="k-leadthread" data-thread-box={threadId} role="region" aria-label={`${label}'s thread`} style={height ? ({ "--k-leadthread-h": height } as CSSProperties) : undefined}>
+      <ThreadChat threadId={threadId} variant="timeline" layout="contained" className="min-h-0 flex-1" leadingContent={note ? <p className="k-leadthread__note">{note}</p> : undefined} />
+    </div>
   );
 }
 
@@ -152,10 +174,6 @@ function ChatPage({ project, before, now, cos, busy, refetchAll, oldest, onOlder
   useLayoutEffect(() => {
     if (box?.current) box.current.scrollTop = box.current.scrollHeight;
   }, [box, last?.id, last?.note]);
-  const resend = (id: string) => {
-    const body: z.input<typeof resendBody> = { id };
-    void write(WRITES.resend, body, { kind: "other", where: `lead:${project.slug}`, after: refetchAll });
-  };
   if (!q.data) return latest ? <p className="k-chat__empty">{q.error ? `Can't read the chat: ${q.error.message}` : "Loading…"}</p> : null;
   const texts = new Map(ms.map((m) => [m.id, m.text]));
   return (
@@ -184,7 +202,7 @@ function ChatPage({ project, before, now, cos, busy, refetchAll, oldest, onOlder
                 {st.dead ? (
                   <>
                     {" · "}
-                    <button type="button" className="link" data-direct-resend={m.id} disabled={busy} onClick={() => resend(m.id)}>
+                    <button type="button" className="link" data-direct-resend={m.id} disabled={busy} onClick={() => resend(project.slug, m.id, refetchAll)}>
                       Resend
                     </button>
                   </>
@@ -241,12 +259,22 @@ const setDraft = (slug: string, d: Draft | null) => {
   changed();
 };
 
+/** Send a dead message again (the log's Resend, and the line under the composer while the lead's thread shows). */
+function resend(slug: string, id: string, refetchAll: () => void) {
+  const body: z.input<typeof resendBody> = { id };
+  void write(WRITES.resend, body, { kind: "other", where: `lead:${slug}`, after: refetchAll });
+}
+
 /**
  * The composer, always open: the message, an optional follow-up, and what it is not (an approval). While the box is
  * empty the follow-up is the latest message (while in force), so after a send it is the one just sent; the first
  * keystroke fixes it, and a newer message elsewhere never retargets a draft. It never takes focus by itself.
+ * 1.13.0: a chat input as bb draws one (the follow-up switch and Send inside the box, the rules in one quiet line under
+ * it). Whatever the chat above shows, a send is the owner's tracked direct message (lead-chat.ts directWrite). While
+ * the lead's thread shows, the quiet line also says where the latest message is, and offers Resend for a dead one: the
+ * transcript doesn't. `via`: where the message goes, when it is not plainly "the lead" (the Scope tab's scoping thread).
  */
-export function Composer({ project, now, cos, busy, refetchAll, onFocus, compact = false }: { project: Project; now: number; cos: string; busy: boolean; refetchAll: () => void; onFocus: () => void; compact?: boolean }) {
+export function Composer({ project, now, cos, busy, refetchAll, onFocus, compact = false, via }: { project: Project; now: number; cos: string; busy: boolean; refetchAll: () => void; onFocus: () => void; compact?: boolean; via?: string }) {
   const slug = project.slug;
   useSyncExternalStore(subscribe, () => version);
   const draft = drafts.get(slug) ?? null;
@@ -269,9 +297,9 @@ export function Composer({ project, now, cos, busy, refetchAll, onFocus, compact
   const send = async () => {
     const t = text.trim();
     if (!t) return;
-    const body: z.input<typeof directMessageBody> = { slug, text: t, followUp: follow && followUp ? followUp.id : null };
+    const w = directWrite(slug, t, follow && followUp ? followUp.id : null);
     if (draft) setDraft(slug, { ...draft, sending: text });
-    const out = await write(WRITES.directMessage, body, { kind: "other", where: `lead:${slug}`, after: refetchAll });
+    const out = await write(w.path, w.body, { kind: "other", where: `lead:${slug}`, after: refetchAll });
     const cur = drafts.get(slug);
     if (!out?.ok) {
       if (cur?.sending) setDraft(slug, { ...cur, sending: null });
@@ -286,20 +314,24 @@ export function Composer({ project, now, cos, busy, refetchAll, onFocus, compact
     box.current?.focus(); // the Send button it was on is disabled now: back to the box, for the next message
   };
   const left = MAX - text.length;
-  const rules = `Goes to the ${project.slug} lead; the ${cos} gets a copy. Not an approval: merges, production changes and public pushes still need their card. No secrets here.`;
-  // compact (the detail, 2026-11-17): one line until typed in; the rules move to the box's title and the placeholder
-  // keeps "not an approval"; the follow-up switch shows once there is a draft to follow up with
-  const hint = !compact || (!!text && !!followUp) || left < 500;
+  const to = via ?? `Goes to the ${project.slug} lead`;
+  const rules = `${to}; the ${cos} gets a copy. Not an approval: merges, production changes and public pushes still need their card. No secrets here.`;
+  // the message states, while the lead's thread shows instead of the log (which shows them on each message)
+  const states = leadChatView(project.lead).kind === "thread" ? messageStates(project.direct, cos) : null;
+  // compact (the detail, 2026-11-17): the quiet line shows once typed in, or while a message needs a Resend; the
+  // follow-up switch once there is a draft to follow up with
+  const quiet = !compact || !!text || !!states?.dead.length;
+  const rows = Math.min(8, Math.max(compact && !text ? 1 : 2, text.split("\n").length));
   return (
     <div role="group" aria-label={`Message the ${project.slug} lead`} data-composer={project.slug} className={compact ? "compact" : undefined}>
-      <div className="compose">
+      <div className="k-input" onClick={(e) => (e.target as HTMLElement).closest("button, label, textarea") || box.current?.focus()}>
         <textarea
           ref={box}
           value={text}
           maxLength={MAX}
-          rows={compact && !text ? 1 : 2}
-          title={compact ? rules : undefined}
-          placeholder={compact ? `Message the ${project.slug} lead… (not an approval)` : `Message the ${project.slug} lead…`}
+          rows={rows}
+          title={rules}
+          placeholder={`Message the ${project.slug} lead… (not an approval)`}
           aria-label={`Message to lead:${project.slug}`}
           onFocus={onFocus}
           onChange={(e) => update(e.target.value)}
@@ -308,21 +340,37 @@ export function Composer({ project, now, cos, busy, refetchAll, onFocus, compact
             if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) void send();
           }}
         />
-        <button type="button" className="btn primary" data-direct-send={project.slug} disabled={busy || !text.trim()} onClick={() => void send()}>
-          Send to lead
-        </button>
+        <div className="k-input__bar">
+          {followUp && (!compact || text) ? (
+            <label className="k-input__follow" title={followUp.text}>
+              <input type="checkbox" checked={follow} onChange={(e) => update(text, e.target.checked)} data-direct-follow={followUp.id} />
+              a follow-up of your last message
+            </label>
+          ) : null}
+          <button type="button" className="btn primary k-input__send" data-direct-send={project.slug} disabled={busy || !text.trim()} title="Send (⌘/Ctrl+Enter)" onClick={() => void send()}>
+            Send to lead
+          </button>
+        </div>
       </div>
-      {hint ? (
-      <div className="hint">
-        {followUp && (!compact || text) ? (
-          <label title={followUp.text}>
-            <input type="checkbox" checked={follow} onChange={(e) => update(text, e.target.checked)} data-direct-follow={followUp.id} />
-            a follow-up of your last message
-          </label>
-        ) : null}
-        {compact ? null : rules}
-        {left < 500 ? ` ${left} characters left.` : ""}
-      </div>
+      {quiet ? (
+        <div className="k-input__hint" title={rules} data-composer-hint="">
+          {states?.dead.map((m) => (
+            <span key={m.id} data-direct-dead={m.id}>
+              <b className="warn">Your message of {age(m.at, now)} ago got no ack</b> and is with the {cos} ·{" "}
+              <button type="button" className="link" data-direct-resend={m.id} disabled={busy} onClick={() => resend(slug, m.id, refetchAll)}>
+                Resend
+              </button>
+              {" · "}
+            </span>
+          ))}
+          {states?.last ? (
+            <span data-direct-last={states.last.id} data-chat-state="">
+              Your last message: {states.last.word} ·{" "}
+            </span>
+          ) : null}
+          {to}; the {cos} gets a copy. Not an approval.
+          {left < 500 ? ` ${left} characters left.` : ""}
+        </div>
       ) : null}
     </div>
   );

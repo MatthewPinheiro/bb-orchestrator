@@ -279,6 +279,7 @@ export function ProjectBook({
   pinning,
   setPinning,
   busy,
+  refetchAll,
 }: {
   project: Project;
   lanes: Lane[] | undefined;
@@ -292,6 +293,8 @@ export function ProjectBook({
   pinning: boolean;
   setPinning: (x: boolean) => void;
   busy: boolean;
+  /** The page's reads, refetched after the thread cards' scoping switches (1.13.0); without it the cards draw no menu. */
+  refetchAll?: () => void;
 }) {
   const q = experimental_useRpcQuery({ contract: rpcContract, method: "projectBook", input: { slug: p.slug, dayStart: dayStart(now) } });
   const refetch = useRef(q.refetch);
@@ -355,7 +358,7 @@ export function ProjectBook({
       empty={!live.length}
       right={live.length > THREADS_SHOWN ? <AllButton n={live.length} open={allThreads} onClick={() => setAllThreads((x) => !x)} data-now-all={String(live.length)} /> : null}
     >
-      <ThreadCards lanes={lanes} now={now} owner={ownerName} openCard={openCard} all={allThreads} />
+      <ThreadCards lanes={lanes} now={now} owner={ownerName} openCard={openCard} all={allThreads} ctl={refetchAll && p.archivedAt === null ? { slug: p.slug, mode: p.mode, tasks: p.tasks ?? [], busy, refetchAll } : undefined} />
     </SectionCard>
   );
   const waitsCard = loose.length ? (

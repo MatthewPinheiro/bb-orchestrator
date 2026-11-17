@@ -13,7 +13,7 @@ import { useElementWidth } from "./panes.tsx";
 import { useEffect, useState, type MouseEvent } from "react";
 import type { z } from "zod";
 import { useBbNavigate } from "@get-bb/plugin-sdk/app";
-import { WRITES, type Agents, type Board, type NeedsYou, type Projects, type archiveProjectBody, type directMessageBody, type holdBody, type priorityBody, type roleStartBody, type startLeadBody } from "../contract.ts";
+import { WRITES, type Agents, type Board, type NeedsYou, type Projects, type archiveProjectBody, type directMessageBody, type holdBody, type priorityBody, type projectModeBody, type roleStartBody, type startLeadBody } from "../contract.ts";
 import { ASK_STATUS_TEXT, FILTERS, FILTER_WORD, attentionOrder, isQuiet, leadHead, matches, statusStale, waitLine, type Filter } from "./command-center.ts";
 import { ccCss } from "./cc-lines.tsx";
 import { ProjectRefs, RefsContext, refCss, type SharedRefs } from "./ref-text.tsx";
@@ -33,7 +33,7 @@ import { ProjectDetail } from "./project-detail.tsx";
 import { ProjectBook, bookCss } from "./project-book.tsx";
 import { SearchBox, SearchHits, searchCss } from "./search.tsx";
 import { filterHides, isWide, searchLoaded, searchedProjects } from "./source.ts";
-import { listRow, needCount, projectState, STATE_CHIP } from "./kit.ts";
+import { listRow, needCount, projectScopeAction, projectState, STATE_CHIP, tasksScoping } from "./kit.ts";
 import { Chip, Icon, kitCss } from "./kit-ui.tsx";
 import { threadCss } from "./thread-card.tsx";
 import { pinsCss } from "./pins.tsx";
@@ -69,8 +69,9 @@ function askStatusFor(project: Project, now: number, refetchAll: () => void): ((
 }
 
 /**
- * The ⋯ menu: pin a document, priority, hold and archive. On a narrow panel it also holds what has no button there: Ask for status and
+ * The ⋯ menu: pin a document, start or end scoping, priority, hold and archive. On a narrow panel it also holds what has no button there: Ask for status and
  * Start lead. (Message went on 2026-11-17: the composer is always open under the name of an open project.)
+ * Start/End scoping (1.13.0) is the owner's direct switch, with no card: orch_project_mode's own engine path.
  */
 function MoreMenu({ project, busy, refetchAll, narrow, onArchive, askStatus, askInMenu = false, onPin }: { project: Project; busy: boolean; refetchAll: () => void; narrow: boolean; onArchive: () => void; askStatus: (() => void) | null; askInMenu?: boolean; onPin?: () => void }) {
   const held = project.heldAt !== null;
@@ -87,12 +88,19 @@ function MoreMenu({ project, busy, refetchAll, narrow, onArchive, askStatus, ask
     const body: z.input<typeof startLeadBody> = { slug: project.slug };
     void write(WRITES.startLead, body, { kind: "other", where: `lead:${project.slug}`, after: refetchAll });
   };
+  const mode = projectScopeAction(project.mode);
+  const setMode = () => {
+    if (mode.kind !== "project") return;
+    const body: z.input<typeof projectModeBody> = { slug: project.slug, mode: mode.mode };
+    void write(WRITES.projectMode, body, { kind: "other", where: `lead:${project.slug}`, after: refetchAll });
+  };
   return (
     <DropdownMenu
       align="end"
       title={project.slug}
       items={[
         ...(onPin ? [{ label: "Pin a document…", icon: <Icon name="pin" />, disabled: busy, data: { "data-pin-document": project.slug }, onSelect: onPin }] : []),
+        { label: mode.label, icon: <Icon name="scope" />, disabled: busy, data: { "data-project-mode": mode.kind === "project" ? mode.mode : "" }, onSelect: setMode },
         ...(narrow && !project.lead ? [{ label: "Start lead", disabled: busy || held, data: { "data-start-lead": project.slug }, onSelect: startLead }] : []),
         ...((narrow || askInMenu) && askStatus ? [{ label: "Ask for status", disabled: busy, data: { "data-ask-status": project.slug }, onSelect: askStatus }] : []),
         {
@@ -299,6 +307,7 @@ function ListRow({ project, lanes, now, selected, quiet, onSelect }: { project: 
         {quiet ? null : (
           <div className="k-sub" data-list-state={r.state}>
             <Chip spec={r.chip} />
+            {tasksScoping(project) ? <Chip spec={STATE_CHIP.scoping} data-list-scoping={project.slug} title={tasksScoping(project)!} /> : null}
             {r.working ? <span>{r.working}</span> : null}
           </div>
         )}
@@ -350,6 +359,7 @@ function DetailPanel({ project, lanes, busy, refetchAll, openCard, onOpen, onPic
             </>
           )}
           <Chip spec={STATE_CHIP[st]} data-detail-state={st} title={held ? `on hold since ${when(project.heldAt)}` : undefined} />
+          {tasksScoping(project) ? <Chip spec={{ ...STATE_CHIP.scoping, word: tasksScoping(project)! }} data-detail-scoping={project.slug} /> : null}
           {forYou ? <Chip spec={{ tone: "need", icon: "you", word: `${forYou} for you` }} data-detail-for-you={String(forYou)} /> : null}
           <span className="acts">
             {project.lead ? null : (
@@ -379,6 +389,11 @@ function DetailPanel({ project, lanes, busy, refetchAll, openCard, onOpen, onPic
               }}
             />
           </div>
+        ) : project.direct?.messages.length ? (
+          // no lead running (none started, or archived): the direct-message log so far, read-only until Start lead
+          <div className="direct" data-direct-line={project.slug}>
+            <ChatLog project={project} now={now} cos={cosTitle} busy={busy} refetchAll={refetchAll} onPick={onPick} />
+          </div>
         ) : null}
         {held ? <div className="muted small">Mail to this lead is held until the project resumes.</div> : null}
         <PageError where={`lead:${project.slug}`} />
@@ -395,6 +410,7 @@ function DetailPanel({ project, lanes, busy, refetchAll, openCard, onOpen, onPic
           pinning={pinning}
           setPinning={setPinning}
           busy={busy}
+          refetchAll={refetchAll}
         />
       </ProjectRefs.Provider>
     </div>

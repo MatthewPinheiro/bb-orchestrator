@@ -9,7 +9,9 @@ import { MOOT_MIN_SHARED, sharedWords } from "./moot.ts";
 // mode (1.11.0): the project's mode changed (value = the new mode, address = its lead's, note = who, ref = the card).
 // scope-task (1.12.0): a scoping task opened or closed (value = its state, address = its lead's, note = its name, ref =
 // the "Scoping done?" card, else the task)
-export type EventKind = "spawn" | "status" | "pr" | "handoff" | "retire" | "resolve" | "lead-status" | "direct-answer" | "mode" | "scope-task";
+// scope-thread (1.13.0): the owner made a thread a task's scoping thread, or stopped it (value = scoping | stopped,
+// address and thread = the thread's, note = the task's name, ref = the task)
+export type EventKind = "spawn" | "status" | "pr" | "handoff" | "retire" | "resolve" | "lead-status" | "direct-answer" | "mode" | "scope-task" | "scope-thread";
 export interface EventIn {
   at: number;
   kind: EventKind;
@@ -272,6 +274,9 @@ export function buildHistory(x: HistoryInput): ProjectHistory {
       } else if (e.kind === "scope-task") {
         // drawn as the mode mark: a ring, filled once the task is done
         marks.push({ at: e.at, kind: "mode", label: `${e.value === "done" ? "scoping done" : e.value === "dropped" ? "scoping dropped" : "scoping"}: ${e.note ?? "a task"}`, url: null });
+      } else if (e.kind === "scope-thread") {
+        // on the thread's own row: when the owner made it a task's scoping thread, and when they stopped it
+        marks.push({ at: e.at, kind: "mode", label: `${e.value === "stopped" ? "scoping stopped" : "scoping thread"}: ${e.note ?? "a task"}`, url: null });
       }
     }
     // the current PR rows of its holders (a reading older than the log, or a draft that never changed)

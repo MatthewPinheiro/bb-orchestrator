@@ -286,8 +286,10 @@ test("the CoS's inbox and Needs you view list each open task with its project, n
   assert.ok(items(s, "cos", "copy").some((c) => c.ref === t.id && /opened scoping task/.test(c.body)), "the CoS heard the task open");
 });
 
-test("the scoping tasks migration is appended last, after 1.11.0's project mode, and an older database gains it", () => {
-  const last = MIGRATIONS.length - 1;
+test("the scoping tasks migration is appended after 1.11.0's project mode, and an older database gains it", () => {
+  // 1.13.0's scoped_at follows it (scoping-switches.test.ts), so it is found by what it creates, not as the last entry
+  const last = MIGRATIONS.findIndex((m) => /^CREATE TABLE scoping_tasks \(/.test(m));
+  assert.ok(last > 0);
   assert.match(MIGRATIONS[last]!, /^CREATE TABLE scoping_tasks \(/);
   assert.match(MIGRATIONS[last]!, /ALTER TABLE spawns ADD COLUMN scope_task TEXT$/);
   assert.match(MIGRATIONS[last - 1]!, /^ALTER TABLE projects ADD COLUMN mode /, "appended after 1.11.0's, never before it");

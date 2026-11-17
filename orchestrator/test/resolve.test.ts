@@ -51,7 +51,7 @@ async function host() {
   const remotes: string[] = []; // none: a local-only repo
   const cap = { n: 1000 };
   const prs: Record<string, unknown> = {}; // no PR: this project merges locally
-  const rec = { archived: [] as string[], hidden: [] as string[], stopped: [] as string[] };
+  const rec = { archived: [] as string[], hidden: [] as string[], stopped: [] as string[], prompts: [] as string[] };
   const tools = new Map<string, Tool>();
   let cliRun: ((argv: string[], ctx: { threadId: string | null; cwd: string | null }) => Promise<{ exitCode: number; stdout: string; stderr?: string }>) | null = null;
   const noop: any = new Proxy(function () {}, { get: (_t, k) => (k === "then" ? undefined : noop), apply: () => noop });
@@ -73,7 +73,8 @@ async function host() {
         return {};
       },
       stop: async ({ threadId }: { threadId: string }) => void rec.stopped.push(threadId),
-      spawn: async () => {
+      spawn: async ({ prompt }: { prompt: string }) => {
+        rec.prompts.push(prompt);
         th("T-succ", "E1");
         return { id: "T-succ" };
       },
@@ -200,9 +201,38 @@ test("a handoff hides its predecessor at once; resolving the successor archives 
   assert.deepEqual(h.rec.stopped, ["T-w"]);
   assert.deepEqual(h.rec.hidden, ["T-w"], "the stopped predecessor leaves the sidebar now, not at resolve");
   assert.deepEqual(h.rec.archived, [], "and is not archived: it shares the successor's worktree");
+  assert.doesNotMatch(h.rec.prompts[0]!, /scoping thread/, "a thread started for no scoping task isn't told it is one");
   const res = await h.call("orch_resolve", { to: "thread:demo:1" });
   assert.match(res, /Archived T-w, T-succ/);
   assert.deepEqual(h.rec.archived, ["T-w", "T-succ"]);
+});
+
+// 1.13.0: a scoping thread handed to another provider must still know it is one (read-only, questions to its lead,
+// findings in one file); without the section the successor would take the handoff file as build work.
+test("a handoff of a scoping thread keeps the scoping text in its successor's prompt, and the successor plans the task", async () => {
+  const h = await host();
+  const lead = h.pre.agentByThread("T-lead")!;
+  const t = h.pre.openTask(lead, "Export format");
+  h.db.prepare(`INSERT INTO spawns (thread_id, plan_id, via, lead, created_at, scope_task) VALUES ('T-w', NULL, 'plan', 'lead:demo', ?, ?)`).run(Date.now(), t.id);
+  assert.equal(h.pre.taskPlanner(t.id)?.threadId, "T-w");
+  writeFileSync(join(h.worktree, "handoff-2026-11-14.md"), "# handoff\n");
+  assert.match(await h.call("orch_handoff", { to: "thread:demo:1", file: "handoff-2026-11-14.md", provider: "codex" }), /T-w is stopped/);
+  const prompt = h.rec.prompts[0]!;
+  assert.match(prompt, /^You take over thread:demo:1 \(from thread T-w\)/, "the takeover text comes first");
+  assert.match(prompt, new RegExp(`## You are the scoping thread for demo's task "Export format" \\(${t.id}\\)`));
+  assert.match(prompt, /read-only investigation/);
+  assert.equal(h.pre.taskPlanner(t.id)?.threadId, "T-succ", "the planner the owner sees moves to the successor");
+});
+
+test("a handoff of a thread whose scoping task is closed gets no scoping text", async () => {
+  const h = await host();
+  const lead = h.pre.agentByThread("T-lead")!;
+  const t = h.pre.openTask(lead, "Export format");
+  h.db.prepare(`INSERT INTO spawns (thread_id, plan_id, via, lead, created_at, scope_task) VALUES ('T-w', NULL, 'plan', 'lead:demo', ?, ?)`).run(Date.now(), t.id);
+  h.pre.dropTask(lead, t.id);
+  writeFileSync(join(h.worktree, "handoff-2026-11-14.md"), "# handoff\n");
+  await h.call("orch_handoff", { to: "thread:demo:1", file: "handoff-2026-11-14.md", provider: "codex" });
+  assert.doesNotMatch(h.rec.prompts[0]!, /scoping thread/, "the task is over: the thread is an ordinary one now");
 });
 
 test("the sweep lists retired threads clean or dirty, refuses agents, and --apply hides predecessors and archives the clean", async () => {

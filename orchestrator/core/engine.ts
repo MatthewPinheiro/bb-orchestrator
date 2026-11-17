@@ -3190,8 +3190,12 @@ export class Engine {
    */
   openTask(by: Agent, name: string): ScopingTask {
     if (by.role !== "lead" || !by.project) throw new EngineError("forbidden", "only a lead opens a scoping task");
+    return this.openTaskIn(by.project, name, by.address);
+  }
+
+  /** Open a scoping task in `slug`, by a lead's address or "person" (the owner, from the Projects view: ownerScopeThread). */
+  private openTaskIn(slug: string, name: string, by: string): ScopingTask {
     const n = oneLine(String(name ?? ""), SCOPING_TASK_NAME_MAX, "the task's name");
-    const slug = by.project;
     return tx(this.db, () => {
       const p = this.project(slug);
       if (!p) throw new EngineError("not_found", `no project ${slug}`);
@@ -3199,12 +3203,12 @@ export class Engine {
       const dup = this.db.prepare(`SELECT id FROM scoping_tasks WHERE project = ? AND state = 'scoping' AND name = ? COLLATE NOCASE`).get(slug, n) as { id: string } | undefined;
       if (dup) throw new EngineError("conflict", `${slug} already has an open scoping task ${JSON.stringify(n)} (${dup.id}): file into it, or pick another name`);
       const id = `st-${hex(4)}`;
-      this.db.prepare(`INSERT INTO scoping_tasks (id, project, name, state, opened_by, opened_at) VALUES (?, ?, ?, 'scoping', ?, ?)`).run(id, slug, n, by.address, this.now());
+      this.db.prepare(`INSERT INTO scoping_tasks (id, project, name, state, opened_by, opened_at) VALUES (?, ?, ?, 'scoping', ?, ?)`).run(id, slug, n, by, this.now());
       this.event({ kind: "scope-task", project: slug, address: `lead:${slug}`, threadId: null, value: "scoping", note: n, ref: id });
       const o = this.owner;
-      const what = `${by.address} opened scoping task ${id} ${JSON.stringify(n)} in ${slug}: the cards and deliverables it files with that task go only to ${o.name}'s Scope pane, under the task, and no standing rule settles them. The rest of ${slug} goes the normal way.`;
-      this.boardAdd("notice", by.address, slug, `${slug}: scoping task ${JSON.stringify(n)}`, what, id);
-      if (this.agentByAddress("cos")) this.put({ recipient: "cos", sender: by.address, kind: "copy", ref: id, body: `${what} You get read-only copies of them (don't triage, settle, merge or moot them).`, key: `scope-task-copy:${id}:scoping`, needsAck: false });
+      const what = `${by === "person" ? o.Name : by} opened scoping task ${id} ${JSON.stringify(n)} in ${slug}: the cards and deliverables filed with that task go only to ${o.name}'s Scope pane, under the task, and no standing rule settles them. The rest of ${slug} goes the normal way.`;
+      this.boardAdd("notice", by, slug, `${slug}: scoping task ${JSON.stringify(n)}`, what, id);
+      if (this.agentByAddress("cos")) this.put({ recipient: "cos", sender: by, kind: "copy", ref: id, body: `${what} You get read-only copies of them (don't triage, settle, merge or moot them).`, key: `scope-task-copy:${id}:scoping`, needsAck: false });
       this.ports.changed();
       return this.task(id)!;
     });
@@ -3256,6 +3260,113 @@ export class Engine {
       return t?.state === "scoping" ? t : null;
     }
     return null;
+  }
+
+  /**
+   * Who plans an open scoping task (1.13.0): its scoping thread (the newest live thread orch_spawn_thread started with
+   * the task or the owner picked for it; a handoff moves the spawn row to the successor), or null while the lead plans it itself. A stopped or
+   * archived thread plans nothing. The owner's Scope tab and the lead's inbox both read this, so they say the same.
+   */
+  taskPlanner(taskId: string): Agent | null {
+    const r = this.db
+      .prepare(`SELECT a.thread_id FROM spawns s JOIN agents a ON a.thread_id = s.thread_id WHERE s.scope_task = ? AND a.retired_at IS NULL AND a.role = 'thread' AND a.status NOT IN ('stopped', 'archived') ORDER BY COALESCE(s.scoped_at, s.created_at) DESC, s.rowid DESC LIMIT 1`)
+      .get(taskId) as { thread_id: string } | undefined;
+    return r ? this.agentByThread(r.thread_id) : null;
+  }
+
+  /** The open scoping task a thread was started for (orch_spawn_thread scope_task), or null: what its handoff must carry on. */
+  scopingTaskOfThread(threadId: string): ScopingTask | null {
+    const r = this.db.prepare(`SELECT scope_task FROM spawns WHERE thread_id = ?`).get(threadId) as { scope_task: string | null } | undefined;
+    const t = r?.scope_task ? this.task(r.scope_task) : null;
+    return t?.state === "scoping" ? t : null;
+  }
+
+  /**
+   * The owner makes a thread a scoping thread from the Projects view (1.13.0): of an open task of its project (`task`, its
+   * id or name), or of a new one they open for it (`name`, through openTask's own path). Its spawn row names the task, as
+   * orch_spawn_thread's scope_task does, so the cards its lead forwards from it go to the Scope pane under the task; the
+   * owner's pick plans the task (taskPlanner). The thread is told to investigate read-only, the lead which thread plans
+   * which task, and the CoS gets a copy; a timeline event and a board notice record it. Refused for anything but a live
+   * thread of a live project. Already that task's scoping thread: a no-op.
+   */
+  ownerScopeThread(threadId: string, pick: { task?: string | null; name?: string | null }): { task: ScopingTask; opened: boolean; changed: boolean } {
+    return tx(this.db, () => {
+      const a = this.scopableThread(threadId);
+      const slug = a.project!;
+      const key = String(pick.task ?? "").trim();
+      const fresh = String(pick.name ?? "").trim();
+      if (!key === !fresh) throw new EngineError("invalid", "give task (an open scoping task's id or name) or name (a new task), not both");
+      let t: ScopingTask;
+      if (key) {
+        const byName = this.db.prepare(`SELECT * FROM scoping_tasks WHERE project = ? AND name = ? COLLATE NOCASE AND state = 'scoping'`).get(slug, key) as TaskRow | undefined;
+        const found = this.task(key) ?? (byName ? toTask(byName) : null);
+        if (!found || found.project !== slug) throw new EngineError("not_found", `${slug} has no scoping task ${JSON.stringify(key)}`);
+        if (found.state !== "scoping") throw new EngineError("bad_state", `scoping task ${found.id} ${JSON.stringify(found.name)} is ${found.state}, not open`);
+        t = found;
+      } else t = this.openTaskIn(slug, fresh, "person");
+      const prev = this.scopingTaskOfThread(threadId);
+      if (prev?.id === t.id) return { task: t, opened: false, changed: false };
+      const now = this.now();
+      if (this.hasSpawn(threadId)) this.db.prepare(`UPDATE spawns SET scope_task = ?, scoped_at = ? WHERE thread_id = ?`).run(t.id, now, threadId);
+      // a thread no plan started (adopted, or a lead's own bb child) has no row yet: the owner's pick is its record
+      else this.db.prepare(`INSERT INTO spawns (thread_id, plan_id, via, lead, created_at, scope_task, scoped_at) VALUES (?, NULL, 'scope', NULL, ?, ?, ?)`).run(threadId, now, t.id, now);
+      this.event({ kind: "scope-thread", project: slug, address: a.address, threadId, value: "scoping", note: t.name, ref: t.id });
+      const o = this.owner;
+      const name = `task ${JSON.stringify(t.name)} (${t.id})`;
+      const left = prev ? ` It no longer scopes task ${JSON.stringify(prev.name)} (${prev.id}): ${this.plannerWords(prev.id)} plans that one now.` : "";
+      const what = `${o.Name} made ${a.address} the scoping thread for ${slug}'s ${name}${key ? "" : ", a task they opened for it"}: it plans that task now, and the questions from it that the lead forwards go to ${o.name}'s Scope pane under the task. It was told to investigate read-only and make no changes.${left}`;
+      this.boardAdd("notice", "person", slug, `${slug}: ${a.address} scopes ${JSON.stringify(t.name)}`, what, t.id);
+      this.put({ recipient: a.address, sender: "person", kind: "notice", ref: t.id, body: `You are now the scoping thread for ${name} in ${slug}. Investigate read-only and make no changes. Your questions and findings go to your lead.`, key: `scope-thread:${threadId}:${t.id}:${now}`, needsAck: false });
+      if (this.liveAt(`lead:${slug}`)) this.put({ recipient: `lead:${slug}`, sender: "person", kind: "notice", ref: t.id, body: what, key: `scope-thread-lead:${threadId}:${t.id}:${now}`, needsAck: false });
+      if (this.agentByAddress("cos")) this.put({ recipient: "cos", sender: "person", kind: "copy", ref: t.id, body: what, key: `scope-thread-copy:${threadId}:${t.id}:${now}`, needsAck: false });
+      this.ports.changed();
+      return { task: t, opened: !key, changed: true };
+    });
+  }
+
+  /**
+   * The owner's "Stop scoping" on a thread (1.13.0): it is no longer its task's scoping thread, and the cards its lead
+   * forwards from it go the normal way again. The task stays open, planned by the lead (or by another live scoping thread
+   * of it); dropping it is the lead's. The thread, the lead and the CoS are told; a timeline event records it. A thread
+   * that scopes no open task: a no-op (null).
+   */
+  ownerUnscopeThread(threadId: string): ScopingTask | null {
+    return tx(this.db, () => {
+      const a = this.scopableThread(threadId);
+      const slug = a.project!;
+      const t = this.scopingTaskOfThread(threadId);
+      if (!t) return null;
+      const now = this.now();
+      // the row stays (a plan's row still holds its slot); only the task goes
+      this.db.prepare(`UPDATE spawns SET scope_task = NULL, scoped_at = NULL WHERE thread_id = ?`).run(threadId);
+      this.event({ kind: "scope-thread", project: slug, address: a.address, threadId, value: "stopped", note: t.name, ref: t.id });
+      const o = this.owner;
+      const name = `task ${JSON.stringify(t.name)} (${t.id})`;
+      const what = `${o.Name} stopped ${a.address} scoping ${slug}'s ${name}: ${this.plannerWords(t.id)} plans it now. The task stays open (drop it with orch_scope_task if it isn't needed), and the questions from ${a.address} that the lead forwards go the normal way again.`;
+      this.boardAdd("notice", "person", slug, `${slug}: ${a.address} stopped scoping ${JSON.stringify(t.name)}`, what, t.id);
+      this.put({ recipient: a.address, sender: "person", kind: "notice", ref: t.id, body: `${o.Name} stopped your scoping: you are no longer the scoping thread for ${name}. Your questions go to your lead the normal way; ask it before you change anything.`, key: `unscope-thread:${threadId}:${t.id}:${now}`, needsAck: false });
+      if (this.liveAt(`lead:${slug}`)) this.put({ recipient: `lead:${slug}`, sender: "person", kind: "notice", ref: t.id, body: what, key: `unscope-thread-lead:${threadId}:${t.id}:${now}`, needsAck: false });
+      if (this.agentByAddress("cos")) this.put({ recipient: "cos", sender: "person", kind: "copy", ref: t.id, body: what, key: `unscope-thread-copy:${threadId}:${t.id}:${now}`, needsAck: false });
+      this.ports.changed();
+      return t;
+    });
+  }
+
+  /** A thread the owner may switch to scoping or back: live (not stopped or archived), of a live project. */
+  private scopableThread(threadId: string): Agent {
+    const a = this.agentByThread(threadId);
+    if (!a) throw new EngineError("not_found", `no live agent on thread ${threadId}`);
+    if (a.role !== "thread" || !a.project) throw new EngineError("forbidden", `${a.address} isn't a project's thread: only a thread scopes a task (a lead's whole project scopes with Start scoping)`);
+    if (a.status === "stopped" || a.status === "archived") throw new EngineError("bad_state", `${a.address} is ${a.status}`);
+    const p = this.project(a.project);
+    if (!p || p.archivedAt) throw new EngineError("bad_state", `${a.project} is archived`);
+    return a;
+  }
+
+  /** Who plans an open task, in messages: "its scoping thread <address>", else "the lead". */
+  private plannerWords(taskId: string): string {
+    const by = this.taskPlanner(taskId);
+    return by ? `its scoping thread ${by.address}` : "the lead";
   }
 
   /** Why a card or deliverable waits in the Scope pane, as messages say it: its scoping task, else its project scoping. */
@@ -4425,7 +4536,13 @@ export class Engine {
     const tasks = proj && a.role === "lead" ? this.openTasks(proj.slug) : [];
     if (tasks.length)
       lines.push(
-        `Open scoping tasks (${tasks.length}): ${tasks.map((t) => `${t.id} ${JSON.stringify(t.name)}`).join(", ")}. What you file with scope_task=<id> (orch_ask, orch_forward, orch_deliver) goes only to ${this.owner.name}'s Scope pane under it; orch_ask(scoping_done={summary, doc, task}) proposes closing one.`,
+        `Open scoping tasks (${tasks.length}): ${tasks
+          .map((t) => {
+            // its planner, as the owner's Scope tab names it
+            const by = this.taskPlanner(t.id);
+            return `${t.id} ${JSON.stringify(t.name)} (planned by ${by ? `its scoping thread ${by.address}` : "you"})`;
+          })
+          .join(", ")}. What you file with scope_task=<id> (orch_ask, orch_forward, orch_deliver) goes only to ${this.owner.name}'s Scope pane under it; orch_ask(scoping_done={summary, doc, task}) proposes closing one.`,
       );
     lines.push(items.length ? `Open items (${items.length}); use orch_inbox(id=<item id>) for full text and references:` : "No open items.");
     for (const it of items) {
