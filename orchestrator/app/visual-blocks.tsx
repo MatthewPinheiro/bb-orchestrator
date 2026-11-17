@@ -8,6 +8,7 @@ import type { Block, Point } from "../blocks.ts";
 import { Badge } from "./affect/badge-clean.tsx";
 import { css as changeSummaryCss } from "./affect/change-summary-clean.tsx";
 import { BOX_W, BOX_W_MAX, layout } from "./diagram-layout.ts";
+import { ProofLink } from "./proof-link.tsx";
 
 type B<K extends Block["kind"]> = Extract<Block, { kind: K }>;
 
@@ -177,7 +178,7 @@ export function Verdicts({ b }: { b: B<"verdicts"> }) {
         </div>
         <div className="orch-verdicts__tiles">
           {b.items.map((v, i) => (
-            <a key={i} href={v.url} target="_blank" rel="noopener noreferrer" data-verdict={prNo(v.url) ?? i} className="orch-shot orch-verdicts__tile">
+            <ProofLink key={i} open={{ url: v.url }} data-verdict={prNo(v.url) ?? i} className="orch-shot orch-verdicts__tile">
               <span className="orch-verdicts__no">{prNo(v.url) ? `#${prNo(v.url)}` : "PR"}</span>
               <span className="orch-panel__sub">{v.name}</span>
               <span>
@@ -185,7 +186,7 @@ export function Verdicts({ b }: { b: B<"verdicts"> }) {
                   {v.verdict}
                 </Badge>
               </span>
-            </a>
+            </ProofLink>
           ))}
         </div>
       </div>

@@ -34,11 +34,11 @@ test("Use sets one machine variable (prod only with its name), Off deletes it, a
     };
     registerCloud(bb as never, () => ({ gcpLoginConfig: "", cloudConfigPath: "~/.config/bb-cloud-switch/config.json" }));
     const config = readFileSync(box.awsConfig);
-    // the orchestrator shows its Cloud tab only on a machine with a cloud config
-    assert.deepEqual(await page["cs.available"](null), { available: true });
+    // the Cloud tab shows CloudView only on a machine with a cloud config; without one it names the path it looked for
+    assert.deepEqual(await page["cs.available"](null), { available: true, state: "ok", path: box.configFile });
     const none: typeof page = {};
     registerCloud({ ...bb, rpc: { register: (_c: unknown, h: typeof page) => Object.assign(none, h) } } as never, () => ({ gcpLoginConfig: "", cloudConfigPath: "~/no-such-cloud-config.json" }));
-    assert.deepEqual(await none["cs.available"](null), { available: false }, "no config file: no Cloud tab");
+    assert.deepEqual(await none["cs.available"](null), { available: false, state: "missing", path: join(box.env.HOME!, "no-such-cloud-config.json") }, "no config file: the tab says where to put one");
 
     const v0 = await page["cs.view"]({ hostId: null });
     assert.equal(v0.error, null);

@@ -302,6 +302,21 @@ export const MIGRATIONS: string[] = [
      due_at INTEGER,
      UNIQUE(source, external_id)
    )`,
+  // The Projects tab as a source of truth (2026-11-16, core/book.ts): the owner's answers on one project, newest first
+  // (Decided), and every answer after a time (the search's window; what can cover a blocker, history.ts). Expression
+  // indexes: a query uses them only when it repeats json_extract(json, '$.answer.at') exactly. And the cards by state:
+  // the row summaries read the open ones on every refresh (padded to 100k cards, that read halves with it).
+  `CREATE INDEX decisions_project_answer ON decisions (project, json_extract(json, '$.answer.at'));
+   CREATE INDEX decisions_answer_at ON decisions (json_extract(json, '$.answer.at'));
+   CREATE INDEX decisions_state ON decisions (state)`,
+  // The book's other reads (core/book.ts, Codex review v3): a project's events of one kind newest first (its
+  // lead-status history, its merges), its deliverables and its board by time.
+  // Without them a sparse kind walks the project's whole log, the reports scan the board and the deliverables sort.
+  // And each merged PR's sightings by its URL: a merge counts at its first sighting, looked up here (only merge rows).
+  `CREATE INDEX events_project_kind ON events (project, kind, at);
+   CREATE INDEX deliverables_project ON deliverables (project, updated_at);
+   CREATE INDEX board_project ON board (project, at);
+   CREATE INDEX events_merged_ref ON events (ref, project, at) WHERE kind = 'pr' AND value = 'merged'`,
 ];
 
 export function migrate(db: Db): void {

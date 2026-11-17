@@ -11,13 +11,13 @@ The same core ships as a `cloud` CLI (`cloud ls`, `cloud use aws <profile>`, `cl
 
 ## Turning it on
 
-It comes with the Orchestrator plugin. The tab appears once the machine has a config file (below), and it needs the `aws` CLI v2 and/or `gcloud` on the machine.
+It comes with the Orchestrator plugin, and the tab is always there. Until the machine has a config file (below), the tab says which path it looked for and what to put there. It also needs the `aws` CLI v2 and/or `gcloud` on the machine.
 
 ## Config file
 
 Cloud Switch decides whether a target is dev or prod, and which PIM groups gate it, from a JSON file on the machine. The default path is `~/.config/bb-cloud-switch/config.json`. To use another path, set the Orchestrator's **Cloud tab config file** setting, or for the CLI, `CLOUD_SWITCH_CONFIG`.
 
-If the file is missing, the Cloud tab stays hidden (a CLI call treats every account and project counts as "env unknown", so every use and login asks you to confirm). The tab ignores an invalid file in the same way and shows what is wrong with it.
+If the file is missing, the Cloud tab shows only that message (a CLI call treats every account and project counts as "env unknown", so every use and login asks you to confirm). The tab ignores an invalid file in the same way and shows what is wrong with it.
 
 ```sh
 mkdir -p ~/.config/bb-cloud-switch && chmod 700 ~/.config/bb-cloud-switch

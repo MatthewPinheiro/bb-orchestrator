@@ -43,7 +43,7 @@ read and acknowledge them before opting into legacy mode. See
 ## Addresses
 
 `cos`, `steward`, `lead:<project>`, `thread:<project>:<n>`. The owner (the person the orchestrator works for) is not an address: they answer only
-from the app's Needs you page.
+from the app's Needs you page, and write to a lead only from its Projects row (a direct message, below).
 
 ## Rules of the road
 
@@ -76,6 +76,16 @@ from the app's Needs you page.
 - **A lead publishes its status** with `orch_status` when it starts, at each step change and whenever what it waits on
   changes: goal, numbered steps (at most one `current`), `waiting_on` and blockers. It is the step bar on the project
   page; after 2 h without one it shows as stale, and the lead is reminded once per change in its project since then.
+- **The owner's direct message to a lead** (`[orchestrator] direct message <id> from <owner>`, kind `owner.message`)
+  comes from the Projects tab and states its own rules. The lead answers only with `orch_ack(id, outcome, note)`, at
+  once even for long work: the note is what the owner reads on the row (`done` means taken; say whether it is
+  finished), and the CoS gets a read-only copy of the message and the note. For 48 h it wins on its point over a CoS
+  instruction, earlier or later; only the owner's own later word (another direct message, or a card they answer)
+  changes it. If the CoS says the owner changed their mind, the lead files one card with both instructions as options,
+  says in its note what it set aside, and tells the CoS. `orch_inbox` lists those still in force. It is never an
+  approval: a merge, a production change or a public push still needs its own card citing the message id; the engine
+  refuses a `pr`/`when` ack on it, and the CoS can resend or escalate a dead one but never re-route or close it. On
+  hold it waits without expiring; if the lead retires it passes to the next lead.
 - **Context is never cleared.** The plugin never clears an agent's context; Claude Code's auto-compaction handles it (`cosCompactTokens` is an opt-in, off by default, and it sends `/compact`). One deliberate exception that is not a clear: `orch_handoff` (the Claude↔Codex swap) starts a fresh successor session from the handoff file, in the same worktree, on purpose. Don't change it, and don't use it to shed context.
 - **Recovery:** after a compaction or restart, `orch_inbox` (or `bb orchestrator inbox`) lists everything open.
 

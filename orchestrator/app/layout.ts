@@ -114,6 +114,9 @@ export function pathFor(viewSubPath: string, view: string, detail: string | null
 }
 
 /** `renamed`: views that went or moved (old id → new id), so a saved pane on one keeps its place. */
+/** Tabs that went into another, by old id (links, saved layouts): Agents into Projects, Outputs into Deliverables (2026-11-16). */
+export const RENAMED_VIEWS: Record<string, string> = { agents: "projects", outputs: "deliverables" };
+
 export function parse(raw: unknown, views: readonly string[], renamed: Record<string, string> = {}): Layout | null {
   const ids = new Set<string>();
   const node = (n: unknown, depth: number): Node | null => {

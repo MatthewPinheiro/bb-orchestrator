@@ -6,7 +6,7 @@ import { SegmentedControl } from "./affect/segmented-control-clean.tsx";
 import { MAX_PANES, panes, type Layout, type Node, type Pane } from "./layout.ts";
 import { Btn, cx } from "./ui.tsx";
 
-export type ViewDef = { id: string; label: string; count?: number };
+export type ViewDef = { id: string; label: string; count?: number | string };
 
 export function useWidth(ref: RefObject<HTMLElement | null>): number {
   const [w, setW] = useState(0);
@@ -28,6 +28,8 @@ type Props = {
   render: (view: string, pane: { id: string; width: number }) => ReactNode;
   /** Views that fill the pane themselves (the chat): no padding, no page scroll */
   fill: (view: string) => boolean;
+  /** Views that use the pane's whole width (Projects, layout B: the list beside the project), not the reading column */
+  wide?: (view: string) => boolean;
   onView: (paneId: string, view: string) => void;
   onFocus: (paneId: string) => void;
   onSplit: (paneId: string, dir: "row" | "col") => void;
@@ -116,11 +118,12 @@ const CloseIcon = () => (
   </svg>
 );
 
-function PaneView({ pane, views, render, fill, onView, onFocus, onSplit, onClose, layout, many, canSplit }: Inner & { pane: Pane }) {
+function PaneView({ pane, views, render, fill, wide, onView, onFocus, onSplit, onClose, layout, many, canSplit }: Inner & { pane: Pane }) {
   const ref = useRef<HTMLElement>(null);
   const width = useWidth(ref);
   const focused = layout.focus === pane.id;
   const fills = fill(pane.view);
+  const column = wide?.(pane.view) ? "w-full" : "mx-auto w-full max-w-3xl";
   return (
     <section
       ref={ref}
@@ -132,7 +135,7 @@ function PaneView({ pane, views, render, fill, onView, onFocus, onSplit, onClose
         if (!focused) onFocus(pane.id);
       }}
     >
-      <header className={cx("flex shrink-0 items-center gap-1", many ? "px-2 pt-2" : "mx-auto w-full max-w-3xl px-4 pt-4")}>
+      <header className={cx("flex shrink-0 items-center gap-1", many ? "px-2 pt-2" : `${column} px-4 pt-4`)}>
         <div className="min-w-0 flex-1">
           <SegmentedControl kind="tabs" variant="tray" size="sm" value={pane.view} options={views.map((v) => ({ value: v.id, label: v.label, count: v.count }))} onChange={(id) => onView(pane.id, id)} />
         </div>
@@ -156,7 +159,7 @@ function PaneView({ pane, views, render, fill, onView, onFocus, onSplit, onClose
         <div className="flex min-h-0 flex-1 flex-col pt-2">{render(pane.view, { id: pane.id, width })}</div>
       ) : (
         <div className="min-h-0 flex-1 overflow-y-auto">
-          <div className={cx("mx-auto w-full max-w-3xl pb-8", many ? "px-3 pt-3" : "px-4 pt-4")}>{render(pane.view, { id: pane.id, width })}</div>
+          <div className={cx(column, "pb-8", many ? "px-3 pt-3" : "px-4 pt-4")}>{render(pane.view, { id: pane.id, width })}</div>
         </div>
       )}
     </section>

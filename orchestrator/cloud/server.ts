@@ -38,12 +38,14 @@ export function registerCloud(bb: BbPluginApi, settings: () => CloudSettings) {
   const current = async () => activeFrom(readRecord(recPath), await bb.sdk.system.machineEnvironment());
 
   bb.rpc.register(pageContract, {
-    // whether the Cloud tab shows: the first connected machine has a cloud config (a broken one shows, to say so)
+    // whether the Cloud tab shows CloudView: the first connected machine has a cloud config (a broken one shows, to say
+    // so). The tab itself is always listed; without a config it names the path it looked for (cloud/core/setup.ts).
     "cs.available": async () => {
       const id = (await hosts())[0]?.id;
-      if (!id) return { available: false };
+      if (!id) return { available: false, state: "no-machine" as const, path: null };
       const c = await host.call("cs.config", { configPath: opts().configPath }, { hostId: id }).catch(() => null);
-      return { available: !!c && c.state !== "missing" };
+      if (!c) return { available: false, state: "error" as const, path: null };
+      return { available: c.state !== "missing", state: c.state, path: c.path };
     },
     "cs.view": async ({ hostId }) => {
       const { loginConfig, configPath } = opts();

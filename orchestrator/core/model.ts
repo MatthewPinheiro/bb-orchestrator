@@ -16,6 +16,7 @@ export interface Agent {
   idleAt: number | null;
   environmentId: string | null;
   mon: string | null; // its Pokémon (mons.ts)
+  monPin: { stage: number; level: number } | null; // a stage kept through a change of Pokémon (mons.ts StagePin)
   flags: string; // comma list: "unplanned"
 }
 
@@ -136,6 +137,7 @@ export interface Decision {
 
 export type ItemKind =
   | "message"
+  | "owner.message" // the owner's direct message to a lead from its Projects row (2026-11-16), answered by an ack note
   | "copy"
   | "decision.new"
   | "decision.answer"

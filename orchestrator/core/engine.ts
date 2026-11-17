@@ -8,7 +8,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { realpathSync, statSync } from "node:fs";
 import { extname, isAbsolute, sep } from "node:path";
 import { type Db, migrate, tx } from "./db.ts";
-import { MON_POOLS, formAt, levelFor, pickMon } from "../mons.ts";
+import { MON_POOLS, familyThreads, formAt, levelFor, monByName, pickMon, pickType, shownStage, typeFamily, type Mon, type MonType } from "../mons.ts";
 import { blocksSchema, pointsSchema, type Block, type Point } from "../blocks.ts";
 import { ownerWords, type OwnerWords } from "./owner.ts";
 import type { Verdict } from "./clean.ts";
@@ -16,8 +16,10 @@ import { externalBody, externalMailSchema, externalPreview, type ExternalMail } 
 import type { StartedBy } from "./start.ts";
 import { MOOT_MIN_SHARED, MOOT_WINDOW_MS, sharedWords } from "./moot.ts";
 import { cardRefusal } from "./caps.ts";
-import { type LeadStatus, normalizeStatus, type StatusParams, STATUS_STALE_MS, statusLine } from "./status.ts";
-import { backfillEvents, buildHistory, logEvent, logSince, type DecisionLite, type EventIn, type EventRow, type HistoryInput, type ProjectHistory } from "./history.ts";
+import { type LeadStatus, normalizeStatus, sameWait, type StatusParams, STATUS_STALE_MS, statusLine } from "./status.ts";
+import { backfillEvents, buildHistory, buildSummary, logEvent, logSince, SUMMARY_DONE_MS, type DecisionLite, type EventIn, type EventRow, type HistoryInput, type ProjectHistory, type ProjectSummary, type SummaryInput } from "./history.ts";
+import { waitsOf } from "./status.ts";
+import { SUMMARY_ANSWERED_SQL, projectBook, searchAnswered, type CardHit, type ProjectBook } from "./book.ts";
 
 type HistoryAgent = HistoryInput["agents"][number];
 import { type RuleMatch, type Shape, allowFrom, matchRule, offerFor, ownerPick, shapeOf, words } from "./rules.ts";
@@ -33,6 +35,15 @@ export const WAIT_WHEN = ["approved", "green", "ready", "merged"] as const;
 export type WaitWhen = (typeof WAIT_WHEN)[number];
 /** How often the CoS gets the stale-thread list at most, and how long idle (or silent) counts as stale. */
 export const STALE_WAKE_MS = 24 * 3_600_000;
+/** A project's direct line on the Projects row (contract.ts directLineSchema). */
+export interface DirectLine {
+  messages: { id: string; text: string; at: number; followUp: string | null; state: string; outcome: string | null; note: string | null; answeredAt: number | null; unread: boolean }[];
+  unread: boolean;
+}
+/** For this long the owner's direct word wins on its point over a CoS instruction, earlier or later (PLAN 3.6). */
+export const DIRECT_IN_FORCE_MS = 48 * 3_600_000;
+/** The most of a project's direct thread the Projects row reads. */
+export const DIRECT_SHOWN = 4;
 const WHEN_WORDS: Record<WaitWhen, string> = { approved: "approved", green: "green (checks passing)", ready: "ready to merge", merged: "merged" };
 /** How far apart a handoff's retire and its successor's start may lie (two clock reads before 1.2.0). */
 const HANDOFF_GAP_MS = 1000;
@@ -173,6 +184,8 @@ interface AgentRow {
   idle_at: number | null;
   environment_id: string | null;
   mon: string | null;
+  mon_stage: number | null;
+  mon_stage_level: number | null;
   flags: string;
 }
 const toAgent = (r: AgentRow, pokemon: boolean): Agent => ({
@@ -185,6 +198,7 @@ const toAgent = (r: AgentRow, pokemon: boolean): Agent => ({
   idleAt: r.idle_at,
   environmentId: r.environment_id ?? null,
   mon: pokemon ? (r.mon ?? null) : null,
+  monPin: pokemon && r.mon_stage != null && r.mon_stage_level != null ? { stage: r.mon_stage, level: r.mon_stage_level } : null,
   flags: r.flags ?? "",
 });
 
@@ -195,6 +209,7 @@ export interface ProjectRow {
   heldAt: number | null;
   archivedAt: number | null;
   createdAt: number;
+  monType: MonType | null; // its Pokémon type (mons.ts TYPES), whatever the setting
 }
 
 /** One environment's PR as bb's PR status reports it (bb--github-pr-status `pullRequests`). */
@@ -496,7 +511,13 @@ export class Engine {
       return it ? this.render(it, false) : null;
     });
     if (this.settings.batchInbox) this.batch.sync();
-    this.settleThreadMons();
+    // the Pokémon families: it must never stop the plugin from starting (its transaction rolls back on a failure)
+    try {
+      const moved = this.settleMons();
+      if (moved) this.ports.log(`pokemon: ${moved} agent(s) moved to their project's type`);
+    } catch (e) {
+      this.ports.log(`pokemon: settling failed, Pokémon unchanged: ${e instanceof Error ? e.message : String(e)}`);
+    }
     this.settleRelayedCards();
     // the project page's history: once, from what the older tables say. It must never stop the plugin from starting.
     try {
@@ -517,25 +538,86 @@ export class Engine {
   }
 
   /**
-   * Requested 2026-11-13: no two live threads share a Pokémon, and each is a three-stage line. Oldest first, a live thread
-   * whose Pokémon an older live thread holds, or that left the pool, gets the next free one; the others keep theirs.
-   * Idempotent.
+   * Requested 2026-11-16, each project's Pokémon type (mons.ts TYPES), on top of 2026-11-13's rule that no two live
+   * agents share a Pokémon. Oldest first: every live project keeps its type unless an older live project holds it, and
+   * one without a type picks one (pickType). Then every live lead and thread keeps its Pokémon when it still fits its
+   * project's family and no older live agent holds it; the rest get the next free one (pickMon). A moved agent keeps
+   * its stage (a StagePin at its current level); XP stays with its address, so its level is unchanged.
+   * Idempotent: a second run moves nothing. Returns how many agents moved.
    */
-  private settleThreadMons() {
-    const rows = this.db.prepare(`SELECT thread_id, mon FROM agents WHERE role = 'thread' AND retired_at IS NULL ORDER BY created_at, thread_id`).all() as { thread_id: string; mon: string | null }[];
-    const pool = new Set(MON_POOLS.thread.map((x) => x.name));
-    // first every rightful holder keeps its Pokémon, then only the rest are re-rolled, so no one else's changes
-    const held: string[] = [];
-    const redo = rows.filter((r) => {
-      if (!r.mon || !pool.has(r.mon) || held.includes(r.mon)) return true;
-      held.push(r.mon);
-      return false;
+  settleMons(): number {
+    return tx(this.db, () => {
+      const projects = this.db.prepare(`SELECT slug, mon_type FROM projects WHERE archived_at IS NULL ORDER BY created_at, slug`).all() as { slug: string; mon_type: string | null }[];
+      const types: string[] = [];
+      for (const p of projects) {
+        const t = p.mon_type && typeFamily(p.mon_type) && !types.includes(p.mon_type) ? p.mon_type : pickType(p.slug, types);
+        if (t !== p.mon_type) this.db.prepare(`UPDATE projects SET mon_type = ? WHERE slug = ?`).run(t, p.slug);
+        types.push(t);
+      }
+      const rows = this.db
+        .prepare(`SELECT thread_id, address, role, project, mon, mon_stage, mon_stage_level FROM agents WHERE retired_at IS NULL ORDER BY CASE role WHEN 'cos' THEN 0 WHEN 'steward' THEN 1 WHEN 'lead' THEN 2 ELSE 3 END, created_at, thread_id`)
+        .all() as { thread_id: string; address: string; role: Role; project: string | null; mon: string | null; mon_stage: number | null; mon_stage_level: number | null }[];
+      // first every rightful holder keeps its Pokémon, then only the rest are re-picked, so no one else's changes
+      const held: string[] = [];
+      const redo = rows.filter((r) => {
+        if (!this.monFits(r.role, r.mon, r.project, held)) return true;
+        held.push(r.mon!);
+        return false;
+      });
+      let moved = 0;
+      for (const r of redo) {
+        const next = pickMon(r.role, held, this.projectType(r.project)).name;
+        held.push(next);
+        if (next === r.mon) continue;
+        const { level } = this.xpOf(r.address);
+        const pin = r.mon_stage != null && r.mon_stage_level != null ? { stage: r.mon_stage, level: r.mon_stage_level } : null;
+        const stage = shownStage(r.mon, level, pin);
+        this.db.prepare(`UPDATE agents SET mon = ?, mon_stage = ?, mon_stage_level = ? WHERE thread_id = ?`).run(next, stage, level, r.thread_id);
+        moved++;
+      }
+      return moved;
     });
-    for (const r of redo) {
-      const next = pickMon("thread", held).name;
-      this.db.prepare(`UPDATE agents SET mon = ? WHERE thread_id = ?`).run(next, r.thread_id);
-      held.push(next);
-    }
+  }
+
+  /** Whether an agent's Pokémon may stay, given what older live agents hold (settleMons). */
+  private monFits(role: Role, mon: string | null, project: string | null, held: readonly string[]): boolean {
+    if (!mon || held.includes(mon) || !monByName(mon)) return false;
+    if (role === "cos" || role === "steward") return MON_POOLS[role].some((x) => x.name === mon);
+    const fam = typeFamily(this.projectType(project));
+    if (!fam) return false;
+    if (role === "lead") return mon === fam.lead || (held.includes(fam.lead) && MON_POOLS.lead.some((x) => x.name === mon));
+    const own = familyThreads(fam);
+    return own.includes(mon) || (own.every((n) => held.includes(n)) && MON_POOLS.thread.some((x) => x.name === mon));
+  }
+
+  /** A project's stored Pokémon type (null: none yet, or no project). */
+  private projectType(project: string | null): MonType | null {
+    if (!project) return null;
+    return ((this.db.prepare(`SELECT mon_type FROM projects WHERE slug = ?`).get(project) as { mon_type: string | null } | undefined)?.mon_type as MonType | null) ?? null;
+  }
+
+  /**
+   * A project's Pokémon type: its own, unless another live project holds it (it came back from the archive after its
+   * type was taken), else the one pickType gives. `assign` stores it (only on a project that has a row).
+   */
+  typeFor(project: string | null, assign = true): MonType | null {
+    if (!project) return null;
+    const own = this.projectType(project);
+    const taken = (this.db.prepare(`SELECT mon_type FROM projects WHERE archived_at IS NULL AND slug != ? AND mon_type IS NOT NULL`).all(project) as { mon_type: string }[]).map((r) => r.mon_type);
+    if (own && !taken.includes(own)) return own;
+    const t = pickType(project, taken);
+    if (assign) this.db.prepare(`UPDATE projects SET mon_type = ? WHERE slug = ?`).run(t, project);
+    return t;
+  }
+
+  /** A project's accent type for the screens (app/accent.ts): its Pokémon type, none with the pokemon setting off. */
+  accentType(project: string | null): MonType | null {
+    return this.settings.pokemon && project ? (this.project(project)?.monType ?? null) : null;
+  }
+
+  /** An agent's form at a level: its line's, or the stage it keeps (StagePin). */
+  formOf(a: Agent, level: number): Mon | null {
+    return formAt(a.mon, level, a.monPin);
   }
 
   private now() {
@@ -546,6 +628,12 @@ export class Engine {
 
   agentByThread(threadId: string): Agent | null {
     const r = this.db.prepare(`SELECT * FROM agents WHERE thread_id = ? AND retired_at IS NULL`).get(threadId) as AgentRow | undefined;
+    return r ? toAgent(r, this.settings.pokemon) : null;
+  }
+
+  /** A thread's agent, retired ones too (the newest role it had): the Open PRs tab maps a resolved thread's PR to its project. */
+  agentByThreadEver(threadId: string): Agent | null {
+    const r = this.db.prepare(`SELECT * FROM agents WHERE thread_id = ? ORDER BY created_at DESC LIMIT 1`).get(threadId) as AgentRow | undefined;
     return r ? toAgent(r, this.settings.pokemon) : null;
   }
 
@@ -581,12 +669,17 @@ export class Engine {
       }
       const address = addressFor(role, proj, n);
       if (this.agentByAddress(address)) throw new EngineError("conflict", `${address} is already taken`);
+      if (role === "lead") this.ensureProject(proj!, null); // its type is picked before its Pokémon
       this.db
         .prepare(`INSERT INTO agents (thread_id, address, role, project, parent_thread_id, status, created_at, mon) VALUES (?, ?, ?, ?, ?, 'unknown', ?, ?)`)
         .run(threadId, address, role, proj, parentThreadId, this.now(), this.nextMon(role, null, proj));
       this.event({ kind: "spawn", project: proj, address, threadId, value: role, ref: parentThreadId, note: startedBy ? `started by ${startedBy}` : null });
       if (role === "lead") {
         this.ensureProject(proj!, null);
+        // the owner's direct messages the last lead never acked pass to this one, dead ones too (a new reader)
+        const passed = this.db.prepare(`SELECT id FROM items WHERE recipient = ? AND kind = 'owner.message' AND state IN ('queued','delivered','dead')`).all(address) as { id: string }[];
+        this.db.prepare(`UPDATE items SET state = 'pending', queued_message_id = NULL, delivered_at = NULL, attempts = 0, on_board = 0 WHERE recipient = ? AND kind = 'owner.message' AND state IN ('queued','delivered','dead')`).run(address);
+        for (const { id } of passed) this.batch.reroute(id, address); // batched: unread again for the new reader, even if the last lead read it in a digest
         // a lead for an archived project brings it back (Start lead, or a role set by hand)
         if (this.project(proj!)?.archivedAt) {
           this.db.prepare(`UPDATE projects SET archived_at = NULL WHERE slug = ?`).run(proj);
@@ -662,8 +755,8 @@ export class Engine {
         .run(a.address, Math.max(0, Math.round(tokens)), this.now());
       this.db.prepare(`INSERT INTO xp_cursor (thread_id, seq) VALUES (?, ?) ON CONFLICT(thread_id) DO UPDATE SET seq = excluded.seq`).run(threadId, seq);
       const after = this.xpOf(a.address);
-      const was = formAt(a.mon, before.level);
-      const now = formAt(a.mon, after.level);
+      const was = this.formOf(a, before.level);
+      const now = this.formOf(a, after.level);
       if (was && now && was.name !== now.name)
         this.boardAdd("notice", a.address, a.project, `${was.name} evolved into ${now.name}!`, `${a.address} reached level ${after.level}.`, threadId);
       if (after.level !== before.level) this.ports.changed();
@@ -671,10 +764,14 @@ export class Engine {
     });
   }
 
-  /** The Pokémon the next agent of this role gets: the first of its pool no live agent holds (mons.ts). Picked with the setting off too, so switching it on shows one. */
-  nextMon(role: Role, exceptThreadId: string | null = null, project: string | null = null): string {
-    const taken = (this.db.prepare(`SELECT mon FROM agents WHERE role = ? AND retired_at IS NULL AND mon IS NOT NULL AND thread_id IS NOT ?`).all(role, exceptThreadId) as { mon: string }[]).map((r) => r.mon);
-    return pickMon(role, taken, project).name;
+  /**
+   * The Pokémon the next agent of this role gets (mons.ts pickMon): no live agent of any role holds it, and a lead's or
+   * thread's fits its project's type. Picked with the setting off too, so switching it on shows one. `assign` false
+   * only predicts it (the brief, before the thread exists): the project's type is not stored then.
+   */
+  nextMon(role: Role, exceptThreadId: string | null = null, project: string | null = null, assign = true): string {
+    const taken = (this.db.prepare(`SELECT mon FROM agents WHERE retired_at IS NULL AND mon IS NOT NULL AND thread_id IS NOT ?`).all(exceptThreadId) as { mon: string }[]).map((r) => r.mon);
+    return pickMon(role, taken, role === "lead" || role === "thread" ? this.typeFor(project, assign) : null).name;
   }
 
   // ---------------------------------------------------------------- the owner's Start buttons: a lead, the CoS, the Steward
@@ -705,7 +802,7 @@ export class Engine {
   monForStart(role: Role, project: string | null): string | null {
     if (!this.settings.pokemon) return null;
     const old = this.agentByAddress(addressFor(role, role === "lead" ? project : null));
-    return this.nextMon(role, old?.status === "archived" ? old.threadId : null, project);
+    return this.nextMon(role, old?.status === "archived" ? old.threadId : null, project, false);
   }
 
   /**
@@ -738,12 +835,13 @@ export class Engine {
   /**
    * Pending mail to an address whose holder retired and that no live agent holds is a dead letter: else it would wait
    * forever, or reach whoever takes the address next. An address nobody ever held (imported mail for a lead that
-   * isn't registered yet) keeps waiting.
+   * isn't registered yet) keeps waiting. The owner's direct message to a lead is the exception: it is to the project's
+   * lead, whoever that is, so it waits for the next one (register re-sends it).
    */
   private deadLetterOrphans(): void {
     const rows = this.db
       .prepare(
-        `SELECT * FROM items i WHERE i.state = 'pending'
+        `SELECT * FROM items i WHERE i.state = 'pending' AND i.kind <> 'owner.message'
            AND NOT EXISTS (SELECT 1 FROM agents a WHERE a.address = i.recipient AND a.retired_at IS NULL)
            AND EXISTS (SELECT 1 FROM agents r WHERE r.address = i.recipient AND r.retired_at IS NOT NULL)`,
       )
@@ -890,6 +988,7 @@ export class Engine {
 
   /** The text a thread sees. Short, one header line, the body, then what to do. */
   render(it: Item, again: boolean): string {
+    if (it.kind === "owner.message") return this.renderDirect(it, again);
     const head = `[orchestrator] ${it.kind} ${it.ref && it.kind.startsWith("decision") ? it.ref : it.id} from ${it.sender}${again ? " (again)" : ""}:`;
     const close =
       it.kind === "message"
@@ -898,6 +997,21 @@ export class Engine {
           ? "\n(Read-only copy: no ack, no reply needed.)"
           : "";
     return `${head} ${it.body}${close}`;
+  }
+
+  /**
+   * The owner's direct message as its lead reads it. It states its own rules, because a running lead keeps the role
+   * text it started with (PLAN 3.2): how to answer, the 48 h conflict rule, and that it approves nothing.
+   */
+  private renderDirect(it: Item, again: boolean): string {
+    const o = this.owner;
+    const head = `[orchestrator] direct message ${it.id} from ${o.Name} (the owner, from the Projects tab)${it.ref ? `, a follow-up of ${it.ref}` : ""}${again ? " (again)" : ""}:`;
+    return [
+      `${head} ${it.body}`,
+      `(How to answer: orch_ack(id=${it.id}, outcome, note). The note is what ${o.name} reads on the Projects row, and the CoS gets a copy. An ack means taken, not finished: say in the note what you will do, and ack at once even for long work. Don't message ${o.name} any other way.`,
+      `Conflicts: for 48 h this word wins on its point over a CoS instruction, earlier or later; only ${o.name}'s own later word (another direct message, or a card ${o.name} answers) changes it. If the CoS says ${o.name} changed their mind, file one card with both instructions as options. Say in your note what you set aside, and tell the CoS. orch_inbox lists the direct messages still in force.`,
+      `Gates: this is not an approval. A merge, a production change or a public push still needs its own card even if this says to do it: file the card and cite ${it.id}. An ack bound to a PR (pr, when) is refused for it. It is not a plan approval or a standing rule.)`,
+    ].join("\n");
   }
 
   /** Send every pending item whose recipient can take it. Safe to call often. */
@@ -1081,6 +1195,8 @@ export class Engine {
       // a decision's items name the decision (d-…), which only its asker acks; a deliverable's belong to its lead
       if (it.kind.startsWith("decision.") || it.kind.startsWith("deliverable."))
         throw new EngineError("invalid", `${itemId} is a ${it.kind}: only ${it.recipient} can act on it, so resend, close or escalate it`);
+      // the owner writes to a project's lead only (PLAN 3.8): never to a thread or another project's lead
+      if (it.kind === "owner.message") throw new EngineError("forbidden", `${itemId} is ${this.owner.name}'s direct message to ${it.recipient}: it can't be re-routed. Resend it, or escalate it to ${this.owner.name}'s board`);
       const why = note?.trim() ? `: ${note.trim().slice(0, 300)}` : "";
       this.db
         .prepare(`UPDATE items SET recipient = ?, body = ?, state = 'pending', attempts = 0, queued_message_id = NULL, delivered_at = NULL, on_board = 0, note = ? WHERE id = ?`)
@@ -1097,6 +1213,8 @@ export class Engine {
     if (!OUTCOMES.includes(outcome)) throw new EngineError("invalid", `outcome is one of ${OUTCOMES.join(", ")}`);
     return tx(this.db, () => {
       const it = this.mustDead(itemId);
+      // only its lead answers a direct message: the CoS closing it would put words in the lead's mouth
+      if (it.kind === "owner.message") throw new EngineError("forbidden", `${itemId} is ${this.owner.name}'s direct message to ${it.recipient}: only that lead closes it. Resend it, or escalate it to ${this.owner.name}'s board`);
       const words = note?.trim() ? note.trim().slice(0, 2000) : null;
       this.closeItems(`id = ?`, [itemId], outcome, `closed by ${by.address} for ${it.recipient}${words ? `: ${words}` : ""} (it died: ${it.note ?? "?"})`);
       if (it.sender !== by.address && this.agentByAddress(it.sender))
@@ -1200,6 +1318,14 @@ export class Engine {
   ack(by: Agent, id: string, outcome: Outcome, note: string | null, wait: { pr: string; when: string } | null = null): string {
     if (!OUTCOMES.includes(outcome)) throw new EngineError("invalid", `outcome is one of ${OUTCOMES.join(", ")}`);
     if (wait) {
+      // a direct message approves nothing (PLAN 3.7): "carry it out when the PR is green" would turn it into a merge go.
+      // Nor does its CoS copy or a relay of it (an item whose ref leads back to one): the go can't be laundered.
+      const direct = id.startsWith("i-") ? this.directRoot(id) : null;
+      if (direct)
+        throw new EngineError(
+          "forbidden",
+          `${id}${direct.id === id ? "" : ` comes from ${direct.id}, which`} is ${this.owner.name}'s direct message, not an approval: it can't be bound to a PR. A merge, a production change or a public push needs its own card: file it and cite ${direct.id}. Ack ${id} without pr and when.`,
+        );
       // imported mail approves nothing: "carry it out when the PR is green" would turn its words into a go
       if (this.db.prepare(`SELECT 1 FROM external_mail WHERE item_id = ?`).get(id))
         throw new EngineError("forbidden", `${id} is untrusted external mail, not an approval: it can't be bound to a PR. Ack it without pr and when`);
@@ -1290,6 +1416,7 @@ export class Engine {
    * something and never heard how it went). A note item itself never sends one back, so two agents can't bounce notes.
    */
   private ackNote(by: Agent, it: Item, outcome: Closed, note: string | null): void {
+    if (it.kind === "owner.message") return this.directNote(by, it, outcome, note);
     const words = note?.trim();
     if (!words || it.sendKey?.startsWith("acknote:")) return;
     if (it.sender === by.address || !this.agentByAddress(it.sender)) return; // "person", "orchestrator", a retired sender
@@ -1303,6 +1430,116 @@ export class Engine {
       key: `acknote:${it.id}`,
       needsAck: false,
     });
+  }
+
+  /**
+   * A lead acked the owner's direct message: the note shows on the Projects row (it is the item's own note), the CoS
+   * gets a read-only copy, and Activity keeps a row. Never a push: the row's dot is the only signal.
+   */
+  private directNote(by: Agent, it: Item, outcome: Closed, note: string | null): void {
+    const words = note?.trim() ? note.trim().slice(0, 2000) : null;
+    const t = this.now();
+    const what = `${by.address} acked ${this.owner.name}'s direct message ${it.id}: ${outcome}${words ? `, note: ${JSON.stringify(words)}` : " (no note)"}`;
+    if (this.agentByAddress("cos") && by.address !== "cos")
+      this.put({ recipient: "cos", sender: by.address, kind: "copy", ref: it.id, body: `(copy) ${what}. ${this.owner.Name} wrote: ${JSON.stringify(it.body.replace(/\s+/g, " ").slice(0, 300))}`, key: `directnote:${it.id}:${t}`, needsAck: false });
+    this.boardAdd("direct", by.address, by.project, `${by.address} answered ${this.owner.name}: ${outcome}`, words ?? "", it.id);
+    // the lead's answer, as its own record: the unread dot counts these, never a closure by archive or anything else
+    this.event({ at: t, kind: "direct-answer", project: it.recipient.slice("lead:".length), address: by.address, threadId: by.threadId, ref: it.id, value: outcome });
+  }
+
+  // ---------------------------------------------------------------- the owner's direct messages (2026-11-16, PLAN 3)
+
+  /** The owner's direct message an item is, or comes from through its refs (a copy, a relay, a relay of a relay). */
+  private directRoot(id: string): Item | null {
+    let it = this.item(id);
+    for (let hops = 0; it && hops < 8; hops++) {
+      if (it.kind === "owner.message") return it;
+      if (!it.ref?.startsWith("i-")) return null;
+      it = this.item(it.ref);
+    }
+    return null;
+  }
+
+  /**
+   * The owner writes to a project's lead from its Projects row: an item from "person", needs ack, at most 4000
+   * characters. `followUp` names an earlier direct message to the same lead. Refused without a live lead. The CoS gets
+   * a read-only copy and Activity keeps a row. Never a push.
+   */
+  ownerMessage(slug: string, text: string, followUp: string | null = null): Item {
+    const body = text.trim();
+    if (!body) throw new EngineError("invalid", "empty message");
+    if (body.length > 4000) throw new EngineError("invalid", `a message is at most 4000 characters; this is ${body.length}`);
+    const p = this.project(slug);
+    if (!p) throw new EngineError("not_found", `no project ${slug}`);
+    if (p.archivedAt) throw new EngineError("bad_state", `${slug} is archived: start its lead first`);
+    const to = `lead:${slug}`;
+    if (!this.liveAt(to)) throw new EngineError("bad_state", `${slug} has no live lead: start it first`);
+    return tx(this.db, () => {
+      if (followUp) {
+        const first = this.item(followUp);
+        if (!first || first.kind !== "owner.message" || first.recipient !== to) throw new EngineError("invalid", `${followUp} isn't a direct message to ${to}`);
+      }
+      const it = this.put({ recipient: to, sender: "person", kind: "owner.message", ref: followUp, body, needsAck: true });
+      if (this.agentByAddress("cos"))
+        this.put({ recipient: "cos", sender: "person", kind: "copy", ref: it.id, body: `(copy of ${this.owner.name}'s direct message ${it.id} to ${to}${followUp ? `, a follow-up of ${followUp}` : ""}; ${to} answers it, not you) ${body}`, key: `copy:cos:${it.id}`, needsAck: false });
+      this.boardAdd("direct", "person", slug, `${this.owner.Name} → ${to}${followUp ? ` (follow-up of ${followUp})` : ""}`, body, it.id);
+      this.ports.changed();
+      return it;
+    });
+  }
+
+  /** The owner's direct messages to a lead still in force (PLAN 3.6): the last 48 h, newest first, whatever their state. */
+  directInForce(to: string): Item[] {
+    return (this.db.prepare(`SELECT * FROM items WHERE recipient = ? AND kind = 'owner.message' AND created_at >= ? ORDER BY created_at DESC`).all(to, this.now() - DIRECT_IN_FORCE_MS) as ItemRow[]).map(toItem);
+  }
+
+  /**
+   * Each live project's direct line for the Projects row: its latest DIRECT_SHOWN messages, plus every message whose
+   * lead answer the owner hasn't seen (so the row can show each one), newest first. Unread counts only the leads'
+   * answers (direct-answer events), never a closure by archive. Archived projects have none. Per project, the reads
+   * go through the items (recipient) and events (project, at) indexes, so a long history isn't scanned.
+   */
+  directLines(): Map<string, DirectLine> {
+    const seen = new Map((this.db.prepare(`SELECT name, value FROM cursors WHERE name LIKE 'direct.seen:%'`).all() as { name: string; value: number }[]).map((r) => [r.name.slice("direct.seen:".length), r.value]));
+    const latest = this.db.prepare(`SELECT * FROM items WHERE recipient = ? AND kind = 'owner.message' ORDER BY created_at DESC LIMIT ?`);
+    const answers = this.db.prepare(`SELECT ref, MAX(at) AS at FROM events WHERE project = ? AND at > ? AND kind = 'direct-answer' GROUP BY ref`);
+    const out = new Map<string, DirectLine>();
+    for (const { slug } of this.db.prepare(`SELECT slug FROM projects WHERE archived_at IS NULL`).all() as { slug: string }[]) {
+      const after = seen.get(slug) ?? 0;
+      const unread = new Map((answers.all(slug, after) as { ref: string; at: number }[]).map((r) => [r.ref, r.at]));
+      const items = (latest.all(`lead:${slug}`, DIRECT_SHOWN) as ItemRow[]).map(toItem);
+      for (const id of unread.keys()) if (!items.some((it) => it.id === id)) { const it = this.item(id); if (it) items.push(it); }
+      if (!items.length) continue;
+      items.sort((x, y) => y.createdAt - x.createdAt);
+      out.set(slug, {
+        messages: items.map((it) => ({
+          id: it.id, text: it.body, at: it.createdAt, followUp: it.ref, state: it.state,
+          outcome: it.state === "closed" ? it.outcome : null, note: it.state === "closed" ? it.note : null,
+          // an unread answer's time is its event's, the exact value the seen cursor is compared with (closed_at is
+          // stamped a moment earlier on a live clock, so a cursor capped at it would never pass the answer)
+          answeredAt: it.state === "closed" ? (unread.get(it.id) ?? it.closedAt) : null,
+          unread: it.state === "closed" && unread.has(it.id),
+        })),
+        unread: unread.size > 0,
+      });
+    }
+    return out;
+  }
+
+  /** When the owner last looked at a project's direct thread (opened its composer): answers after it are new. */
+  directSeen(slug: string): number {
+    return this.cursor(`direct.seen:${slug}`) ?? 0;
+  }
+
+  /**
+   * The owner opened a project's direct thread, which showed answers up to `upTo` (the newest it drew): those are seen.
+   * Only from that action, never a render. The cursor never goes back, nor past now, so an answer that arrived after
+   * the page drew stays new.
+   */
+  markDirectSeen(slug: string, upTo: number): void {
+    if (!this.project(slug)) throw new EngineError("not_found", `no project ${slug}`);
+    this.setCursor(`direct.seen:${slug}`, Math.max(this.directSeen(slug), Math.min(upTo, this.now())));
+    this.ports.changed();
   }
 
   // ---------------------------------------------------------------- answers that wait on a PR (2026-11-16)
@@ -1494,7 +1731,9 @@ export class Engine {
     if (a.role !== "lead" || !a.project) throw new EngineError("forbidden", "only a lead publishes its project's status");
     const project = a.project;
     return tx(this.db, () => {
-      const r = normalizeStatus(p, this.leadStatus(project), { now: this.now(), by: a.address, ownerName: this.settings.owner ?? "" });
+      const prev = this.leadStatus(project);
+      const legacySince = prev && !prev.waits ? this.legacyWaitSince(project, prev) : null;
+      const r = normalizeStatus(p, prev, { now: this.now(), by: a.address, ownerName: this.settings.owner ?? "", legacySince });
       if ("refusal" in r) throw new EngineError("invalid", r.refusal);
       const s = r.status;
       const json = JSON.stringify(s);
@@ -1508,6 +1747,27 @@ export class Engine {
       this.ports.changed();
       return s;
     });
+  }
+
+  /**
+   * A status stored before the waits list has no `since`: its one wait was first published at the oldest lead-status
+   * event of the run of publishes, newest first, that kept the same kind and ref. Reads at most the last 50 publishes.
+   */
+  legacyWaitSince(project: string, s: LeadStatus): number {
+    const w = s.waitingOn;
+    let since = s.updatedAt;
+    const rows = this.db.prepare(`SELECT at, value FROM events WHERE project = ? AND kind = 'lead-status' ORDER BY seq DESC LIMIT 50`).all(project) as { at: number; value: string | null }[];
+    for (const r of rows) {
+      let was: LeadStatus["waitingOn"] | undefined;
+      try {
+        was = (JSON.parse(r.value ?? "null") as LeadStatus | null)?.waitingOn;
+      } catch {
+        break;
+      }
+      if (!was || !sameWait(was, w)) break;
+      since = Math.min(since, r.at);
+    }
+    return since;
   }
 
   /** A project's latest status, or null before its lead published one. */
@@ -1565,6 +1825,41 @@ export class Engine {
             key: `status-nudge:${r.project}:${changed}`,
             needsAck: false,
           });
+        }),
+      );
+    }
+    if (out.length) this.ports.changed();
+    return out;
+  }
+
+  /**
+   * From the tick (2026-11-16, the owner: answered and stale items drop off the row): a status a live fact contradicts
+   * (a wait it names is answered, merged or resolved, or an answer covers a blocker; buildSummary's statusOutOfDate) gets
+   * its lead one notice to republish, at most once per status (the key is the status's time), never a message to the
+   * owner. Not for a held project or one with no live lead; the row says "Status out of date" either way.
+   */
+  statusOutOfDateNudges(): Item[] {
+    const out: Item[] = [];
+    for (const [slug, sum] of this.projectSummaries()) {
+      if (!sum.statusOutOfDate || this.project(slug)?.heldAt != null) continue;
+      const lead = `lead:${slug}`;
+      const s = this.leadStatus(slug);
+      if (!s || !this.liveAt(lead)) continue;
+      const key = `status-outdated:${slug}:${s.updatedAt}`;
+      if (this.db.prepare(`SELECT 1 FROM items WHERE sender = 'orchestrator' AND send_key = ?`).get(key)) continue;
+      // the stale nudge already asked for a new status within its window: one ask is enough
+      const n = this.db.prepare(`SELECT nudged_at FROM lead_status WHERE project = ?`).get(slug) as { nudged_at: number | null } | undefined;
+      if (n?.nudged_at != null && n.nudged_at > s.updatedAt && this.now() - n.nudged_at < STATUS_STALE_MS) continue;
+      this.db.prepare(`UPDATE lead_status SET nudged_at = ? WHERE project = ?`).run(this.now(), slug);
+      out.push(
+        this.put({
+          recipient: lead,
+          sender: "orchestrator",
+          kind: "notice",
+          ref: null,
+          body: `Your status on the Projects row is out of date: something it names has since been answered, merged or resolved. Publish orch_status with what you wait on and what blocks you now; the row hides the parts that are over meanwhile.`,
+          key,
+          needsAck: false,
         }),
       );
     }
@@ -2551,8 +2846,8 @@ export class Engine {
   }
 
   project(slug: string): ProjectRow | null {
-    const r = this.db.prepare(`SELECT * FROM projects WHERE slug = ?`).get(slug) as { slug: string; bb_project_id: string | null; priority: string; held_at: number | null; archived_at: number | null; created_at: number } | undefined;
-    return r ? { slug: r.slug, bbProjectId: r.bb_project_id, priority: r.priority as Priority, heldAt: r.held_at, archivedAt: r.archived_at, createdAt: r.created_at } : null;
+    const r = this.db.prepare(`SELECT * FROM projects WHERE slug = ?`).get(slug) as { slug: string; bb_project_id: string | null; priority: string; held_at: number | null; archived_at: number | null; created_at: number; mon_type: string | null } | undefined;
+    return r ? { slug: r.slug, bbProjectId: r.bb_project_id, priority: r.priority as Priority, heldAt: r.held_at, archivedAt: r.archived_at, createdAt: r.created_at, monType: (typeFamily(r.mon_type)?.type ?? null) } : null;
   }
 
   projects(): ProjectRow[] {
@@ -2673,6 +2968,106 @@ export class Engine {
     return buildHistory({ slug, now: this.now(), logSince: logSince(this.db), heldAt: p.heldAt, agents, events, decisions, waits, items, prs: prs.filter((x) => ids.has(x.thread_id)), providers });
   }
 
+  /**
+   * Every project's row summary (history.ts buildSummary) from one batch of SQL reads: no bb calls, and never the
+   * history loader (it reads a project's whole event log). Live agents only count as working or as threads; retired
+   * ones only name the project's past addresses. A status stored before the waits list is dated from its log.
+   */
+  projectSummaries(): Map<string, ProjectSummary> {
+    const t = this.now();
+    const since = t - SUMMARY_DONE_MS;
+    const projects = this.db.prepare(`SELECT slug, held_at FROM projects WHERE archived_at IS NULL`).all() as { slug: string; held_at: number | null }[];
+    const agents = this.db.prepare(`SELECT thread_id, address, role, project, status, idle_at, retired_at FROM agents WHERE role IN ('lead','thread') AND project IS NOT NULL`).all() as (SummaryInput["agents"][number] & { project: string })[];
+    const statuses = new Map((this.db.prepare(`SELECT project, json FROM lead_status`).all() as { project: string; json: string }[]).map((r) => [r.project, JSON.parse(r.json) as LeadStatus]));
+    const decisions = (
+      this.db
+        .prepare(
+          `SELECT id, state, at_level AS level, asker, origin, project, json_extract(json, '$.request.title') AS title, json_extract(json, '$.created_at') AS created,
+             json_extract(json, '$.ask.at') AS asked, json_extract(json, '$.deferred') IS NOT NULL AS deferred, json_extract(json, '$.orchestrator.held.behind') AS held,
+             COALESCE(json_extract(json, '$.ask.question'), json_extract(json, '$.request.question')) AS question
+           FROM decisions WHERE state IN ('open','asked')`,
+        )
+        .all() as { id: string; state: string; level: string; asker: string; origin: string; project: string | null; title: string; created: string; asked: string | null; deferred: number; held: string | null; question: string | null }[]
+    ).map((d) => ({ id: d.id, state: d.state, level: d.level, asker: d.asker, origin: d.origin, title: d.title, createdAt: Date.parse(d.created), askedAt: Date.parse(d.asked ?? d.created), endedAt: null, deferred: !!d.deferred, heldBehind: d.held, question: d.question ?? undefined }) satisfies DecisionLite);
+    const items = this.db
+      .prepare(`SELECT id, sender, recipient, kind, state, substr(body, 1, 200) AS body, created_at FROM items WHERE needs_ack = 1 AND state IN ('pending','queued','delivered','dead') AND (sender LIKE 'lead:%' OR sender LIKE 'thread:%' OR recipient LIKE 'lead:%' OR recipient LIKE 'thread:%')`)
+      .all() as HistoryInput["items"];
+    const waits = this.db.prepare(`SELECT id, owner, pr_url, cond, created_at FROM waits WHERE closed_at IS NULL`).all() as HistoryInput["waits"];
+    const prs = this.db.prepare(`SELECT thread_id, url, number, state, checks, sig, attention, seen_at FROM prs`).all() as SummaryInput["prs"];
+    const deliverables = this.db.prepare(`SELECT id, project, title, state, updated_at FROM deliverables WHERE state = 'review' OR (state = 'approved' AND updated_at >= ?)`).all(since) as { id: string; project: string | null; title: string; state: string; updated_at: number }[];
+    const merged = this.db.prepare(`SELECT project, at, ref, note FROM events WHERE kind = 'pr' AND value = 'merged' AND at >= ? AND project IS NOT NULL`).all(since) as { project: string; at: number; ref: string | null; note: string | null }[];
+    const reports = this.db.prepare(`SELECT project, title, at FROM board WHERE kind IN ('report','pr') AND at >= ? AND project IS NOT NULL AND from_address LIKE 'thread:%'`).all(since) as { project: string; title: string; at: number }[];
+    // the latest finished thing at any age, for a quiet row: a report, an approved deliverable or a merged PR
+    const last = new Map<string, { text: string; at: number }>();
+    const later = (project: string | null, text: string, at: number) => {
+      if (project && at > (last.get(project)?.at ?? 0)) last.set(project, { text, at });
+    };
+    for (const r of this.db.prepare(`SELECT project, title, MAX(at) AS at FROM board WHERE kind IN ('report','pr') AND project IS NOT NULL GROUP BY project`).all() as { project: string; title: string; at: number }[]) later(r.project, r.title, r.at);
+    for (const r of this.db.prepare(`SELECT project, title, MAX(updated_at) AS at FROM deliverables WHERE state = 'approved' GROUP BY project`).all() as { project: string | null; title: string; at: number }[]) later(r.project, `Approved: ${r.title}`, r.at);
+    for (const r of this.db.prepare(`SELECT project, note, MAX(at) AS at FROM events WHERE kind = 'pr' AND value = 'merged' AND project IS NOT NULL GROUP BY project`).all() as { project: string; note: string | null; at: number }[]) later(r.project, `PR ${r.note ? `#${r.note} ` : ""}merged`, r.at);
+    // the cards the leads' own waits and blockers name, in any state, to drop a wait that was answered
+    const active = new Set(projects.map((p) => p.slug));
+    const named = [...statuses].filter(([slug]) => active.has(slug)).flatMap(([, s]) => [...waitsOf(s).filter((w) => w.kind === "owner" && w.ref?.startsWith("d-")).map((w) => w.ref!), ...s.blockers.flatMap((b) => b.match(/\bd-[0-9A-Za-z-]+/g) ?? [])]);
+    const cards = new Map<string, { state: string; answeredAt: number | null }>();
+    // a merged card has no answer until the card it went into is answered, which gives it that answer (triageMerge)
+    const card = this.db.prepare(`SELECT state, json_extract(json, '$.answer.at') AS at FROM decisions WHERE id = ?`);
+    for (const id of named) {
+      const r = card.get(id) as { state: string; at: string | null } | undefined;
+      if (r) cards.set(id, { state: r.state, answeredAt: r.at ? Date.parse(r.at) : null });
+    }
+    // cards answered after the oldest live status with a blocker: what can cover a blocker (history.ts blockerCovered);
+    // archived projects' statuses don't widen it. The answer time's index (db.ts decisions_answer_at) reads only those answers.
+    const blocked = [...statuses].filter(([slug, s]) => active.has(slug) && s.blockers.length);
+    const answered = blocked.length
+      ? (
+          this.db
+            .prepare(SUMMARY_ANSWERED_SQL)
+            .all(iso(Math.min(...blocked.map(([, s]) => s.updatedAt)))) as { id: string; project: string | null; asker: string; origin: string; title: string; question: string | null; at: string }[]
+        ).map((d) => ({ ...d, answeredAt: Date.parse(d.at) }))
+      : [];
+    // what a lead's wait may name outside its project: any PR's latest reading, any address and whether it is held now
+    const refPrs = new Map<string, { state: string | null; seen_at: number }>();
+    for (const x of prs) if (x.url && x.seen_at >= (refPrs.get(x.url)?.seen_at ?? -1)) refPrs.set(x.url, { state: x.state, seen_at: x.seen_at });
+    const refAgents = new Map<string, boolean>();
+    for (const a of this.db.prepare(`SELECT address, status, retired_at FROM agents`).all() as { address: string; status: string; retired_at: number | null }[])
+      refAgents.set(a.address, (refAgents.get(a.address) ?? false) || (a.retired_at === null && a.status !== "archived"));
+    const out = new Map<string, ProjectSummary>();
+    for (const p of projects) {
+      const mine = agents.filter((a) => a.project === p.slug);
+      const ours = new Set(mine.map((a) => a.address));
+      const ids = new Set(mine.map((a) => a.thread_id));
+      const status = statuses.get(p.slug) ?? null;
+      const statusWaits = status ? (status.waits ?? waitsOf(status).map((w) => ({ ...w, since: this.legacyWaitSince(p.slug, status) }))) : [];
+      out.set(
+        p.slug,
+        buildSummary({
+          slug: p.slug,
+          now: t,
+          heldAt: p.held_at,
+          hasLead: mine.some((a) => a.role === "lead" && a.retired_at === null && a.status !== "archived"),
+          status: status ? { waits: statusWaits, blockers: status.blockers, updatedAt: status.updatedAt } : null,
+          agents: mine,
+          decisions: decisions.filter((d) => ours.has(d.asker) || ours.has(d.origin)),
+          items: items.filter((i) => ours.has(i.sender) || ours.has(i.recipient)),
+          waits: waits.filter((w) => ours.has(w.owner)),
+          prs: prs.filter((x) => ids.has(x.thread_id)),
+          deliverables: deliverables.filter((d) => d.project === p.slug),
+          cards,
+          refPrs,
+          refAgents,
+          answered: answered.filter((d) => d.project === p.slug || ours.has(d.asker) || ours.has(d.origin)).map((d) => ({ id: d.id, text: `${d.title} ${d.question ?? ""}`, answeredAt: d.answeredAt })),
+          last: last.get(p.slug) ?? null,
+          done: [
+            ...deliverables.filter((d) => d.project === p.slug && d.state === "approved").map((d) => ({ text: d.title, at: d.updated_at, kind: "deliverable" as const })),
+            ...merged.filter((m) => m.project === p.slug).map((m) => ({ text: `PR ${m.note ? `#${m.note} ` : ""}merged`, at: m.at, kind: "merged" as const })),
+            ...reports.filter((r) => r.project === p.slug).map((r) => ({ text: r.title, at: r.at, kind: "report" as const })),
+          ],
+        }),
+      );
+    }
+    return out;
+  }
+
   // ---------------------------------------------------------------- plans and spawns (phase 2): the hard plan gate
 
   /** Plan cards of a project still waiting for a decision. */
@@ -2749,6 +3144,27 @@ export class Engine {
 
   setEnvironment(threadId: string, environmentId: string | null): void {
     this.db.prepare(`UPDATE agents SET environment_id = ? WHERE thread_id = ? AND retired_at IS NULL AND environment_id IS NOT ?`).run(environmentId, threadId, environmentId);
+  }
+
+  /** Every PR the plugin has read, with its project (through the thread that holds it): the links' PR numbers (refs.ts). */
+  knownPrs(): { project: string | null; number: number; url: string; state: string; checks: string | null; review: string | null; attention: string | null }[] {
+    const rows = this.db
+      .prepare(`SELECT p.url, p.number, p.state, p.checks, p.sig, p.attention, a.project FROM prs p LEFT JOIN agents a ON a.thread_id = p.thread_id WHERE p.url IS NOT NULL AND p.number IS NOT NULL ORDER BY p.seen_at DESC`)
+      .all() as { url: string; number: number; state: string | null; checks: string | null; sig: string; attention: string | null; project: string | null }[];
+    // several environments can have read one PR: its newest reading only
+    const seen = new Set<string>();
+    return rows.filter((r) => !seen.has(r.url) && !!seen.add(r.url)).map((r) => ({ project: r.project, number: r.number, url: r.url, state: r.state ?? "open", checks: r.checks, review: r.sig.startsWith("v2|") ? r.sig.split("|")[4] || null : null, attention: r.attention }));
+  }
+
+  /** One project's Decided, Done, merges since the page's day start and blockers' start (book.ts): for the project opened. */
+  projectBook(slug: string, dayStart?: number): ProjectBook {
+    if (!this.project(slug)) throw new EngineError("not_found", `no project ${slug}`);
+    return projectBook(this.db, slug, this.leadStatus(slug), this.now(), dayStart);
+  }
+
+  /** Older answered cards for the Projects search (book.ts). */
+  searchAnswered(q: string): CardHit[] {
+    return searchAnswered(this.db, q);
   }
 
   prFor(environmentId: string | null): PrRow | null {
@@ -2915,11 +3331,6 @@ export class Engine {
     if (this.agentByThread(threadId)) throw new EngineError("bad_state", `${threadId} has a live role again`);
   }
 
-  /** The thread's Pokémon as stored, whatever the setting (Agent.mon is null with it off). */
-  private rawMon(threadId: string): string | null {
-    return (this.db.prepare(`SELECT mon FROM agents WHERE thread_id = ?`).get(threadId) as { mon: string | null } | undefined)?.mon ?? null;
-  }
-
   /** A handoff successor takes over the address (and its mail, Pokémon and plan slot); the old thread is retired. */
   takeOver(oldThreadId: string, newThreadId: string, note: string, providers: { from: string | null; to: string | null } = { from: null, to: null }): Agent {
     return tx(this.db, () => {
@@ -2931,8 +3342,11 @@ export class Engine {
       this.retire(oldThreadId, true, at);
       this.batch.handoff(old.address);
       this.db
-        .prepare(`INSERT INTO agents (thread_id, address, role, project, parent_thread_id, status, created_at, mon, environment_id) VALUES (?, ?, ?, ?, ?, 'unknown', ?, ?, ?)`)
-        .run(newThreadId, old.address, old.role, old.project, old.parentThreadId, at, this.rawMon(oldThreadId), old.environmentId);
+        .prepare(
+          `INSERT INTO agents (thread_id, address, role, project, parent_thread_id, status, created_at, mon, mon_stage, mon_stage_level, environment_id)
+           SELECT ?, ?, ?, ?, ?, 'unknown', ?, mon, mon_stage, mon_stage_level, ? FROM agents WHERE thread_id = ?`,
+        )
+        .run(newThreadId, old.address, old.role, old.project, old.parentThreadId, at, old.environmentId, oldThreadId);
       // the successor takes the old thread's spawn row (and so its plan slot); it never adds a second row on the plan
       const moved = this.db.prepare(`UPDATE spawns SET thread_id = ? WHERE thread_id = ?`).run(newThreadId, oldThreadId) as { changes: number | bigint };
       if (Number(moved.changes) === 0) this.db.prepare(`INSERT OR IGNORE INTO spawns (thread_id, plan_id, via, lead, created_at) VALUES (?, NULL, 'handoff', NULL, ?)`).run(newThreadId, this.now());
@@ -2991,7 +3405,7 @@ export class Engine {
     return (this.db.prepare(`SELECT * FROM outputs WHERE path IS NOT NULL AND substr(path, 1, ?) = ?`).all(prefix.length, prefix) as OutputDbRow[]).map(toOutput);
   }
 
-  /** Points an output at a kept copy of its file, so the Outputs tab still opens it once the worktree is gone. */
+  /** Points an output at a kept copy of its file, so the Deliverables tab still opens it once the worktree is gone. */
   repointOutput(id: string, path: string): void {
     this.db.prepare(`UPDATE outputs SET path = ? WHERE id = ?`).run(path, id);
     this.ports.changed();
@@ -3330,6 +3744,8 @@ export class Engine {
       if (external && this.ports.externalEnabled?.(external.source, it.recipient) === false) continue;
       const a = this.agentByAddress(it.recipient);
       if (!a || a.status !== "idle" || a.idleAt === null) continue;
+      // on hold the owner's direct message waits without expiring (PLAN 3.8): the lead answers it after the resume
+      if (it.kind === "owner.message" && a.project && this.project(a.project)?.heldAt) continue;
       const since = Math.max(a.idleAt, it.deliveredAt ?? 0);
       if (t - since < this.settings.resendMs) continue;
       // 2026-11-13: a resend landed thread:agent-v2:9's "squash then QA" 63 min late, after five newer messages from
@@ -3350,9 +3766,16 @@ export class Engine {
     this.nudgeWaits();
     // 7. the CoS hears which threads sit idle with nothing to wait on, and which leads never spoke, once a day
     this.staleWake();
-    // 8. a lead whose status went stale while it has work going is told once
+    // 8. a lead whose status a live fact contradicts is asked once per status to republish it (read once a minute:
+    // it builds every row's summary); that ask also counts as the stale nudge below, so one status never gets both
+    if (this.now() - this.outdatedCheckedAt >= 60_000) {
+      this.outdatedCheckedAt = this.now();
+      this.statusOutOfDateNudges();
+    }
+    // 9. a lead whose status went stale while it has work going is told once
     this.statusNudges();
   }
+  private outdatedCheckedAt = 0;
 
   // ---------------------------------------------------------------- dreams (phase 3, gap 5): the orchestrator's own cards
   // A card the orchestrator itself puts to the owner (the nightly dream batch): no agent asks it, so it skips the CoS and goes
@@ -3447,7 +3870,19 @@ export class Engine {
     lines.push(items.length ? `Open items (${items.length}); use orch_inbox(id=<item id>) for full text and references:` : "No open items.");
     for (const it of items) {
       const preview = this.importPreview(it.id, 300) ?? it.body.slice(0, 300);
-      lines.push(`- ${it.kind} ${it.ref && it.kind.startsWith("decision") ? it.ref : it.id} from ${it.sender}${it.needsAck ? " [needs ack]" : ""}: ${preview}`);
+      lines.push(
+        it.kind === "owner.message"
+          ? `- direct message ${it.id} from ${this.owner.Name}${it.ref ? ` (a follow-up of ${it.ref})` : ""} [needs ack with a note; not an approval]: ${it.body}`
+          : `- ${it.kind} ${it.ref && it.kind.startsWith("decision") ? it.ref : it.id}${it.ref && !it.kind.startsWith("decision") ? ` (re ${it.ref})` : ""} from ${it.sender}${it.needsAck ? " [needs ack]" : ""}: ${preview}`,
+      );
+    }
+    if (a.role === "lead") {
+      const force = this.directInForce(a.address);
+      if (force.length) {
+        lines.push(`${this.owner.Name}'s direct messages still in force (48 h; each wins on its point over a CoS instruction, earlier or later, until ${this.owner.name}'s own later word changes it; none is an approval) (${force.length}):`);
+        for (const it of force)
+          lines.push(`- ${it.id}${it.ref ? ` (a follow-up of ${it.ref})` : ""}, ${ago(this.now() - it.createdAt)} ago, ${it.state === "closed" ? `acked ${it.outcome}${it.note ? `: ${JSON.stringify(it.note.slice(0, 200))}` : ""}` : `${it.state}, not acked`}: ${JSON.stringify(it.body)}`); // whole: a restriction past character 300 still binds
+      }
     }
     if (owed.length) {
       lines.push(a.role === "cos" ? `Waiting for your triage (${owed.length}):` : `Your threads' questions waiting for you (${owed.length}):`);

@@ -4,7 +4,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { KIND_TONES, PRIORITY_TONES, ROLE_TONES, TINT, kindOf, prKind, roleOf, ruleState } from "../app/palette.ts";
+import { KIND_TONES, PR_CHIP_TONES, PRIORITY_TONES, ROLE_TONES, SLACK_TONES, TINT, kindOf, prKind, roleOf, ruleState } from "../app/palette.ts";
+import { TYPES } from "../mons.ts";
 
 type Rgb = [number, number, number]; // 0..255, gamma-encoded sRGB
 const hex = (h: string): Rgb => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16)) as Rgb;
@@ -75,6 +76,39 @@ for (const [theme, t] of Object.entries(THEMES)) {
     if (bare < 4.5) failures.push(`kind ${key} ${theme} on a held card: text ${bare.toFixed(2)} < 4.5`);
     if (pill < 4.5) failures.push(`kind ${key} ${theme} pill on a held card: text ${pill.toFixed(2)} < 4.5`);
   }
+}
+// The project accents (2026-11-16, mons.ts TYPES): a project's name in its type's colour on bb's surfaces, and on the
+// sidebar's section header, which is a 14% tint of the colour itself.
+for (const [theme, t] of Object.entries(THEMES)) {
+  for (const [where, surface] of Object.entries(surfaces(t))) {
+    for (const { type, tone } of TYPES) {
+      const c = hex(tone[theme as keyof typeof THEMES]);
+      for (const [on, under] of [[where, surface], [`a 14% tint on ${where}`, over(c, 0.14, surface)]] as const) {
+        const r = contrast(c, under);
+        if (r < 4.5) failures.push(`accent ${type} ${theme} on ${on}: text ${r.toFixed(2)} < 4.5`);
+      }
+    }
+  }
+}
+// Open PRs rev 2 (2026-11-16): a state chip's words on its own TINT fill over every surface, and the Slack preview's
+// link and mention blues on its message card (#ffffff / #1a1d21) and on a mention's tint.
+const SLACK_CARD = { light: hex("#ffffff"), dark: hex("#1a1d21") } as const;
+for (const [theme, t] of Object.entries(THEMES)) {
+  const th = theme as keyof typeof THEMES;
+  for (const [where, surface] of Object.entries(surfaces(t)))
+    for (const [key, tone] of Object.entries(PR_CHIP_TONES)) {
+      const c = hex(tone[th]);
+      const r = contrast(c, over(c, TINT, surface));
+      if (r < 4.5) failures.push(`PR chip ${key} ${theme} on ${where}: text ${r.toFixed(2)} < 4.5`);
+    }
+  for (const [where, surface] of [...Object.entries(surfaces(t)), ["Slack card", SLACK_CARD[th]] as const])
+    for (const [key, tone] of Object.entries(SLACK_TONES)) {
+      const c = hex(tone[th]);
+      for (const [on, under] of [[where, surface], [`a mention tint on ${where}`, over(c, TINT, surface)]] as const) {
+        const r = contrast(c, under);
+        if (r < 4.5) failures.push(`Slack ${key} ${theme} on ${on}: text ${r.toFixed(2)} < 4.5`);
+      }
+    }
 }
 test("every role and kind colour is readable in both themes", () => {
   assert.deepEqual(failures, []);

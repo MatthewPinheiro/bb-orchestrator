@@ -8,7 +8,11 @@ const cloud = z.enum(["aws", "gcp"]);
 const target = { hostId: z.string().min(1), cloud, name: z.string().min(1).max(200), confirm: z.string().min(1).max(200).optional() };
 
 export const pageContract = defineRpcContract({
-  "cs.available": { input: z.null(), output: z.object({ available: z.boolean() }) },
+  "cs.available": {
+    input: z.null(),
+    // state "ok" or "invalid": the tab shows CloudView (an invalid file says what is wrong); otherwise it says what to set up
+    output: z.object({ available: z.boolean(), state: z.enum(["ok", "invalid", "missing", "no-machine", "error"]), path: z.string().nullable() }),
+  },
   "cs.view": {
     input: z.object({ hostId: z.string().nullable() }).strict(),
     output: z.object({

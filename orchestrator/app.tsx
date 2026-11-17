@@ -1,4 +1,4 @@
-// Orchestrator, the app: one destination in bb's navigation with five views at sub-paths: Deliverables (the default), Needs you,
+// Orchestrator, the app: one destination in bb's navigation with views at sub-paths: Deliverables (the default, with the outputs), Needs you,
 // Projects (each project with its own page), Board and Rules. Reads go over RPC (contract.ts); the owner's writes are plain POSTs through one page gate
 // (app/store.ts). The server publishes CHANGED_CHANNEL on every change, and the reads refetch on it: Needs you and the
 // Board always (the badge, and the Board's agents give Needs you its sprites), Projects only while shown
@@ -7,6 +7,7 @@ import { VisualBlocksStyle } from "./app/visual-blocks.tsx";
 import { CloudView } from "./cloud/app.tsx";
 import { GameView } from "./gameboy/app.tsx";
 import { pageContract } from "./cloud/contract.ts";
+import { cloudEmptyState } from "./cloud/core/setup.ts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ExperimentalBadge, PluginNavPanelProps } from "@get-bb/plugin-sdk/app";
 import { ThreadChat, definePluginApp, experimental_useRpcQuery, useBbNavigate, useRealtime } from "@get-bb/plugin-sdk/app";
@@ -18,19 +19,20 @@ import { PRIORITY_ICON, PriorityIcon, priorityAction } from "./app/priority-acti
 import { BoardView, RulesView } from "./app/board.tsx";
 import { NeedsYouView, ZONE } from "./app/needs-you.tsx";
 import { ProjectsView } from "./app/projects.tsx";
-import { OutputsView } from "./app/outputs.tsx";
+import type { SharedRefs } from "./app/ref-text.tsx";
 import { DeliverablesView, inReview } from "./app/deliverables.tsx";
+import { OpenPrsView } from "./app/open-prs.tsx";
 import { pointerPressed } from "./app/store.ts";
 import { EmptyState } from "./app/affect/empty-state-clean.tsx";
-import { close, detailOf, findPane, panes, parse, pathFor, resize, setView, single, split, type Layout } from "./app/layout.ts";
+import { RENAMED_VIEWS, close, detailOf, findPane, panes, parse, pathFor, resize, setView, single, split, type Layout } from "./app/layout.ts";
 import { PaneLayout, paneCss, useWidth } from "./app/panes.tsx";
-import { Look, Muted } from "./app/ui.tsx";
+import { Btn, Look, Muted, ReadState } from "./app/ui.tsx";
 import { RowMeta, useRowData } from "./app/row-meta.tsx";
-import { decide, type TargetLike } from "./app/keys.ts";
+import { decide, where, type TargetLike } from "./app/keys.ts";
 import { emitKeys, handlerFor, keyState } from "./app/key-state.ts";
 import { ShortcutUi } from "./app/shortcut-help.tsx";
+import { PANEL_PATH } from "./app/open-proof.ts";
 
-const PANEL_PATH = "home";
 // Deliverables first (what the owner reviews); the Board is "Activity", last (process, for when they want to look). Its id
 // and sub-path stay "board", so links keep working.
 const VIEWS = [
@@ -38,8 +40,10 @@ const VIEWS = [
   { id: "needs-you", subPath: "needs-you", label: "Needs you" },
   { id: "chat", subPath: "chat", label: "Chat" },
   { id: "projects", subPath: "projects", label: "Projects" },
-  { id: "outputs", subPath: "outputs", label: "Outputs" },
-  // Requested 2026-11-13: Cloud Switch moved in as a tab. Shown only when the machine has a cloud config.
+  // Requested 2026-11-16: the owner's open PRs, which need review, and the review ask to paste in Slack
+  { id: "open-prs", subPath: "open-prs", label: "Open PRs" },
+  // Requested 2026-11-13: Cloud Switch moved in as a tab. Always listed (2026-11-16): without a cloud config it says what to
+  // set up, instead of vanishing with no reason.
   { id: "cloud", subPath: "cloud", label: "Cloud" },
   // Requested 2026-11-13: the emulator moved in too
   { id: "gameboy", subPath: "gameboy", label: "Game Boy" },
@@ -56,7 +60,8 @@ function viewOf(subPath: string): ViewId {
     // keep it as it is
   }
   if (first === "deliverables") return "deliverables"; // the old sub-path still works
-  if (first === "agents") return "projects"; // the Agents tab went into Projects (2026-11-16)
+  // a tab that went into another (Agents into Projects, Outputs into Deliverables, 2026-11-16) opens its successor
+  if (Object.hasOwn(RENAMED_VIEWS, first)) return RENAMED_VIEWS[first] as ViewId;
   return VIEWS.find((v) => v.subPath === first && first !== "")?.id ?? "deliverables";
 }
 
@@ -94,7 +99,7 @@ const VIEW_IDS = VIEWS.map((v) => v.id) as string[];
 function loadLayout(): Layout | null {
   try {
     const raw = localStorage.getItem(LAYOUT_KEY);
-    return raw ? parse(JSON.parse(raw), VIEW_IDS, { agents: "projects" }) : null;
+    return raw ? parse(JSON.parse(raw), VIEW_IDS, RENAMED_VIEWS) : null;
   } catch {
     return null;
   }
@@ -118,7 +123,7 @@ function CosChat({ agents, width }: { agents: Board["agents"] | undefined; width
 /** What a key was pressed on, as keys.ts reads it. */
 function targetOf(el: EventTarget | null): TargetLike {
   if (!(el instanceof HTMLElement)) return null;
-  return { tagName: el.tagName, type: (el as HTMLInputElement).type, isContentEditable: el.isContentEditable, role: el.getAttribute("role"), insideRole: el.closest("[role=menu],[role=listbox]")?.getAttribute("role") ?? null, leave: (el.isContentEditable || el.tagName === "TEXTAREA") && el.getAttribute("aria-expanded") !== "true" };
+  return { tagName: el.tagName, type: (el as HTMLInputElement).type, isContentEditable: el.isContentEditable, role: el.getAttribute("role"), insideRole: el.closest("[role=menu],[role=listbox]")?.getAttribute("role") ?? null, leave: (el.isContentEditable || el.tagName === "TEXTAREA" || (el.tagName === "INPUT" && where({ tagName: "INPUT", type: (el as HTMLInputElement).type }) === "text")) && el.getAttribute("aria-expanded") !== "true" };
 }
 
 function OrchestratorPanel({ subPath }: PluginNavPanelProps) {
@@ -133,6 +138,8 @@ function OrchestratorPanel({ subPath }: PluginNavPanelProps) {
   }, []);
   // a link to a view (a sub-path) opens it in the focused pane; the bare page keeps the saved layout as it was
   const explicit = (subPath.split("/")[0] ?? "") !== "";
+  // an old Outputs link opens Deliverables on its Files filter
+  const fromOutputs = (subPath.split("/")[0] ?? "") === "outputs";
   const linked = viewOf(subPath);
   // the open project page (projects/<slug>). Kept here, not in the URL alone: a pane's focus rewrites the URL, and the
   // page must stay open when the owner clicks another pane and comes back.
@@ -179,6 +186,8 @@ function OrchestratorPanel({ subPath }: PluginNavPanelProps) {
     }
   }, []);
   const mons = useMemo(() => new Map((board.data?.agents ?? []).map((a) => [a.address, a.mon] as const)), [board.data]);
+  // each project's accent type (accent.ts), from its agents: none with the pokemon setting off
+  const accents = useMemo(() => new Map((board.data?.agents ?? []).filter((a) => a.project && a.monType).map((a) => [a.project!, a.monType] as const)), [board.data]);
   useRealtime(CHANGED_CHANNEL, refetchAll);
 
   // Keyboard shortcuts (2026-11-16, for a macropad): one listener, only while this page is drawn and has the focus. keys.ts
@@ -218,10 +227,33 @@ function OrchestratorPanel({ subPath }: PluginNavPanelProps) {
   }, []);
 
   const threads = useMemo(() => new Map((board.data?.agents ?? []).map((a) => [a.address, a.threadId] as const)), [board.data]);
-  const views = VIEWS.filter((v) => v.id !== "cloud" || cloudOn || shown.has("cloud")).map((v) => ({
+  // what references in the Projects rows resolve against (app/refs.ts): known PRs, loaded cards and deliverables, live
+  // threads, the Linear settings; anything else stays plain text
+  const refs = useMemo((): SharedRefs => {
+    const cards = new Map<string, "open" | "answered">();
+    for (const d of board.data?.decisions ?? []) cards.set(d.id, d.state === "open" || d.state === "asked" ? "open" : "answered");
+    for (const c of needs.data?.cards ?? []) cards.set(c.id, "open");
+    const live = new Map((board.data?.agents ?? []).filter((a) => a.status !== "archived").map((a) => [a.address, a.threadId] as const));
+    return {
+      allPrs: (projects.data ?? []).flatMap((p) => p.prs ?? []),
+      linearWorkspace: config.data?.linearWorkspace ?? "",
+      linearTeams: config.data?.linearTeams ?? [],
+      cards,
+      deliverables: new Set((deliverables.data ?? []).map((d) => d.id)),
+      threads: live,
+    };
+  }, [board.data, needs.data, projects.data, config.data, deliverables.data]);
+  const views = VIEWS.map((v) => ({
     id: v.id,
     label: v.label,
-    count: v.id === "needs-you" && needs.data && needs.data.badge > 0 ? needs.data.badge : v.id === "deliverables" && reviewCount > 0 ? reviewCount : undefined,
+    count:
+      v.id === "needs-you" && needs.data && needs.data.badge > 0
+        ? needs.data.badge
+        : v.id === "deliverables" && reviewCount > 0
+          ? reviewCount
+          : v.id === "projects" && board.data?.directUnread?.length
+            ? "•" // a lead's note you haven't opened (PLAN 3.4); never a phone notification
+            : undefined,
   }));
   // the URL follows the focused pane, so back/forward and links keep working
   const follow = (view: string) => {
@@ -246,17 +278,17 @@ function OrchestratorPanel({ subPath }: PluginNavPanelProps) {
   const render = (view: string, pane: { width: number }) => {
     switch (view) {
       case "deliverables":
-        return <DeliverablesView q={deliverables} refetchAll={refetchAll} />;
+        return <DeliverablesView q={deliverables} refetchAll={refetchAll} files={fromOutputs} />;
       case "needs-you":
-        return <NeedsYouView q={needs} refetchAll={refetchAll} mons={mons} threads={threads} />;
+        return <NeedsYouView q={needs} refetchAll={refetchAll} mons={mons} threads={threads} accents={accents} />;
       case "chat":
         return <CosChat agents={board.data?.agents} width={pane.width} />;
       case "projects":
-        return <ProjectsView q={projects} refetchAll={refetchAll} agents={board.data?.agents} lanesFrom={agents.data} needs={needs.data} openCard={openCard} detail={detail} onDetail={onDetail} />;
+        return <ProjectsView q={projects} refetchAll={refetchAll} agents={board.data?.agents} lanesFrom={agents.data} needs={needs.data} openCard={openCard} detail={detail} onDetail={onDetail} refs={refs} />;
+      case "open-prs":
+        return <OpenPrsView />;
       case "board":
         return <BoardView q={board} refetchAll={refetchAll} />;
-      case "outputs":
-        return <OutputsView />;
       case "rules":
         return <RulesView q={board} refetchAll={refetchAll} />;
       case "gameboy":
@@ -266,7 +298,11 @@ function OrchestratorPanel({ subPath }: PluginNavPanelProps) {
           <CloudView />
         ) : (
           <div className="mx-auto w-full max-w-3xl px-4 pt-4">
-            <EmptyState title="No cloud config on this machine" text="The Cloud tab reads the file named in the orchestrator's Cloud tab config setting (see cloud/config.example.json)." />
+            {cloud.data ? (
+              <EmptyState {...cloudEmptyState(cloud.data)} action={<Btn onClick={() => void cloud.refetch()}>Check again</Btn>} />
+            ) : (
+              <ReadState q={cloud} what="whether this machine has a cloud config" />
+            )}
           </div>
         );
       default:
@@ -296,6 +332,7 @@ function OrchestratorPanel({ subPath }: PluginNavPanelProps) {
           compact={compact}
           render={render}
           fill={(v) => v === "chat" || v === "cloud" || v === "gameboy"}
+          wide={(v) => v === "projects"}
           onView={(id, v) => {
             setLayout((l) => setView(l, id, v));
             follow(v);

@@ -3,9 +3,10 @@
 // holders end to end, coloured by status, with PR, handoff and resolve marks and the owner's cards), the flow (who
 // started it, its providers, its PRs) and what waits on what.
 import { type Db, tx } from "./db.ts";
+import { MOOT_MIN_SHARED, sharedWords } from "./moot.ts";
 
 // lead-status: an orch_status publish (value = the status as JSON); the history builder doesn't draw it
-export type EventKind = "spawn" | "status" | "pr" | "handoff" | "retire" | "resolve" | "lead-status";
+export type EventKind = "spawn" | "status" | "pr" | "handoff" | "retire" | "resolve" | "lead-status" | "direct-answer";
 export interface EventIn {
   at: number;
   kind: EventKind;
@@ -174,6 +175,8 @@ export interface DecisionLite {
   endedAt: number | null;
   deferred: boolean;
   heldBehind: string | null;
+  /** The question the owner's card asks (its ask, else its request); absent where nothing reads it. */
+  question?: string;
 }
 
 const BUSY = new Set(["active", "pending", "starting", "stopping"]);
@@ -312,6 +315,19 @@ const who = (address: string) => (address === "person" ? "owner" : address);
 function buildDeps(x: HistoryInput, rows: HistoryRow[]): Dep[] {
   const live = new Set(rows.filter((r) => r.live).map((r) => r.address));
   const ours = new Set(rows.map((r) => r.address));
+  const prThreads = new Map<string, Set<string>>();
+  for (const r of rows) if (r.live) prThreads.set(r.address, new Set(r.holders.filter((h) => h.to === null).map((h) => h.threadId)));
+  return depRules(x, ours, live, prThreads);
+}
+
+/** What the dependency rules read: one project's open cards, mail, PR-bound answers and PR readings. */
+type DepInput = Pick<HistoryInput, "slug" | "heldAt" | "decisions" | "items" | "waits" | "prs">;
+
+/**
+ * The dependency rules, shared by the project page (buildDeps) and the Projects row (buildSummary). `ours`: every
+ * address the project ever had; `live`: those held now; `prThreads`: each live address's current bb threads, in order.
+ */
+function depRules(x: DepInput, ours: Set<string>, live: Set<string>, prThreads: Map<string, Set<string>>): Dep[] {
   const out: Dep[] = [];
   if (x.heldAt !== null) out.push({ from: x.slug, on: "owner", kind: "hold", label: "on hold", since: x.heldAt, ref: null, block: true });
   for (const d of x.decisions) {
@@ -339,16 +355,241 @@ function buildDeps(x: HistoryInput, rows: HistoryRow[]): Dep[] {
     const n = x.prs.find((p) => p.url === w.pr_url)?.number ?? null;
     out.push({ from: w.owner, on: "pr", kind: "pr", label: `#${n ?? "?"} ${w.cond}`, since: w.created_at, ref: w.pr_url, block: false });
   }
-  for (const r of rows) {
-    if (!live.has(r.address)) continue;
-    const ids = new Set(r.holders.filter((h) => h.to === null).map((h) => h.threadId));
+  for (const [address, ids] of prThreads) {
+    if (!live.has(address)) continue;
     for (const p of x.prs) {
       if (!ids.has(p.thread_id) || !p.url || (p.state !== "open" && p.state !== "draft")) continue;
-      const review = p.sig.startsWith("v2|") ? p.sig.split("|")[4] || null : null;
-      if (p.checks === "pending") out.push({ from: r.address, on: "ci", kind: "ci", label: `PR #${p.number ?? "?"}`, since: null, ref: p.url, block: false });
+      const review = reviewOf(p.sig);
+      if (p.checks === "pending") out.push({ from: address, on: "ci", kind: "ci", label: `PR #${p.number ?? "?"}`, since: null, ref: p.url, block: false });
       else if (p.state === "open" && (review === "review_required" || review === "review_requested" || p.attention === "review_requested"))
-        out.push({ from: r.address, on: "review", kind: "review", label: `PR #${p.number ?? "?"}`, since: null, ref: p.url, block: false });
+        out.push({ from: address, on: "review", kind: "review", label: `PR #${p.number ?? "?"}`, since: null, ref: p.url, block: false });
     }
   }
   return out.sort((a, b) => Number(b.block) - Number(a.block) || DEP_RANK[a.kind] - DEP_RANK[b.kind] || (a.since ?? Infinity) - (b.since ?? Infinity));
+}
+
+/** The review decision a PR row's signature holds (v2|url|state|checks|review|merge|queued), else null. */
+const reviewOf = (sig: string) => (sig.startsWith("v2|") ? sig.split("|")[4] || null : null);
+
+// ---------------------------------------------------------------- the Projects row (2026-11-16, the command center)
+
+/**
+ * One wait on a project's row. `source`: "lead" (the lead's own status, matched with a live fact when one says the same
+ * kind and ref) or "live" (read from cards, mail and PRs). `kind` is the lead's kind, or for a live wait what it is: an
+ * owner card (card, deferred, held), a CoS card, a dead letter, a reply owed by someone outside, an answer bound to a
+ * PR (pr-bound), ci, review, a PR ready to merge (merge) or blocked (pr-blocked), a deliverable in review.
+ * `unchanged`: `since` is when the PR's recorded state last changed (prs.seen_at), drawn "unchanged 15h", never
+ * "waiting 15h": the reading can't prove the condition held all along. `note`: what a live fact adds to the lead's word
+ * that still stands (its thread failed). A lead's wait a live fact shows is over (answered, merged, resolved) is not
+ * a wait at all: buildSummary drops it and says the status is out of date.
+ */
+export interface SummaryWait {
+  source: "lead" | "live";
+  kind: string;
+  ref: string | null;
+  who: string | null;
+  label: string | null;
+  since: number | null;
+  unchanged: boolean;
+  note: string | null;
+}
+export interface ProjectSummary {
+  /** The motion word before the client adds Needs you and Blocked: held, no lead, moving, waiting, quiet. */
+  motion: "held" | "nolead" | "moving" | "waiting" | "quiet";
+  threads: { working: number; total: number };
+  leadWorking: boolean;
+  /** The owner's open cards from this project (answerable now: not deferred, not held), and the oldest one's title. */
+  needsYou: { count: number; id: string | null; title: string | null; question: string | null; since: number | null };
+  /** The waits, each once: no lead wait a live fact shows is over, no two with the same kind and ref or the same words. */
+  waits: SummaryWait[];
+  /** The lead's blockers, minus those a card answered after the status covers. */
+  blockers: string[];
+  /** A live fact contradicts the lead's status (a wait it names is over, or an answer covers a blocker). */
+  statusOutOfDate: boolean;
+  /** For a quiet row: the latest finished thing at any age, and since when the lead has been idle. */
+  last: { text: string; at: number } | null;
+  leadIdleSince: number | null;
+  /** The latest finished thing in the last 24 h: an approved deliverable, a merged PR or a thread's report. */
+  done: { text: string; at: number; kind: "deliverable" | "merged" | "report" } | null;
+}
+
+export interface SummaryInput extends DepInput {
+  now: number;
+  hasLead: boolean;
+  status: { waits: { kind: string; ref: string | null; label: string | null; who: string | null; since: number }[]; blockers: string[]; updatedAt: number } | null;
+  /** The project's agents, live and retired (retired ones only name their addresses, for `ours`). */
+  agents: { thread_id: string; address: string; role: string; status: string; idle_at: number | null; retired_at: number | null }[];
+  prs: (DepInput["prs"][number] & { seen_at: number })[];
+  deliverables: { id: string; title: string; state: string; updated_at: number }[];
+  /** For the lead's own waits that name a card: its state now and when it was answered. */
+  cards: Map<string, { state: string; answeredAt: number | null }>;
+  /**
+   * PRs and addresses anywhere in the plugin, for a lead's wait that names one outside the project (its PR merged, its
+   * thread resolved). refAgents: whether the address has a live holder now (false: known, and every holder is gone).
+   */
+  refPrs?: Map<string, { state: string | null; seen_at: number }>;
+  refAgents?: Map<string, boolean>;
+  /** The project's cards answered after its status was published: what can cover a lead's blocker. */
+  answered: { id: string; text: string; answeredAt: number }[];
+  done: { text: string; at: number; kind: "deliverable" | "merged" | "report" }[];
+  /** The latest finished thing at any age (for a quiet row). */
+  last: { text: string; at: number } | null;
+}
+
+const WORKING = new Set(["active", "pending", "starting", "stopping"]);
+export const SUMMARY_DONE_MS = 24 * 3_600_000;
+/** A wait on the lead's own thread is part of the title until that thread has been idle this long (or failed). */
+export const OWN_THREAD_IDLE_MS = 30 * 60_000;
+const PR_BLOCKED = new Set(["conflicts", "blocked", "checks_failed"]);
+
+/**
+ * One project's row, from the dependency rules kept in one place (depRules), filtered to waits by the project on
+ * something outside it: no mail waiting for its own agents to act, no card a thread put to its own lead, and a PR's
+ * waits only while that PR's thread isn't working. Then the lead's own waits, each merged with a live fact that has
+ * the same kind and ref, and dropped when a live fact shows it is over (its PR merged, its card answered, its thread
+ * resolved); a failed thread stays, with a note.
+ */
+export function buildSummary(x: SummaryInput): ProjectSummary {
+  const liveAgents = x.agents.filter((a) => a.retired_at === null && a.status !== "archived");
+  const ours = new Set(x.agents.map((a) => a.address));
+  const live = new Set(liveAgents.map((a) => a.address));
+  // a PR belongs to the address, not the thread that first read it: after a handoff the successor holds it
+  const addressOf = new Map(x.agents.map((a) => [a.thread_id, a.address]));
+  const workingAt = new Set(liveAgents.filter((a) => WORKING.has(a.status)).map((a) => a.address));
+  const prWorked = (threadId: string) => workingAt.has(addressOf.get(threadId) ?? "");
+  const prThreads = new Map<string, Set<string>>();
+  for (const a of x.agents) prThreads.set(a.address, new Set([...(prThreads.get(a.address) ?? []), a.thread_id]));
+  const prByUrl = new Map(x.prs.filter((p) => p.url).map((p) => [p.url!, p]));
+  // a PR wait counts only while the thread that owns the PR isn't working on it
+  const prIdle = (url: string | null) => {
+    const p = url ? prByUrl.get(url) : undefined;
+    return !p || !prWorked(p.thread_id);
+  };
+  const liveWaits: SummaryWait[] = [];
+  const add = (w: Omit<SummaryWait, "source" | "note" | "unchanged" | "who"> & { unchanged?: boolean; who?: string | null }) =>
+    liveWaits.push({ source: "live", who: null, unchanged: false, note: null, ...w });
+  for (const d of depRules(x, ours, live, prThreads)) {
+    if (d.kind === "hold") continue; // the state word says it
+    // inside the project: mail to its own agents is theirs to act on, a thread's card to its own lead is the lead's
+    if (ours.has(d.on)) continue;
+    if (d.kind === "card") add({ kind: d.on === "owner" ? "card" : "cos-card", ref: d.ref, label: d.label, since: d.since });
+    else if (d.kind === "held" || d.kind === "deferred") add({ kind: d.kind, ref: d.ref, label: d.label, since: d.since });
+    else if (d.kind === "dead" || d.kind === "reply") add({ kind: d.kind, ref: d.ref, who: d.on, label: d.label, since: d.since });
+    else if (d.kind === "pr") {
+      if (prIdle(d.ref)) add({ kind: "pr-bound", ref: d.ref, label: d.label, since: d.since });
+    } else if ((d.kind === "ci" || d.kind === "review") && prIdle(d.ref)) {
+      const p = d.ref ? prByUrl.get(d.ref) : undefined;
+      add({ kind: d.kind, ref: d.ref, who: p?.number ? `PR #${p.number}` : null, label: null, since: p?.seen_at ?? null, unchanged: true });
+    }
+  }
+  // the added live waits: a live PR ready to merge or blocked, and a deliverable in review
+  for (const [address, ids] of prThreads) {
+    if (!live.has(address)) continue;
+    for (const p of x.prs) {
+      if (!ids.has(p.thread_id) || !p.url || p.state !== "open" || prWorked(p.thread_id)) continue;
+      const who = p.number ? `PR #${p.number}` : null;
+      if (p.attention === "ready_to_merge") add({ kind: "merge", ref: p.url, who, label: "ready to merge", since: p.seen_at, unchanged: true });
+      else if (PR_BLOCKED.has(p.attention ?? "")) add({ kind: "pr-blocked", ref: p.url, who, label: (p.attention ?? "").replace(/_/g, " "), since: p.seen_at, unchanged: true });
+    }
+  }
+  for (const d of x.deliverables) if (d.state === "review") add({ kind: "deliverable", ref: d.id, label: d.title, since: d.updated_at });
+
+  // the lead's word, matched to a live fact by kind and ref: CI is its own dependency, so a lead's "the PR" (a review,
+  // a merge) never hides a live CI line, and a lead's "CI" matches only CI
+  const key = (w: { kind: string; ref: string | null }): string[] => {
+    if (!w.ref) return [];
+    if (["card", "held", "deferred", "deliverable"].includes(w.kind) || w.kind === "owner") return [`owner|${w.ref}`];
+    if (["pr", "review", "merge", "pr-blocked", "pr-bound"].includes(w.kind)) return [`pr|${w.ref}`];
+    return [`${w.kind}|${w.ref}`];
+  };
+  const lead: SummaryWait[] = [];
+  const matched = new Set<SummaryWait>();
+  const agentAt = new Map(x.agents.map((a) => [a.address, a]));
+  // a wait a live fact shows is over is not drawn at all (2026-11-16, the owner: no struck lines); the row says once
+  // that the status is out of date, and the tick asks the lead to republish (Engine.statusOutOfDateNudges)
+  let over = false;
+  for (const w of x.status?.waits ?? []) {
+    let note: string | null = null;
+    const pr = w.ref ? (prByUrl.get(w.ref) ?? x.refPrs?.get(w.ref)) : undefined;
+    const k = new Set(key(w));
+    const same = liveWaits.filter((l) => !matched.has(l) && key(l).some((y) => k.has(y)));
+    let ended = (w.kind === "pr" || w.kind === "ci") && !!pr && (pr.state === "merged" || pr.state === "closed");
+    if (w.kind === "thread" && w.ref) {
+      const a = agentAt.get(w.ref);
+      if (a && w.ref.startsWith(`thread:${x.slug}:`)) {
+        // its own thread: part of the title, a line only once that thread sits idle, failed or is gone
+        if (a.retired_at !== null || a.status === "archived") ended = true;
+        else if (a.status === "error") note = "the thread failed";
+        else if (!(a.status === "idle" && a.idle_at !== null && x.now - a.idle_at > OWN_THREAD_IDLE_MS)) continue;
+      } else if (!w.ref.startsWith(`thread:${x.slug}:`) && x.refAgents?.get(w.ref) === false) ended = true; // another project's thread, resolved
+    }
+    if (w.kind === "owner" && w.ref?.startsWith("d-")) {
+      const c = x.cards.get(w.ref);
+      // over only once answered (a merged card counts when the card it went into was), or withdrawn: nothing is asked
+      if (c && (c.answeredAt !== null || c.state === "withdrawn")) ended = true;
+    }
+    if (ended) {
+      over = true;
+      for (const l of same) matched.add(l); // the live fact about the same thing is over too
+      continue;
+    }
+    for (const l of same) matched.add(l);
+    // the lead's own since: a live reading's age is "unchanged", not how long this wait has been named
+    lead.push({ source: "lead", kind: w.kind, ref: w.ref, who: w.who, label: w.label, since: w.since, unchanged: false, note });
+  }
+  const waits = dedupeWaits([...lead, ...liveWaits.filter((l) => !matched.has(l)).sort((a, b) => (a.since ?? Infinity) - (b.since ?? Infinity))]);
+  const blockers = (x.status?.blockers ?? []).filter((b) => !blockerCovered(b, x.status!.updatedAt, x.answered, x.cards));
+  if (blockers.length < (x.status?.blockers.length ?? 0)) over = true;
+
+  const threads = liveAgents.filter((a) => a.role === "thread");
+  const leadAgent = liveAgents.find((a) => a.role === "lead");
+  const leadWorking = !!leadAgent && WORKING.has(leadAgent.status);
+  const threadsWorking = threads.filter((a) => WORKING.has(a.status)).length;
+  const cards = x.decisions.filter((d) => d.state === "asked" && d.level === "person" && !d.deferred && !d.heldBehind && (ours.has(d.origin) || ours.has(d.asker)));
+  const oldest = [...cards].sort((a, b) => a.askedAt - b.askedAt)[0];
+  const motion: ProjectSummary["motion"] = x.heldAt !== null ? "held" : !x.hasLead ? "nolead" : leadWorking || threadsWorking > 0 ? "moving" : waits.length ? "waiting" : "quiet";
+  const done = x.done.filter((d) => x.now - d.at <= SUMMARY_DONE_MS).sort((a, b) => b.at - a.at)[0] ?? null;
+  return {
+    motion,
+    threads: { working: threadsWorking, total: threads.length },
+    leadWorking,
+    needsYou: { count: cards.length, id: oldest?.id ?? null, title: oldest?.title ?? null, question: oldest?.question ?? null, since: oldest?.askedAt ?? null },
+    waits,
+    blockers,
+    statusOutOfDate: over,
+    done,
+    last: x.last,
+    leadIdleSince: leadAgent && leadAgent.status === "idle" ? leadAgent.idle_at : null,
+  };
+}
+
+/** A wait's words for comparing: lower case, punctuation and spacing folded. */
+const norm = (s: string | null) => (s ?? "").toLowerCase().replace(/[^a-z0-9#]+/g, " ").trim();
+
+/**
+ * Each wait once (2026-11-16: one PR's "an answer waits until it is merged" showed twice): the first of those with the
+ * same kind and ref, then the first of those saying the same words (kind, who and label, folded). The lead's own come
+ * first, so its word is the one kept.
+ */
+export function dedupeWaits(waits: SummaryWait[]): SummaryWait[] {
+  const seen = new Set<string>();
+  return waits.filter((w) => {
+    const keys = [w.ref ? `ref|${w.kind}|${w.ref}` : null, w.label ? `text|${w.kind}|${norm(w.who)}|${norm(w.label)}` : null].filter((k): k is string => !!k);
+    if (keys.some((k) => seen.has(k))) return false;
+    for (const k of keys) seen.add(k);
+    return true;
+  });
+}
+
+/**
+ * Whether an answer covers a lead's blocker (2026-11-16, kept conservative): the blocker names a card that has been
+ * answered, or a card from the project answered after the status was published shares at least MOOT_MIN_SHARED content
+ * words with it (moot.ts, the rule the auto-moot check uses). "Staging cloud login expired" is covered by an answer to "Dev
+ * GCP sign-in again (rig login expired)"; a card about something else, answered later, covers nothing.
+ */
+export function blockerCovered(blocker: string, statusAt: number, answered: SummaryInput["answered"], cards: SummaryInput["cards"]): boolean {
+  for (const id of blocker.match(/\bd-[0-9A-Za-z-]+/g) ?? []) {
+    if (cards.get(id)?.answeredAt != null) return true; // answered, not merged into an open card or withdrawn
+  }
+  return answered.some((a) => a.answeredAt > statusAt && sharedWords(blocker, a.text).length >= MOOT_MIN_SHARED);
 }

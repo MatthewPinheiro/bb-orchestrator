@@ -35,11 +35,11 @@ test("a thread's Pokémon evolves at its species' own levels", () => {
 });
 
 test("leads evolve too (the owner: start leads at their base form): every lead Pokémon is a base that ends in a strong form", async () => {
-  const { LEAD_KINDS, MON_POOLS, baseOf } = await import("../mons.ts");
+  const { MON_POOLS, baseOf } = await import("../mons.ts");
   assert.equal(formAt("Abra", 15)!.name, "Abra");
   assert.equal(formAt("Abra", 16)!.name, "Kadabra");
   assert.equal(formAt("Abra", 36)!.name, "Alakazam");
-  for (const x of [...MON_POOLS.lead, ...LEAD_KINDS.flatMap((k) => k.mons)]) {
+  for (const x of MON_POOLS.lead) {
     assert.equal(baseOf(x.name), x.name, `${x.name} is a base form`);
     assert.notEqual(formAt(x.name, 100)!.name, x.name, `${x.name} evolves`);
   }
@@ -60,15 +60,15 @@ test("a lead registered before leads evolved moves back to its line's base, and 
 test("each turn counts once, XP stays with the address across a restart, and an evolution is announced once", () => {
   const { e } = setup();
   const t = e.register("T-w1", "thread", "alpha", "T-la");
-  assert.equal(t.mon, "Caterpie");
-  e.gainXp("T-w1", tokensForLevel(7), 5);
-  assert.equal(e.gainXp("T-w1", tokensForLevel(7), 5), 7, "the same events again add nothing");
-  assert.equal(e.board().filter((r) => /evolved into Metapod/.test(r.title)).length, 1);
+  assert.equal(t.mon, "Whismur", "alpha matches no type's words: the first free type, Normal");
+  e.gainXp("T-w1", tokensForLevel(20), 5);
+  assert.equal(e.gainXp("T-w1", tokensForLevel(20), 5), 20, "the same events again add nothing");
+  assert.equal(e.board().filter((r) => /evolved into Loudred/.test(r.title)).length, 1);
   const succ = e.takeOver("T-w1", "T-w2", "handoff.md");
-  assert.equal(e.xpOf(succ.address).level, 7, "the successor keeps the level");
-  e.gainXp("T-w2", tokensForLevel(10) - tokensForLevel(7), 1);
-  assert.equal(e.xpOf(succ.address).level, 10);
-  assert.ok(e.board().some((r) => /Metapod evolved into Butterfree/.test(r.title)));
+  assert.equal(e.xpOf(succ.address).level, 20, "the successor keeps the level");
+  e.gainXp("T-w2", tokensForLevel(40) - tokensForLevel(20), 1);
+  assert.equal(e.xpOf(succ.address).level, 40);
+  assert.ok(e.board().some((r) => /Loudred evolved into Exploud/.test(r.title)));
 });
 
 test("every thread Pokémon is a three-stage line, so each thread can evolve twice", () => {
@@ -84,15 +84,15 @@ test("on start, live threads that share a Pokémon or hold one from the old two-
   const e = new Engine(db as never, ports);
   e.register("T-la", "lead", "alpha");
   for (const id of ["T-1", "T-2", "T-3", "T-4"]) e.register(id, "thread", "alpha", "T-la");
-  db.prepare(`UPDATE agents SET mon = 'Weedle', created_at = 4 WHERE thread_id = 'T-4'`).run();
-  // the state the owner saw: two threads on Caterpie, one on Rattata (two-stage); the oldest keeps what it has
-  db.prepare(`UPDATE agents SET mon = 'Caterpie', created_at = 1 WHERE thread_id = 'T-1'`).run();
-  db.prepare(`UPDATE agents SET mon = 'Caterpie', created_at = 2 WHERE thread_id = 'T-2'`).run();
+  db.prepare(`UPDATE agents SET mon = 'Slakoth', created_at = 4 WHERE thread_id = 'T-4'`).run();
+  // the state the owner saw: two threads on Whismur, one on Rattata (two-stage); the oldest keeps what it has
+  db.prepare(`UPDATE agents SET mon = 'Whismur', created_at = 1 WHERE thread_id = 'T-1'`).run();
+  db.prepare(`UPDATE agents SET mon = 'Whismur', created_at = 2 WHERE thread_id = 'T-2'`).run();
   db.prepare(`UPDATE agents SET mon = 'Rattata', created_at = 3 WHERE thread_id = 'T-3'`).run();
   new Engine(db as never, ports);
   const mons = (db.prepare(`SELECT thread_id, mon FROM agents WHERE role = 'thread' ORDER BY created_at`).all() as { thread_id: string; mon: string }[]).map((r) => r.mon);
-  assert.equal(mons[0], "Caterpie", "the oldest holder keeps its Pokémon");
-  assert.equal(mons[3], "Weedle", "a thread with its own Pokémon keeps it, even though a re-rolled one would reach it first");
+  assert.equal(mons[0], "Whismur", "the oldest holder keeps its Pokémon");
+  assert.equal(mons[3], "Slakoth", "a thread with its own Pokémon keeps it, even though a re-rolled one would reach it first");
   assert.equal(new Set(mons).size, mons.length, "no two live threads share one");
   assert.ok(mons.every((x) => MON_POOLS.thread.some((p) => p.name === x)), "none is left on a two-stage line");
 });

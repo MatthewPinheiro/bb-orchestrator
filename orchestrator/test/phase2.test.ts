@@ -227,7 +227,7 @@ test("The owner gets a push when a card enters Needs you: asked by the CoS, esca
   assert.deepEqual(s.up, [d1.id, d2.id, d1.id]);
 });
 
-test("each role agent gets its Pokémon: Rayquaza, Regigigas, base-form leads, early-route threads, no repeats while live", () => {
+test("each role agent gets its Pokémon: Rayquaza, Regigigas, its type's lead line, the type's three-stage threads, no repeats while live", () => {
   const s = setup();
   const st = s.e.register("T-st", "steward", null);
   const lb = s.e.register("T-lb", "lead", "beta");
@@ -235,10 +235,11 @@ test("each role agent gets its Pokémon: Rayquaza, Regigigas, base-form leads, e
   const t2 = s.e.register("T-w2", "thread", "alpha", "T-la");
   assert.equal(s.cos.mon, "Rayquaza");
   assert.equal(st.mon, "Regigigas");
-  assert.deepEqual([s.lead.mon, lb.mon], ["Bagon", "Gible"], "leads start at a base form");
-  assert.deepEqual([t1.mon, t2.mon], ["Caterpie", "Starly"]);
+  // alpha and beta match no type's words: the first free types, Normal then Fire
+  assert.deepEqual([s.lead.mon, lb.mon], ["Porygon", "Charmander"], "leads start at the base of their type's line");
+  assert.deepEqual([t1.mon, t2.mon], ["Whismur", "Lillipup"]);
   s.e.retire("T-w1");
-  assert.equal(s.e.register("T-w3", "thread", "alpha", "T-la").mon, "Caterpie", "a retired thread's Pokémon is free again");
+  assert.equal(s.e.register("T-w3", "thread", "alpha", "T-la").mon, "Whismur", "a retired thread's Pokémon is free again");
 });
 
 test("a reservation left by a plugin restart mid-spawn gives its slot back, so the plan isn't short a thread forever", () => {
@@ -278,15 +279,17 @@ test("sidebar sections are the plain title-cased project name (the owner dropped
   assert.equal(sectionTitle(null), "Orchestrator");
 });
 
-test("a lead's Pokémon fits its project's work (the owner: a PR review lead is a smart type), and two leads never share one", async () => {
-  const { pickMon } = await import("../mons.ts");
-  const fit = (p: string, taken: string[] = []) => pickMon("lead", taken, p).name;
-  assert.equal(fit("code-reviews"), "Abra", "reviews: Psychic, grows into the genius");
-  assert.equal(fit("search-llms"), "Beldum", "AI: grows into the supercomputer brain");
-  assert.equal(fit("bug-triage"), "Scyther", "bugs: a Bug type");
-  assert.equal(fit("release-train"), "Dratini", "shipping: grows into the mail carrier");
-  assert.equal(fit("microvm-disks"), "Drilbur", "file systems: a digger");
-  assert.equal(fit("code-reviews", ["Abra"]), "Ralts", "the next of the same kind when taken");
-  assert.equal(fit("agent-v2", ["Beldum"]), "Solosis", "an agent harness is AI work: the next brain when Beldum is taken");
-  assert.equal(fit("alpha"), "Bagon", "no match: the general pool");
+test("a project's type fits its work (the owner: a PR review lead is a smart type), its lead is that type's line, and two projects never share a type", async () => {
+  const { pickMon, pickType } = await import("../mons.ts");
+  const lead = (p: string, taken: string[] = []) => pickMon("lead", [], pickType(p, taken)).name;
+  assert.equal(pickType("code-reviews", []), "dark", "reviews: Dark, three heads review from every side");
+  assert.equal(lead("code-reviews"), "Deino");
+  assert.equal(lead("search-llms"), "Beldum", "AI: Psychic, grows into the supercomputer brain");
+  assert.equal(lead("bug-triage"), "Scyther", "bugs: a Bug type");
+  assert.equal(lead("release-train"), "Dratini", "shipping: Flying, grows into the mail carrier");
+  assert.equal(lead("microvm-disks"), "Gible", "file systems: Ground, a digger");
+  assert.equal(pickType("search-llms", ["psychic"]), "fairy", "a taken type: the sibling of the matched one");
+  assert.equal(pickType("alpha", []), "normal", "no match: the first free type");
+  assert.equal(pickType("alpha", ["normal", "fire"]), "water");
 });
+

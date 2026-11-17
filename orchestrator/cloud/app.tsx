@@ -70,7 +70,7 @@ function Row({ t, v, busy, ask, onUse, onLogin, onAsk, onCheck }: { t: TargetVie
   const asking = ask && ask.kind !== "revoke" && ask.t.cloud === t.cloud && ask.t.name === t.name ? ask.kind : null;
   const what = t.cloud === "aws" ? "AWS profile" : "gcloud configuration";
   return (
-    <li data-target={`${t.cloud}:${t.name}`} className={cx("py-3", t.env === "prod" && "-mx-4 border-l-4 border-destructive bg-destructive/5 px-3")}>
+    <li data-target={`${t.cloud}:${t.name}`} className="py-3">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">

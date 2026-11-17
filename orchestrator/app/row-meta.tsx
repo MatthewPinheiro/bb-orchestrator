@@ -7,8 +7,9 @@ import { experimental_useRpcQuery, useRealtime } from "@get-bb/plugin-sdk/app";
 import type { ExperimentalThreadRowMetadataProps } from "@get-bb/plugin-sdk/app";
 import { CHANGED_CHANNEL, rpcContract, type Agents } from "../contract.ts";
 import { isShiny, monByName, monSprite } from "../mons.ts";
-import { PRIORITY_TONES, ROLE_TONES, css, projectTone, roleOf, tint, type Priority } from "./palette.ts";
+import { PRIORITY_TONES, ROLE_TONES, css, roleOf, tint, type Priority } from "./palette.ts";
 import { sectionTitle } from "../core/model.ts";
+import { accentText, sectionCss } from "./accent.ts";
 
 type Agent = Agents[number];
 export type RowData = Map<string, Agent>;
@@ -37,23 +38,6 @@ export function useRowData(): RowData {
 }
 
 /**
- * Requested 2026-11-13: section titles colour-coded "like a bar". Each project's section header (found by its title,
- * sectionTitle) gets a background tinted in the project's colour and bold text in that colour (the left bar was dropped).
- */
-function sectionCss(map: RowData): string[] {
-  const slugs = new Set<string | null>([null, ...[...map.values()].map((a) => a.project)]);
-  return [...slugs].flatMap((slug) => {
-    const title = sectionTitle(slug).replace(/["\\]/g, "");
-    const c = css(projectTone(slug));
-    const head = `[data-sidebar-section-id]:has(> [data-sidebar="group-label"] span[title="${title}"]) > [data-sidebar="group-label"]`;
-    return [
-      `${head} { background: color-mix(in srgb, ${c} 14%, var(--sidebar, var(--background))) !important; border-radius: 6px; margin: 6px 0 2px; }`,
-      `${head} span[title] { color: ${c}; font-weight: 650; letter-spacing: .01em; }`,
-    ];
-  });
-}
-
-/**
  * Requested 2026-11-13: "move the sprites to the claude icons". bb has no per-thread row icon slot, so one stylesheet
  * swaps the provider mark of each role agent's row (found by its thread link's data-sidebar-thread-id) for its
  * sprite. Rows of threads that aren't role agents keep bb's own icon.
@@ -78,7 +62,7 @@ function useRowIcons(map: RowData): void {
           `${row} { width: ${px}px; height: ${px}px; margin: -${(px - 16) / 2}px 4px -${(px - 16) / 2}px -${px - 30}px; position: relative; top: 9px; background: url("${monSprite(m, true, isShiny(a.role))}") center / contain no-repeat; image-rendering: pixelated; }`,
         ];
       })
-      .concat(sectionCss(map))
+      .concat(sectionCss(map.values()))
       .join("\n");
   }, [map]);
   useEffect(() => () => document.getElementById("orch-row-icons")?.remove(), []);
@@ -100,7 +84,8 @@ export function RowMeta({ thread, data }: ExperimentalThreadRowMetadataProps<Row
         <span style={{ color: css(tone), background: tint(tone), borderRadius: 999, padding: "0 7px", fontWeight: 600 }}>{ROLE_LABEL[a.role] ?? a.role}</span>
       ) : null}
       <span style={{ fontWeight: 700 }}>Lv {a.level}</span>
-      {m ? <span style={{ color: tone ? css(tone) : undefined }}>{m.name}</span> : null}
+      {/* a lead's and its threads' Pokémon in their project's accent, so the family reads as one */}
+      {m ? <span style={{ color: accentText(a.monType, tone ? css(tone) : undefined) }}>{m.name}</span> : null}
       {priority ? (
         <span style={{ color: css(PRIORITY_TONES[priority]), background: tint(PRIORITY_TONES[priority]), borderRadius: 999, padding: "0 7px" }}>{priority}</span>
       ) : null}

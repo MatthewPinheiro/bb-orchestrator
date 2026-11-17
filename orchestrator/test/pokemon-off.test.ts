@@ -45,8 +45,8 @@ function work(e: Engine) {
   e.register("T-st", "steward", null);
   e.register("T-la", "lead", "code-reviews");
   e.register("T-w1", "thread", "code-reviews", "T-la");
-  e.gainXp("T-w1", tokensForLevel(40), 1); // Caterpie → Butterfree
-  e.gainXp("T-la", tokensForLevel(60), 1); // Abra → Alakazam
+  e.gainXp("T-w1", tokensForLevel(40), 1); // Sandile → Krookodile (a review project is Dark: mons.ts TYPES)
+  e.gainXp("T-la", tokensForLevel(64), 1); // Deino → Hydreigon
   e.takeOver("T-w1", "T-w2", "handoff.md");
 }
 
@@ -90,10 +90,10 @@ test("on: briefs name the Pokémon and evolutions reach the board, as before the
   const b = briefs(e);
   assert.match(b.cos!, /Your Pokémon is Rayquaza\. Your working folder/);
   assert.match(b.steward!, /Your Pokémon is Regigigas\. Your working/);
-  assert.match(b.lead!, /Your Pokémon is Abra\. Your working folder/);
+  assert.match(b.lead!, /Your Pokémon is Deino\. Your working folder/);
   work(e);
-  assert.ok(e.board().some((r) => /Caterpie evolved into Butterfree/.test(r.title)));
-  assert.ok(e.board().some((r) => /Abra evolved into Alakazam/.test(r.title)));
+  assert.ok(e.board().some((r) => /Sandile evolved into Krookodile/.test(r.title)));
+  assert.ok(e.board().some((r) => /Deino evolved into Hydreigon/.test(r.title)));
 });
 
 test("agents registered and handed off while off show their Pokémon once it is switched on", () => {
@@ -101,6 +101,6 @@ test("agents registered and handed off while off show their Pokémon once it is 
   work(e);
   e.settings = { ...e.settings, pokemon: true };
   assert.equal(e.agentByAddress("cos")!.mon, "Rayquaza");
-  assert.equal(e.agentByAddress("lead:code-reviews")!.mon, "Abra");
-  assert.equal(e.agentByThread("T-w2")!.mon, "Caterpie", "the handoff successor kept the Pokémon while it was hidden");
+  assert.equal(e.agentByAddress("lead:code-reviews")!.mon, "Deino");
+  assert.equal(e.agentByThread("T-w2")!.mon, "Sandile", "the handoff successor kept the Pokémon while it was hidden");
 });

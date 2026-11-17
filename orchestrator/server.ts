@@ -9,7 +9,7 @@ import { type BbRun, setupSidebar } from "./core/sidebar.ts";
 // deliverables
 import { chmodSync, closeSync, cpSync, createReadStream, openSync, readdirSync, readSync, rmSync, statSync } from "node:fs";
 import { Readable } from "node:stream";
-import { approveBody, type Deliverables, PROOF_ROUTE, requestChangesBody, secretBody } from "./contract.ts";
+import { approveBody, type Deliverables, PROOF_ROUTE, type ProjectOrder, requestChangesBody, secretBody } from "./contract.ts";
 import { type DeliverPlace, type ProofInput, SECRET_TTL_MS } from "./core/engine.ts";
 import { deliverBlocks, deliverPoints, fromJson, inputBlocksSchema, lessTextRefusal, looksLikeCode } from "./blocks.ts";
 import { CARD_CAPS, DELIVER_BUDGET, deliverBudgetRefusal } from "./core/caps.ts";
@@ -29,6 +29,8 @@ import {
   type Outputs,
   CHANGED_CHANNEL,
   holdBody,
+  directMessageBody,
+  directSeenBody,
   priorityBody,
   type Projects,
   deferBody,
@@ -67,10 +69,12 @@ import { cosTitleOf, ownerWords, type OwnerWords } from "./core/owner.ts";
 import { type DreamOptions, Dreams, loadDreamConfig, parseTimers, parseUnits, realDreamPorts, toolsDir } from "./core/dreams.ts";
 // the Cloud tab
 import { registerCloud } from "./cloud/server.ts";
+import { registerOpenPrs } from "./open-prs/server.ts";
 // the Game Boy tab
 import { registerGameboy } from "./gameboy/server.ts";
 import { baseBranchOf, EXEMPT_NOTE, remoteBase, remoteBranchFor, worktreeVerdict, type Verdict, type WorkspaceRead } from "./core/clean.ts";
 import { DEFAULT_CONFIG_PATH as DEFAULT_CLOUD_CONFIG } from "./cloud/core/config.ts";
+import { type ChildLevel, type NotifySaved, SAVED_KEY as NOTIFY_SAVED, serialReconcile } from "./core/notify-only.ts";
 
 const TOOLS_BY_ROLE: Record<Role, string[]> = {
   thread: ["orch_ask", "orch_ack", "orch_send", "orch_inbox", "orch_report", "orch_output"],
@@ -81,9 +85,9 @@ const TOOLS_BY_ROLE: Record<Role, string[]> = {
 
 /** Each role's standing instructions; `o` names the owner (the ownerName setting). */
 const roleBrief = (o: OwnerWords): Record<Role, string> => ({
-  cos: `You are the Chief of Staff (cos) in ${o.name}'s orchestrator. You hear only what needs judgment: new decisions to triage and messages to you. For each decision use orch_triage: settle (only by citing a standing rule id that covers it; never a merge card), ask_person (2-4 options, recommended first), or merge a question into a duplicate question (never a plan or merge card). Ack messages with orch_ack. You get a read-only copy of each answer ${o.name} gives (no ack). orch_needs_you lists what is on ${o.name}'s Needs you now and what was answered or went moot lately; when a card there no longer needs an answer (its PR merged, the asker found out), take it off with orch_moot(id, reason): the asker is told why. orch_deliverables lists what leads delivered to ${o.name}, its review state and proof. Dead letters (mail nobody took) come to you, not ${o.name}'s board: an hourly notice lists new ones; with orch_dead_letters resend one, re-route it to the right address, close it for its recipient, or escalate it to ${o.name}'s board with your note when only ${o.name} can fix it. orch_new_project(brief) creates a project (its folder with PROJECT.md and the project record, and its row at the brief's priority) from slug, title, repo (an existing absolute path; a URL alone is refused, nothing is cloned), goal, and optional repo_url, base, constraints, priority; it refuses a taken slug or folder and never starts the lead. orch_start_lead(slug) starts lead:<slug> through the same checks as ${o.name}'s Start lead button (project folder, a repo under "## Repos" that exists here, not on hold, no live lead); ${o.name}'s board shows that you started it. Do not poll; wait for [orchestrator] messages.`,
+  cos: `You are the Chief of Staff (cos) in ${o.name}'s orchestrator. You hear only what needs judgment: new decisions to triage and messages to you. For each decision use orch_triage: settle (only by citing a standing rule id that covers it; never a merge card), ask_person (2-4 options, recommended first), or merge a question into a duplicate question (never a plan or merge card). Ack messages with orch_ack. You get a read-only copy of each answer ${o.name} gives (no ack). orch_needs_you lists what is on ${o.name}'s Needs you now and what was answered or went moot lately; when a card there no longer needs an answer (its PR merged, the asker found out), take it off with orch_moot(id, reason): the asker is told why. orch_deliverables lists what leads delivered to ${o.name}, its review state and proof. Dead letters (mail nobody took) come to you, not ${o.name}'s board: an hourly notice lists new ones; with orch_dead_letters resend one, re-route it to the right address, close it for its recipient, or escalate it to ${o.name}'s board with your note when only ${o.name} can fix it. orch_new_project(brief) creates a project (its folder with PROJECT.md and the project record, and its row at the brief's priority) from slug, title, repo (an existing absolute path; a URL alone is refused, nothing is cloned), goal, and optional repo_url, base, constraints, priority; it refuses a taken slug or folder and never starts the lead. orch_start_lead(slug) starts lead:<slug> through the same checks as ${o.name}'s Start lead button (project folder, a repo under "## Repos" that exists here, not on hold, no live lead); ${o.name}'s board shows that you started it. You get a read-only copy of each direct message ${o.name} sends a lead from the Projects tab and of the lead's ack note: for 48 h it wins on its point over your instructions, earlier or later, and as a dead letter you may resend or escalate it but never re-route or close it. Do not poll; wait for [orchestrator] messages.`,
   steward: `You are the Steward (steward) of the runner's resources. Host alarms arrive as [orchestrator] alarm messages with a snapshot. Report with orch_send to cos; run only the allow-listed orch_cleanup actions on your own; anything else (stopping a process, deleting other files) becomes an orch_ask card. Never kill processes you didn't start, remove worktrees, touch other agents' files or point caches at /tmp.`,
-  lead: `You are a project lead in ${o.name}'s orchestrator. Your threads' questions come to you as decision.new: settle with orch_answer (citing a standing rule that covers it, or with a note as your own call), else orch_forward to file it up. Answers to your decisions come only to you: relay to the thread with orch_send(ref=<decision id>) unless you withhold it, and ack. An answer to carry out only once a PR gets somewhere ("merge when approved"): ack it with pr and when, and the orchestrator brings it back to you then and reminds you daily; arm no watcher of your own. Use orch_ask for your own questions (2-4 options, recommended first; it never blocks). Threads start only from a plan card ${o.name} approved: orch_ask(kind=plan, threads=<n>, options with the go option first) lists each thread (title, goal, model, done criteria); once the answer is its go, start each with orch_spawn_thread(plan=<id>). Threads you start any other way are flagged. Resolve a finished thread with orch_resolve: it retires the role and archives the thread once its worktree is clean (nothing uncommitted, its branch in its base branch or pushed) and its PR is merged, its branch is merged into its base, its PR was closed unmerged after its report, or ${o.name} has read its final report; a dirty worktree is refused with the reason. To swap a thread to another provider, have it write handoff-<UTC date>.md in its worktree, then orch_handoff. ${o.Name} sees only your deliverables and your questions: orch_deliver (finished work with proof) and orch_ask. Bundle your threads' work into deliverables that prove the result (screenshots, video, test output, PR), not into narration. Write them for a 10-second read: visuals first; each decision or finding is one line plus a short why (points); a one-line summary; no file:line, SHAs, logs or tool names at the top, those go in text or doc proof under Details (a PR review: a verdicts block for every PR, the recommended decisions, then 2-4 findings; proof that something works: screenshots or video of it happening, checks; a root cause: rca, a screenshot of the failure, a diagram of where it sits). Never message ${o.name} any other way. On deliverable.changes: fix it, then orch_deliver(revises=<id>). On deliverable.next: do what ${o.name} asked, then ack it with an outcome and a note saying what you did; the note shows on the deliverable. orch_output only records a file (for example one you then give as proof); it never reaches ${o.name}. Publish orch_status (goal, numbered steps with the current one, what you wait on, blockers) when you start, at each step change and whenever what you wait on changes: it is your project page's step bar, and stale after 2 h.`,
+  lead: `You are a project lead in ${o.name}'s orchestrator. Your threads' questions come to you as decision.new: settle with orch_answer (citing a standing rule that covers it, or with a note as your own call), else orch_forward to file it up. Answers to your decisions come only to you: relay to the thread with orch_send(ref=<decision id>) unless you withhold it, and ack. An answer to carry out only once a PR gets somewhere ("merge when approved"): ack it with pr and when, and the orchestrator brings it back to you then and reminds you daily; arm no watcher of your own. Use orch_ask for your own questions (2-4 options, recommended first; it never blocks). Threads start only from a plan card ${o.name} approved: orch_ask(kind=plan, threads=<n>, options with the go option first) lists each thread (title, goal, model, done criteria); once the answer is its go, start each with orch_spawn_thread(plan=<id>). Threads you start any other way are flagged. Resolve a finished thread with orch_resolve: it retires the role and archives the thread once its worktree is clean (nothing uncommitted, its branch in its base branch or pushed) and its PR is merged, its branch is merged into its base, its PR was closed unmerged after its report, or ${o.name} has read its final report; a dirty worktree is refused with the reason. To swap a thread to another provider, have it write handoff-<UTC date>.md in its worktree, then orch_handoff. ${o.Name} sees only your deliverables and your questions: orch_deliver (finished work with proof) and orch_ask. Bundle your threads' work into deliverables that prove the result (screenshots, video, test output, PR), not into narration. Write them for a 10-second read: visuals first; each decision or finding is one line plus a short why (points); a one-line summary; no file:line, SHAs, logs or tool names at the top, those go in text or doc proof under Details (a PR review: a verdicts block for every PR, the recommended decisions, then 2-4 findings; proof that something works: screenshots or video of it happening, checks; a root cause: rca, a screenshot of the failure, a diagram of where it sits). Never message ${o.name} any other way. ${o.Name} may write to you directly from the Projects tab (a direct message, kind owner.message): answer it only with orch_ack(id, outcome, note), at once even for long work; the note is what ${o.name} reads on the row ("done" means taken, so say whether it is finished) and the CoS gets a copy. For 48 h it wins on its point over a CoS instruction, earlier or later; only ${o.name}'s own later word changes it. If the CoS says ${o.name} changed their mind, file one card with both instructions as options; say in your note what you set aside, and tell the CoS. orch_inbox lists those still in force. A direct message is never an approval: a merge, a production change or a public push still needs its own card citing the message id, and it can't be acked with pr and when. On deliverable.changes: fix it, then orch_deliver(revises=<id>). On deliverable.next: do what ${o.name} asked, then ack it with an outcome and a note saying what you did; the note shows on the deliverable. orch_output only records a file (for example one you then give as proof); it never reaches ${o.name}. Publish orch_status (goal, numbered steps with the current one, what you wait on, blockers) when you start, at each step change and whenever what you wait on changes: it is your project page's step bar, and stale after 2 h.`,
   thread: `You are a worker thread in ${o.name}'s orchestrator. Ask your lead with orch_ask (2-4 options, recommended first); it returns at once with an id, so carry on or end your turn: the answer comes as a message. Message only your lead (orch_send). When an answer or message is handled, close it with orch_ack(id, outcome); replying to its sender with ref=<its id> closes it as replied, and an ack after that still records the real outcome. Report finished work with orch_report (with the PR URL when there is one). Use orch_output to record a finished artefact (a doc, video, image, report or link) so your lead can put it in a deliverable as proof; ${o.name} sees only what your lead delivers.`,
 });
 
@@ -124,8 +128,11 @@ export default async function plugin(bb: BbPluginApi) {
     memoryConfigEnv: { type: "string", label: "Environment variable that passes the memory config's path to the memory tools (empty: not passed)", default: "MEMORY_CONFIG" },
     memorySearch: { type: "string", label: "memory-search command (empty: the config's memory.search)", default: "" },
     prPollMinutes: { type: "number", label: "Check PRs every (minutes); 0 = never", default: 5 },
-    pokemon: { type: "boolean", label: "Pokémon", description: "Give each agent a Pokémon that evolves as it levels: sprites in the app and the sidebar, its name in its brief, evolutions on the board. Sprites load from PokeAPI's public sprite repo at runtime. Pokémon is a trademark of Nintendo, Creatures and GAME FREAK; this plugin is not affiliated with them.", default: false },
+    linearWorkspace: { type: "string", label: "Linear workspace (the slug in linear.app/<slug>): Linear ids in the Projects tab link to their issues. Empty: they stay plain text", default: "" },
+    linearTeams: { type: "string", label: "Linear team keys that link, comma-separated (empty: every key). Ids of other teams, and look-alikes such as model names, stay plain text", default: "" },
+    pokemon: { type: "boolean", label: "Pokémon", description: "Give each agent a Pokémon that evolves as it levels: sprites in the app and the sidebar, its name in its brief, evolutions on the board. Each project gets a Pokémon type: its lead and threads share it, and its colour is the project's accent. Sprites load from PokeAPI's public sprite repo at runtime. Pokémon is a trademark of Nintendo, Creatures and GAME FREAK; this plugin is not affiliated with them.", default: false },
     pushNeedsYou: { type: "boolean", label: "Desktop/web push when a card enters Needs you (never sent while mobile push is on)", default: true },
+    notifyOnlyOrchestrator: { type: "boolean", label: "Orchestrator notifications only", description: "bb notifies you only for the orchestrator: Needs-you cards, deliveries and the CoS thread. Mutes every other thread by setting push-notifications' defaultLevel and childLevel to muted; switching it off restores them. Card and delivery pushes still need pushNeedsYou on and mobile push off.", default: false },
     // dreams
     dreamsEnabled: { type: "boolean", label: "Nightly dream batch and daily memory check (needs a memory config with memory.dreamDir)", default: false },
     dreamDailyAt: { type: "string", label: "Dream time HH:MM, used only when the memory config has no memory.dailyAt", default: "" },
@@ -145,8 +152,13 @@ export default async function plugin(bb: BbPluginApi) {
     stewardReasoning: { type: "string", label: "Reasoning of the Steward started from the Projects tab", default: START_DEFAULTS.steward.reasoning },
     homeProjectId: { type: "string", label: "bb project of the CoS and the Steward (empty: the bb project of the mirror folder, created when missing)", default: "" },
     // the Cloud tab (cloud/)
-    cloudConfigPath: { type: "string", label: "Cloud tab config file", description: "On the machine (~/ is its home): which AWS accounts and GCP projects are dev or prod, and their PIM groups. See cloud/config.example.json. Without it the Cloud tab stays hidden.", default: DEFAULT_CLOUD_CONFIG },
+    cloudConfigPath: { type: "string", label: "Cloud tab config file", description: "On the machine (~/ is its home): which AWS accounts and GCP projects are dev or prod, and their PIM groups. See cloud/config.example.json. Without it the Cloud tab says what to set up.", default: DEFAULT_CLOUD_CONFIG },
     gcpLoginConfig: { type: "string", label: "Cloud tab: GCP login config", description: "Full path of the workforce login config (gcp-login-config.json) on the machine. Empty: look in the usual places.", default: "" },
+    // the Open PRs tab (open-prs/): all empty by default; the tab says what to set
+    githubLogin: { type: "string", label: "Open PRs: your GitHub login", description: "The tab lists every open PR this login authored, through the machine's own gh login (read-only). Empty: the tab says to set it.", default: "" },
+    reviewChannel: { type: "string", label: "Open PRs: code-review channel", description: "A Slack channel name (team-reviews) or an https link to it. Post copies the review text and opens this channel; it never sends anything itself.", default: "" },
+    reviewExcludedProjects: { type: "string", label: "Open PRs: projects left out of Post", description: "Project slugs, separated by commas or spaces. Their PRs start unticked in the Post preview.", default: "" },
+    slackHandleMap: { type: "string", label: "Open PRs: GitHub login to Slack handle", description: "A JSON object, e.g. {\"some-login\": \"slackname\"}. Only mapped logins are tagged @handle; anyone else is shown by plain name, never guessed.", default: "", experimental_multiline: true },
   });
   // The retired name of cosCompactTokens: never carried over, only unset (retireClearSetting).
   const retired = bb.settings.define({
@@ -219,12 +231,44 @@ export default async function plugin(bb: BbPluginApi) {
     }, deliver, mirror, changed, log: (m) => bb.log.warn(m), cardUp: (d) => void pushCard(d), delivered: (d) => void pushDelivered(d) },
     { escalateMs: cfg.escalateMinutes * 60_000, resendMs: cfg.resendMinutes * 60_000, owner: cfg.ownerName, pokemon: cfg.pokemon, batchInbox: cfg.batchInbox, inboxDebounceMs: Math.min(60000, Math.max(0, cfg.inboxDebounceMs || 2000)) },
   );
+  registerOpenPrs(bb, engine, () => cfg);
+  // ---------------------------------------------------------------- notifyOnlyOrchestrator (core/notify-only.ts)
+  const PN = "push-notifications";
+  const notifyOnly = serialReconcile(
+    () => cfg.notifyOnlyOrchestrator === true,
+    {
+      levels: async () => ((await bb.sdk.plugins.getSettings({ pluginId: PN })) as unknown as { values: { defaultLevel: unknown; childLevel: unknown } }).values,
+      setLevels: async (v) => void (await bb.sdk.plugins.updateSettings({ pluginId: PN, values: { defaultLevel: v.defaultLevel, childLevel: v.childLevel } })),
+      ownLevel: async (threadId) => {
+        const r = (await bb.sdk.plugins.callRpc({ pluginId: PN, method: "threadNotifications.list", input: { threadIds: [threadId] }, outputSchema: z.object({ threads: z.record(z.string(), z.object({ own: z.string() }).passthrough()) }) })) as { threads: Record<string, { own: string }> };
+        return (r.threads[threadId]?.own ?? "inherit") as ChildLevel;
+      },
+      setOwnLevel: async (threadId, level) => void (await bb.sdk.plugins.callRpc({ pluginId: PN, method: "threadNotifications.set", input: { threadId, level }, outputSchema: z.any() })),
+      parentOf: async (threadId) => ((await bb.sdk.threads.get({ threadId })) as { parentThreadId?: string | null }).parentThreadId ?? null,
+      cosThread: () => engine.agentByAddress("cos")?.threadId ?? null,
+      load: async () => (await bb.storage.kv.get<NotifySaved>(NOTIFY_SAVED)) ?? null,
+      save: async (v) => void (v ? await bb.storage.kv.set(NOTIFY_SAVED, v) : await bb.storage.kv.delete(NOTIFY_SAVED)),
+    },
+    (m) => bb.log.info(m),
+  );
+  // Started as a service, never during activation: a failed reconcile must not fail the plugin, and it retries each minute.
+  bb.background.service("notify-only", {
+    async start(signal) {
+      while (!signal.aborted) {
+        await unlessAborted(notifyOnly(), signal);
+        await sleep(60_000, signal);
+      }
+    },
+  });
+
   settings.onChange((next) => {
     if (next.pushNeedsYou && !cfg.pushNeedsYou) void resumePush(); // the push was switched back on: lift a pause
+    const notifyFlip = next.notifyOnlyOrchestrator !== cfg.notifyOnlyOrchestrator;
     cfg = next;
     changed(); // the page re-reads its config (owner name, CoS title) and the agents (Pokémon on or off)
     engine.settings = { escalateMs: next.escalateMinutes * 60_000, resendMs: next.resendMinutes * 60_000, owner: next.ownerName, pokemon: next.pokemon, batchInbox: next.batchInbox, inboxDebounceMs: Math.min(60000, Math.max(0, next.inboxDebounceMs || 2000)) };
     reloadMemory();
+    if (notifyFlip) void notifyOnly();
   });
 
   // ---------------------------------------------------------------- the memory engine (docs/memory-port.md)
@@ -705,7 +749,7 @@ export default async function plugin(bb: BbPluginApi) {
   /**
    * Before bb archives a thread (and, once no thread holds it, removes its worktree): copy the notes the clean check lets
    * stay uncommitted (handoff-*.md, report.md at the root) and the files of outputs recorded inside the worktree to
-   * <stateDir>/threads/<id>/, and point those outputs at the copies so the Outputs tab still opens them. Says what was
+   * <stateDir>/threads/<id>/, and point those outputs at the copies so the Deliverables tab still opens them. Says what was
    * kept, or "" when nothing was. A failed copy throws: the archive waits rather than lose them.
    */
   function keepFiles(threadId: string, worktree: string | null): string {
@@ -871,6 +915,26 @@ export default async function plugin(bb: BbPluginApi) {
     await Promise.resolve().then(() => bb.storage.kv.delete(PUSH_PAUSED)).catch((e: unknown) => bb.log.warn(`push: lift the pause: ${errText(e)}`));
     engine.boardAdd("notice", "orchestrator", null, "Needs-you push resumed", "pushNeedsYou was switched back on. It pauses again if mobile push is on.", null);
   }
+  /**
+   * notifications.send, which thread levels never mute (so notifyOnlyOrchestrator keeps these). With threadId a click
+   * opens that thread; a thread bb no longer has is refused before anything is sent, so that one goes again without it.
+   */
+  async function sendPush(input: { title: string; body: string }, threadId: string | null): Promise<{ channels: string[] }> {
+    const send = (withThread: boolean) =>
+      bb.sdk.plugins.callRpc({
+        pluginId: "push-notifications",
+        method: "notifications.send",
+        input: withThread && threadId ? { ...input, threadId } : input,
+        outputSchema: z.object({ channels: z.array(z.string()) }).passthrough(),
+      }) as Promise<{ channels: string[] }>;
+    if (!threadId) return send(false);
+    try {
+      return await send(true);
+    } catch (e) {
+      if (!/thread_not_found|Thread not found/i.test(errText(e))) throw e;
+      return send(false);
+    }
+  }
   async function pushCard(d: Decision): Promise<void> {
     if (!cfg.pushNeedsYou || pushBlocked) return bb.log.info(`push ${d.id}: off (${pushBlocked ? "paused" : "setting"})`);
     try {
@@ -880,12 +944,10 @@ export default async function plugin(bb: BbPluginApi) {
         return;
       }
       bb.log.info(`push ${d.id}: sending (mobile push is off)`);
-      const res = (await bb.sdk.plugins.callRpc({
-        pluginId: "push-notifications",
-        method: "notifications.send",
-        input: { title: `Needs you: ${d.ask?.title ?? d.request.title}`, body: `${d.project ? `${d.project} · ` : ""}${d.ask?.question ?? d.request.question}`.slice(0, 180) },
-        outputSchema: z.object({ channels: z.array(z.string()) }).passthrough(),
-      })) as { channels: string[] };
+      const res = await sendPush(
+        { title: `Needs you: ${d.ask?.title ?? d.request.title}`, body: `${d.project ? `${d.project} · ` : ""}${d.ask?.question ?? d.request.question}`.slice(0, 180) },
+        engine.agentByAddress(d.request.by.address)?.threadId ?? d.request.by.thread ?? null,
+      );
       bb.log.info(`push ${d.id}: reached ${JSON.stringify(res.channels)}`);
       if (res.channels.includes("mobile")) pausePush("Needs-you push reached a phone; paused", "Mobile push must be off. Paused (also across reloads) until pushNeedsYou is switched off and on again.", d.id, true);
     } catch (e) {
@@ -904,12 +966,10 @@ export default async function plugin(bb: BbPluginApi) {
         engine.boardAdd("notice", "orchestrator", null, "Needs-you push is paused: mobile push is on", "The orchestrator never sends a phone notification. Turn mobile push off (or pushNeedsYou off) and reload the plugin.", null);
         return;
       }
-      const res = (await bb.sdk.plugins.callRpc({
-        pluginId: "push-notifications",
-        method: "notifications.send",
-        input: { title: `Delivered: ${d.title}`, body: `${d.project ? `${d.project} · ` : ""}${d.rev > 1 ? `rev ${d.rev} · ` : ""}${d.summary}`.slice(0, 180) },
-        outputSchema: z.object({ channels: z.array(z.string()) }).passthrough(),
-      })) as { channels: string[] };
+      const res = await sendPush(
+        { title: `Delivered: ${d.title}`, body: `${d.project ? `${d.project} · ` : ""}${d.rev > 1 ? `rev ${d.rev} · ` : ""}${d.summary}`.slice(0, 180) },
+        engine.agentByAddress(d.lead)?.threadId ?? null,
+      );
       bb.log.info(`push ${d.id}: reached ${JSON.stringify(res.channels)}`);
       if (res.channels.includes("mobile")) {
         pushBlocked = true;
@@ -1020,7 +1080,7 @@ export default async function plugin(bb: BbPluginApi) {
   bb.agents.registerTool({
     name: "orch_output",
     description:
-      `Record a finished artefact (a doc, video, image, report or link) for use as deliverable proof. It is listed on the Outputs tab and in Activity; it does not notify ${O.name}. ` +
+      `Record a finished artefact (a doc, video, image, report or link) for use as deliverable proof. It is listed on the Deliverables tab (inside the deliverable that uses it as proof, else under Files) and in Activity; it does not notify ${O.name}. ` +
       `A file is an absolute path inside your worktree, ${sharedRoots().join(" or ")}; ${O.name} opens it in bb's preview. A link is an http(s) URL.`,
     presentation: { label: { pending: "Recording an output", completed: "Recorded an output" } },
     parameters: z.object({
@@ -1046,7 +1106,7 @@ export default async function plugin(bb: BbPluginApi) {
           if (!hostId) throw new EngineError("bad_state", `your thread has no environment on a bb host, so ${ownerWords(cfg.ownerName).name} couldn't open the file`);
         }
         const { output, created } = engine.addOutput(a, { title: p.title, kind: p.kind, path: p.path ?? null, url: p.url ?? null, note: p.note ?? null }, { roots, hostId });
-        return ok(created ? `Recorded ${output.id}: on ${ownerWords(cfg.ownerName).name}'s Outputs tab and the Board.` : `Already recorded as ${output.id}.`);
+        return ok(created ? `Recorded ${output.id}: on ${ownerWords(cfg.ownerName).name}'s Deliverables tab (Files until a deliverable uses it as proof) and the Board.` : `Already recorded as ${output.id}.`);
       } catch (e) {
         return fail(errText(e));
       }
@@ -1334,7 +1394,7 @@ export default async function plugin(bb: BbPluginApi) {
   // included). Counted after the thread's cursor, so each turn counts once, and from the start for a new agent.
   const levelInfo = (a: Agent) => {
     const { tokens, level } = engine.xpOf(a.address);
-    return { level, xp: tokens, xpThis: tokensForLevel(level), xpNext: tokensForLevel(level + 1), form: formAt(a.mon, level)?.name ?? a.mon };
+    return { level, xp: tokens, xpThis: tokensForLevel(level), xpNext: tokensForLevel(level + 1), form: formAt(a.mon, level, a.monPin)?.name ?? a.mon };
   };
   const xpBusy = new Set<string>();
   const collectXp = async (threadId: string): Promise<void> => {
@@ -1538,7 +1598,12 @@ export default async function plugin(bb: BbPluginApi) {
   const providerOf = new Map<string, string | null>();
   bb.rpc.register(rpcContract, {
     async config() {
-      return { ownerName: cfg.ownerName.trim(), cosTitle: cosTitleOf(cfg.cosTitle) };
+      return {
+        ownerName: cfg.ownerName.trim(),
+        cosTitle: cosTitleOf(cfg.cosTitle),
+        linearWorkspace: cfg.linearWorkspace.trim(),
+        linearTeams: cfg.linearTeams.split(",").map((t) => t.trim()).filter(Boolean),
+      };
     },
     async needsYou({ zone }) {
       const v = engine.needsYou();
@@ -1568,8 +1633,9 @@ export default async function plugin(bb: BbPluginApi) {
     board() {
       return {
         rows: engine.board(),
+        directUnread: [...engine.directLines()].filter(([, d]) => d.unread).map(([slug]) => slug),
         dead: engine.deadLetters({ board: true }).map((i) => ({ id: i.id, recipient: i.recipient, sender: i.sender, kind: i.kind, body: i.body, note: i.note, createdAt: i.createdAt })),
-        agents: engine.agents().map((a) => ({ threadId: a.threadId, address: a.address, role: a.role, project: a.project, status: a.status, mon: a.mon })),
+        agents: engine.agents().map((a) => ({ threadId: a.threadId, address: a.address, role: a.role, project: a.project, status: a.status, mon: a.mon, monType: engine.accentType(a.project) })),
         rules: engine.rules().map((r) => ({ id: r.id, text: r.text, project: r.project, kinds: r.kinds, expiresAt: r.expiresAt, source: r.source, createdAt: r.createdAt, revokedAt: r.revokedAt })),
         decisions: engine.decisions(50).map((d) => ({
           id: d.id,
@@ -1586,6 +1652,9 @@ export default async function plugin(bb: BbPluginApi) {
     },
     projects(): Projects {
       const agents = engine.agents();
+      const summaries = engine.projectSummaries();
+      const direct = engine.directLines();
+      const prs = engine.knownPrs();
       return engine.projects().map((p) => {
         const lead = agents.find((a) => a.role === "lead" && a.project === p.slug && a.status !== "archived");
         return {
@@ -1594,9 +1663,13 @@ export default async function plugin(bb: BbPluginApi) {
           heldAt: p.heldAt,
           archivedAt: p.archivedAt,
           lead: lead ? { address: lead.address, threadId: lead.threadId, status: lead.status, mon: lead.mon } : null,
+          monType: engine.accentType(p.slug), // the project accent: none with the setting off
           threads: agents.filter((a) => a.role === "thread" && a.project === p.slug).length,
           openPlans: engine.openPlans(p.slug),
           status: engine.leadStatus(p.slug),
+          summary: summaries.get(p.slug) ?? null,
+          direct: direct.get(p.slug) ?? null,
+          prs: prs.filter((x) => x.project === p.slug).map(({ project: _, ...x }) => x),
         };
       });
     },
@@ -1610,6 +1683,7 @@ export default async function plugin(bb: BbPluginApi) {
           const pr = engine.prFor(a.environmentId);
           const proj = a.project ? engine.project(a.project) : null;
           return {
+            monType: engine.accentType(a.project), // the project accent for the sidebar: none with the setting off
             threadId: a.threadId,
             address: a.address,
             role: a.role,
@@ -1635,6 +1709,12 @@ export default async function plugin(bb: BbPluginApi) {
         }),
       );
     },
+    projectBook({ slug, dayStart }) {
+      return engine.projectBook(slug, dayStart);
+    },
+    searchCards({ q }) {
+      return engine.searchAnswered(q);
+    },
     async projectHistory({ slug }) {
       const ids = engine.projectThreadIds(slug);
       // bb's provider per thread, asked once per thread for the plugin's life (it never changes)
@@ -1648,6 +1728,13 @@ export default async function plugin(bb: BbPluginApi) {
           }),
       );
       return engine.projectHistory(slug, providerOf);
+    },
+    /**
+     * For the Deliverables tree: every project in the order the sidebar places new sections in, with its accent. The page
+     * reorders it by the viewer's own section order (core/project-order.ts), which only the viewer's bb client can read.
+     */
+    projectOrder(): ProjectOrder {
+      return engine.projects().map((p) => ({ slug: p.slug, monType: engine.accentType(p.slug) }));
     },
     outputs(): Outputs {
       return engine.outputs().map((o) => ({ id: o.id, title: o.title, kind: o.kind, path: o.path, url: o.url, hostId: o.hostId, note: o.note, project: o.project, author: o.author, at: o.at }));
@@ -1755,6 +1842,9 @@ export default async function plugin(bb: BbPluginApi) {
   write(WRITES.resend, resendBody, (b) => engine.resend(b.id).id);
   write(WRITES.priority, priorityBody, (b) => engine.setPriority(b.slug, b.priority));
   write(WRITES.hold, holdBody, (b) => engine.setHold(b.slug, b.held));
+  // the owner's direct line to a lead (PLAN 3): an item, never a push; the CoS gets a copy
+  write(WRITES.directMessage, directMessageBody, (b) => engine.ownerMessage(b.slug, b.text, b.followUp ?? null).id);
+  write(WRITES.directSeen, directSeenBody, (b) => engine.markDirectSeen(b.slug, b.upTo));
   write(WRITES.outputRemove, outputRemoveBody, (b) => engine.removeOutput(b.id));
   write(WRITES.approve, approveBody, (b) => engine.personApprove(b.id, b.rev, b.note, b.next ?? null).rev);
   write(WRITES.requestChanges, requestChangesBody, (b) => engine.personRequestChanges(b.id, b.rev, b.text).rev);

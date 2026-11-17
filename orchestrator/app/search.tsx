@@ -1,0 +1,99 @@
+// Layout B's search (2026-11-16): one box beside the filters. It narrows the list to the projects with a hit and lists
+// the hits; three letters or more also ask the plugin for older answered cards. (The strip of Needs you, Blocked and
+// Changed since you looked that sat under it went on 2026-11-17, the owner: "just remove that row and just rely on the
+// filters at the top": the list already says what needs the owner and what is blocked.)
+import { useEffect, useState, type ReactNode } from "react";
+import { experimental_useRpcQuery } from "@get-bb/plugin-sdk/app";
+import { rpcContract, type Projects } from "../contract.ts";
+import { ProjectRefs, RefText } from "./ref-text.tsx";
+import { age } from "./lanes.ts";
+import { hitWord, type Hit } from "./source.ts";
+
+type Project = Projects[number];
+
+export const searchCss = /* css */ `
+[data-orch] .orch-cc .top { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px 16px; margin-bottom: 16px; }
+[data-orch] .orch-cc .top .filters { margin: 0; }
+[data-orch] .orch-cc .search { flex: 0 1 480px; min-width: 0; display: flex; align-items: center; gap: 8px; padding: 4px 12px; border-radius: 8px; background: var(--orch-wash); }
+[data-orch] .orch-cc .search input { flex: 1 1 auto; min-width: 0; font: inherit; color: inherit; background: none; border: 0; outline: none; padding: 0; }
+[data-orch] .orch-cc .search input::placeholder { color: var(--orch-muted); }
+[data-orch] .orch-cc .hits { background: var(--orch-wash); border-radius: 8px; padding: 12px 16px; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+[data-orch] .orch-cc .hits { margin-bottom: 16px; }
+[data-orch] .orch-cc .hits-h { margin: 0 0 4px; font-size: 12px; line-height: 16px; font-weight: 600; color: var(--orch-muted); }
+[data-orch] .orch-cc .hits .empty { color: var(--orch-muted); padding-left: 16px; }
+[data-orch] .orch-cc .hits .slug { font-weight: 600; margin-right: 4px; }
+[data-orch] .orch-cc .hits .ln .tx { max-width: none; }
+`;
+
+/** One hit: the project's name, then the words; clicking the name opens the project. */
+function Line({ p, onOpen, children, tail, data, title }: { p: Project | undefined; onOpen: (slug: string) => void; children: ReactNode; tail: string; data: string; title: string }) {
+  if (!p) return null;
+  return (
+    <ProjectRefs.Provider value={{ project: p.slug, prs: p.prs ?? [] }}>
+      <div className="ln" data-hit-line={data} data-hit-project={p.slug}>
+        <span className="tx fit" title={`${p.slug}: ${title}`}>
+          <button type="button" className="slug" data-open-project-row={p.slug} onClick={() => onOpen(p.slug)}>
+            {p.slug}
+          </button>
+          <span className="rest">{children}</span>
+        </span>
+        <span className="tail">{tail}</span>
+      </div>
+    </ProjectRefs.Provider>
+  );
+}
+
+/** The search box: one query over the loaded projects (source.ts searchLoaded), and older answered cards. Esc leaves
+ * it with the words kept, as every text box on the page does (keys.ts); the box's own × clears it. */
+export function SearchBox({ value, onChange }: { value: string; onChange: (q: string) => void }) {
+  return (
+    <label className="search" data-search="">
+      <span aria-hidden className="muted">
+        ⌕
+      </span>
+      <input type="search" value={value} placeholder="PR number, ticket id or words" aria-label="Search the projects" data-search-input="" onChange={(e) => onChange(e.target.value)} />
+    </label>
+  );
+}
+
+const OLDER_MIN = 3;
+/** The value after the owner stops typing for a moment: the plugin is asked once per pause, not per key. */
+function useSettled(v: string, ms = 250): string {
+  const [s, setS] = useState(v);
+  useEffect(() => {
+    const t = setTimeout(() => setS(v), ms);
+    return () => clearTimeout(t);
+  }, [v, ms]);
+  return s;
+}
+
+/** What the search found: the loaded lines by project, then older answered cards from the plugin. */
+export function SearchHits({ q, hits, projects, now, onOpen }: { q: string; hits: Hit[]; projects: Project[]; now: number; onOpen: (slug: string) => void }) {
+  const settled = useSettled(q.trim());
+  const older = experimental_useRpcQuery({ contract: rpcContract, method: "searchCards", input: { q: settled.slice(0, 80) }, enabled: settled.length >= OLDER_MIN });
+  const by = new Map(projects.map((p) => [p.slug, p] as const));
+  const cards = settled.length >= OLDER_MIN ? (older.data ?? []) : [];
+  return (
+    <div className="hits" data-search-hits={hits.length} data-search-older={cards.length}>
+      <h3 className="hits-h">
+        {hits.length} {hits.length === 1 ? "match" : "matches"} on the projects
+        {settled.length >= OLDER_MIN ? ` · ${older.data ? older.data.length : "…"} older answered ${older.data?.length === 1 ? "card" : "cards"}` : ""}
+      </h3>
+      {hits.map((h, i) => (
+        <Line key={i} p={by.get(h.project)} onOpen={onOpen} tail={hitWord(h.kind)} data={`hit-${h.kind}`} title={h.text}>
+          <RefText text={h.text} exact={h.kind === "pr" || h.kind === "wait" ? h.ref : undefined} />
+        </Line>
+      ))}
+      {cards.map((c) => (
+        <div key={c.id} className="ln" data-search-card={c.id}>
+          <span className="tx" title={`${c.title} → ${c.answer}`}>
+            {c.project ? <span className="slug">{c.project}</span> : null}
+            {c.title} → <b>{c.answer}</b>
+          </span>
+          <span className="tail">answered {age(c.at, now)} ago</span>
+        </div>
+      ))}
+      {!hits.length && !cards.length ? <div className="empty">Nothing matches “{q.trim()}”{settled.length >= OLDER_MIN ? " (the newest 2000 answers searched)" : ""}</div> : null}
+    </div>
+  );
+}

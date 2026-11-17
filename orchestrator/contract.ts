@@ -3,7 +3,7 @@
 import { defineRpcContract } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { blockSchema, pointSchema } from "./blocks.ts";
-import { STEP_STATES, WAIT_KINDS } from "./core/status.ts";
+import { LIST_WAIT_KINDS, STEP_STATES, WAIT_KINDS } from "./core/status.ts";
 
 export const PLUGIN_ID = "orchestrator";
 /** The owner's writes: POST JSON to `${WRITE_BASE}/<path>`. */
@@ -74,9 +74,10 @@ export type NeedsYou = z.infer<typeof needsYouSchema>;
 export const boardSchema = z.object({
   rows: z.array(z.object({ id: z.string(), kind: z.string(), from: z.string().nullable(), project: z.string().nullable(), title: z.string(), body: z.string(), ref: z.string().nullable(), at: z.number() })),
   dead: z.array(z.object({ id: z.string(), recipient: z.string(), sender: z.string(), kind: z.string(), body: z.string(), note: z.string().nullable(), createdAt: z.number() })),
-  agents: z.array(z.object({ threadId: z.string(), address: z.string(), role: z.string(), project: z.string().nullable(), status: z.string(), mon: z.string().nullable() })),
+  agents: z.array(z.object({ threadId: z.string(), address: z.string(), role: z.string(), project: z.string().nullable(), status: z.string(), mon: z.string().nullable(), monType: z.string().nullable() })),
   rules: z.array(z.object({ id: z.string(), text: z.string(), project: z.string().nullable(), kinds: z.array(z.string()), expiresAt: z.number().nullable(), source: z.string(), createdAt: z.number(), revokedAt: z.number().nullable() })),
   decisions: z.array(z.object({ id: z.string(), state: z.string(), title: z.string(), origin: z.string(), asker: z.string(), level: z.string(), answer: z.string().nullable(), ack: z.string().nullable(), updatedAt: z.string() })),
+  directUnread: z.array(z.string()).optional(), // projects with a lead's note the owner hasn't opened: the Projects tab's dot
 });
 export type Board = z.infer<typeof boardSchema>;
 
@@ -86,13 +87,69 @@ export const leadStatusSchema = z.object({
   goal: z.string(),
   steps: z.array(z.object({ title: z.string(), state: z.enum(STEP_STATES) })),
   waitingOn: z.object({ kind: z.enum(WAIT_KINDS), ref: z.string().nullable(), label: z.string().nullable() }),
+  // up to three waits, newer kinds only here (status.ts); absent in statuses stored before it: waitsOf
+  waits: z.array(z.object({ kind: z.enum(LIST_WAIT_KINDS), ref: z.string().nullable(), label: z.string().nullable(), who: z.string().nullable(), since: z.number() })).optional(),
   blockers: z.array(z.string()),
   updatedAt: z.number(),
   by: z.string(),
 });
 
+// The Projects row (2026-11-16, core/history.ts buildSummary): one batched read, no bb calls. Optional: an older server
+// sends none, and the row then falls back to the status line.
+export const summaryWaitSchema = z.object({
+  source: z.enum(["lead", "live"]),
+  kind: z.string(),
+  ref: z.string().nullable(),
+  who: z.string().nullable(),
+  label: z.string().nullable(),
+  since: z.number().nullable(),
+  unchanged: z.boolean(),
+  note: z.string().nullable(), // what a live fact adds to a wait that still stands ("the thread failed")
+});
+export const projectSummarySchema = z.object({
+  motion: z.enum(["held", "nolead", "moving", "waiting", "quiet"]),
+  threads: z.object({ working: z.number(), total: z.number() }),
+  leadWorking: z.boolean(),
+  needsYou: z.object({ count: z.number(), id: z.string().nullable(), title: z.string().nullable(), question: z.string().nullable(), since: z.number().nullable() }),
+  waits: z.array(summaryWaitSchema), // each once; none a live fact shows is over
+  blockers: z.array(z.string()), // the lead's, minus those a later answer covers
+  statusOutOfDate: z.boolean(), // a live fact contradicts the status: the row says so, the lead was asked to republish
+  done: z.object({ text: z.string(), at: z.number(), kind: z.enum(["deliverable", "merged", "report"]) }).nullable(),
+  last: z.object({ text: z.string(), at: z.number() }).nullable(), // the latest finished thing at any age (quiet rows)
+  leadIdleSince: z.number().nullable(),
+});
+export type SummaryWait = z.infer<typeof summaryWaitSchema>;
+// The owner's direct line to a project's lead (2026-11-16, PLAN 3): the latest messages, newest first, each with the
+// lead's ack note once it acks. unread: a note came in since the owner last opened the composer.
+export const directMessageSchema = z.object({
+  id: z.string(),
+  text: z.string(),
+  at: z.number(),
+  followUp: z.string().nullable(),
+  state: z.string(),
+  outcome: z.string().nullable(),
+  note: z.string().nullable(),
+  answeredAt: z.number().nullable(),
+  unread: z.boolean().optional(), // the lead's answer came after the owner last opened the thread
+});
+export const directLineSchema = z.object({ messages: z.array(directMessageSchema), unread: z.boolean() });
+export type DirectLine = z.infer<typeof directLineSchema>;
+
 // Phase 2: the Projects tab (the owner sets priority and hold) and each agent's live state (its lanes; the Agents tab
 // it fed went into Projects on 2026-11-16).
+// The Projects tab as a source of truth (core/book.ts): one project's Decided, Done, latest merges and blockers' start,
+// read only for the project opened; older answered cards for the search.
+export const projectBookSchema = z.object({
+  decided: z.array(z.object({ id: z.string(), title: z.string(), answer: z.string(), at: z.number() })),
+  done: z.array(z.object({ kind: z.enum(["deliverable", "merged", "report"]), text: z.string(), at: z.number(), ref: z.string().nullable(), state: z.string().nullable() })),
+  merged: z.array(z.object({ number: z.number().nullable(), url: z.string().nullable(), at: z.number() })),
+  mergedTotal: z.number(),
+  since: z.array(z.object({ text: z.string(), since: z.number(), bound: z.boolean() })),
+});
+export type ProjectBook = z.infer<typeof projectBookSchema>;
+export const cardHitsSchema = z.array(z.object({ id: z.string(), project: z.string().nullable(), title: z.string(), answer: z.string(), at: z.number() }));
+export type CardHits = z.infer<typeof cardHitsSchema>;
+
 export const projectsSchema = z.array(
   z.object({
     slug: z.string(),
@@ -103,6 +160,11 @@ export const projectsSchema = z.array(
     threads: z.number(),
     openPlans: z.number(), // plan cards not yet decided
     status: leadStatusSchema.nullable(), // the lead's latest orch_status (core/status.ts)
+    monType: z.string().nullable(), // the project's Pokémon type (mons.ts TYPES): its accent; null with the setting off
+    summary: projectSummarySchema.nullish(), // the row's summary; none for an archived project
+    direct: directLineSchema.nullish(), // the owner's direct messages to its lead; none before the first
+    // the PRs the plugin has read for this project's threads: a PR number in its text links only to one of these
+    prs: z.array(z.object({ number: z.number(), url: z.string(), state: z.string(), checks: z.string().nullable(), review: z.string().nullable(), attention: z.string().nullable() })).optional(),
   }),
 );
 export type Projects = z.infer<typeof projectsSchema>;
@@ -113,6 +175,7 @@ export const agentsSchema = z.array(
     address: z.string(),
     role: z.string(),
     project: z.string().nullable(),
+    monType: z.string().nullable(), // its project's Pokémon type (the project accent); null with the setting off
     priority: z.string().nullable(),
     held: z.boolean(),
     status: z.string(),
@@ -233,8 +296,14 @@ export const deliverablesSchema = z.array(
 );
 export type Deliverables = z.infer<typeof deliverablesSchema>;
 
+// Every project in the sidebar's placing order (engine.projects()), with its accent type (none with pokemon off); the page
+// puts it in the viewer's own section order (core/project-order.ts).
+export const projectOrderSchema = z.array(z.object({ slug: z.string(), monType: z.string().nullable() }));
+export type ProjectOrder = z.infer<typeof projectOrderSchema>;
+
 /** Who the page is for: the ownerName setting ("" = the page says "you") and the CoS's name. */
-export const configSchema = z.object({ ownerName: z.string(), cosTitle: z.string() });
+// linearWorkspace / linearTeams: where a Linear id in the command center links (app/refs.ts); empty: no link
+export const configSchema = z.object({ ownerName: z.string(), cosTitle: z.string(), linearWorkspace: z.string().optional(), linearTeams: z.array(z.string()).optional() });
 export type Config = z.infer<typeof configSchema>;
 
 export const rpcContract = defineRpcContract({
@@ -244,8 +313,11 @@ export const rpcContract = defineRpcContract({
   projects: { input: z.null(), output: projectsSchema },
   agents: { input: z.null(), output: agentsSchema },
   projectHistory: { input: z.object({ slug: z.string().min(1).max(40) }).strict(), output: projectHistorySchema },
+  projectBook: { input: z.object({ slug: z.string().min(1).max(40), dayStart: z.number().optional() }).strict(), output: projectBookSchema },
+  searchCards: { input: z.object({ q: z.string().max(80) }).strict(), output: cardHitsSchema },
   outputs: { input: z.null(), output: outputsSchema },
   deliverables: { input: z.null(), output: deliverablesSchema },
+  projectOrder: { input: z.null(), output: projectOrderSchema },
 });
 
 // ---- the write routes (POST, JSON body). Each answers { ok: true } or { ok: false, error: { kind, message } }.
@@ -258,6 +330,10 @@ export const ruleRevokeBody = z.object({ id: z.string() }).strict();
 export const resendBody = z.object({ id: z.string() }).strict();
 export const priorityBody = z.object({ slug: z.string(), priority: z.enum(["urgent", "high", "normal", "low"]) }).strict();
 export const holdBody = z.object({ slug: z.string(), held: z.boolean() }).strict();
+// the owner's direct message to a project's lead (PLAN 3); followUp names an earlier one to the same lead
+export const directMessageBody = z.object({ slug: z.string(), text: z.string().min(1).max(4000), followUp: z.string().nullable().optional() }).strict();
+// upTo: the newest answer the row showed; the seen cursor never passes it
+export const directSeenBody = z.object({ slug: z.string(), upTo: z.number() }).strict();
 export const archiveBody = z.object({ threadId: z.string() }).strict();
 export const archiveProjectBody = z.object({ slug: z.string().min(1).max(40) }).strict();
 export const outputRemoveBody = z.object({ id: z.string() }).strict();
@@ -285,6 +361,8 @@ export const WRITES = {
   resend: "/resend",
   priority: "/projects/priority",
   hold: "/projects/hold",
+  directMessage: "/projects/message",
+  directSeen: "/projects/message-seen",
   archive: "/archive",
   archiveProject: "/projects/archive",
   outputRemove: "/outputs/remove",

@@ -13,13 +13,17 @@ import { EmptyState } from "./affect/empty-state-clean.tsx";
 import { SegmentedControl } from "./affect/segmented-control-clean.tsx";
 import { MonSprite } from "./mon.tsx";
 import { KIND_TONES, ROLE_TONES, css, roleOf, tint, type Tone } from "./palette.ts";
+import { ACCENT, accentTone, accentVars } from "./accent.ts";
 import { useWidth } from "./panes.tsx";
+import { ProofLink } from "./proof-link.tsx";
 import { Btn, Kind, ReadState } from "./ui.tsx";
 import { age, type Lane } from "./lanes.ts";
 import { DEP_ROW, NARROW, placeDeps, rowName, rowsIn, scale, span, ticks, type Range, type Scale } from "./timeline.ts";
 import { providerWord } from "../core/history.ts";
 import type { OpenCard } from "./projects.tsx";
-import { StatusBar } from "./status-bar.tsx";
+import { StatusBar, useMinute } from "./status-bar.tsx";
+import { AllWaits } from "./cc-lines.tsx";
+import { useIdentity } from "./identity.ts";
 
 type Hist = ProjectHistory;
 type Row = Hist["rows"][number];
@@ -206,9 +210,7 @@ function Mark({ m, x, cy }: { m: Row["marks"][number]; x: number; cy: number }) 
     </g>
   );
   return m.url ? (
-    <a href={m.url} target="_blank" rel="noreferrer">
-      {g}
-    </a>
+    <ProofLink open={{ url: m.url }}>{g}</ProofLink>
   ) : (
     g
   );
@@ -312,11 +314,11 @@ function FlowNode({ r, lane, depth }: { r: Row; lane: Lane | undefined; depth: n
         ))}
         {r.prs.length ? <Arrow /> : null}
         {r.prs.map((p) => (
-          <a key={p.url} href={p.url} target="_blank" rel="noreferrer" className="no-underline">
+          <ProofLink key={p.url} open={p} className="no-underline">
             <Chip tone={prTone(p.state)} solid={p.state === "merged"} data-flow-pr={p.state}>
               #{p.number ?? "?"} {p.state}
             </Chip>
-          </a>
+          </ProofLink>
         ))}
         {resolved ? (
           <Chip tone={RESOLVED} data-flow-resolved="">
@@ -350,7 +352,8 @@ function Flow({ h, lanes }: { h: Hist; lanes: Map<string, Lane> }) {
           <FlowNode r={lead} lane={lanes.get(lead.address)} depth={0} />
         </ul>
       ) : null}
-      <ul className="m-0 list-none p-0" style={{ marginLeft: 11, borderLeft: "1.5px solid var(--orch-line)" }}>
+      {/* the threads sit indented under their lead, with no rail: no vertical bars on Projects (2026-11-16, the owner) */}
+      <ul className="m-0 list-none p-0" style={{ marginLeft: 24 }}>
         {[...live, ...shownDone].map((r) => (
           <FlowNode key={r.address} r={r} lane={lanes.get(r.address)} depth={1} />
         ))}
@@ -490,6 +493,9 @@ function withPrompts(deps: Dep[], lanes: Lane[]): Dep[] {
 
 export function ProjectDetail({ project, lanes, onBack, openCard, ownerName }: { project: Projects[number]; lanes: Lane[] | undefined; onBack: () => void; openCard: OpenCard; ownerName: string }) {
   const q = experimental_useRpcQuery({ contract: rpcContract, method: "projectHistory", input: { slug: project.slug } });
+  // every wait, in the row's words (the row shows two)
+  const now = useMinute();
+  const { cosTitle } = useIdentity();
   const refetch = useRef(q.refetch);
   refetch.current = q.refetch;
   useRealtime(
@@ -505,16 +511,19 @@ export function ProjectDetail({ project, lanes, onBack, openCard, ownerName }: {
   const blocking = deps.filter((d) => d.block).length;
   const lead = project.lead;
   return (
-    <div data-project-detail={project.slug} className="flex min-w-0 flex-col gap-3 pb-8">
-      <div className="flex min-w-0 flex-wrap items-center gap-2">
+    <div data-project-detail={project.slug} data-accent={project.monType ?? undefined} className="flex min-w-0 flex-col gap-3 pb-8" style={accentVars(project.monType)}>
+      <div className="flex min-w-0 flex-wrap items-center gap-2" style={accentTone(project.monType) ? { borderBottom: `2px solid ${ACCENT}`, paddingBottom: 6 } : undefined}>
         <Btn tone="ghost" data-detail-back="" onClick={onBack} aria-label="Back to Projects">
           ← Projects
         </Btn>
         {lead ? <MonSprite mon={lead.mon} address={lead.address} size={28} /> : null}
-        <span className="min-w-0 font-semibold [overflow-wrap:anywhere]">{project.slug}</span>
+        <span className="min-w-0 font-semibold [overflow-wrap:anywhere]" style={accentTone(project.monType) ? { color: ACCENT } : undefined}>
+          {project.slug}
+        </span>
         {project.heldAt !== null ? <Kind of="held">On hold</Kind> : null}
       </div>
       <StatusBar status={project.status} ownerName={ownerName} lanes={lanes} openCard={openCard} />
+      <AllWaits waits={project.summary?.waits ?? []} now={now} cos={cosTitle} />
       <div className="flex">
         <SegmentedControl<View>
           size="sm"

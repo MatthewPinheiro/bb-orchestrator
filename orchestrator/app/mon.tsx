@@ -21,7 +21,7 @@ const MON_CSS = `
 const AVATAR_SIZES: readonly AvatarSize[] = [40, 32, 24, 20];
 
 /** `size` is the box in px; the CoS's Rayquaza gets a quarter more, unless `boost` is off (a row it must line up in). */
-export function MonSprite({ mon, address, size = 32, boost = true }: { mon: string | null | undefined; address: string; size?: 24 | 28 | 32 | 40; boost?: boolean }) {
+export function MonSprite({ mon, address, size = 32, boost = true }: { mon: string | null | undefined; address: string; size?: 20 | 24 | 28 | 32 | 40; boost?: boolean }) {
   const m = monByName(mon);
   const role = roleOf(address);
   const box = role === "cos" && boost ? Math.round(size * 1.25) : size; // side by side with others, the same box

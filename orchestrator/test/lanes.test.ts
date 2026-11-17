@@ -30,6 +30,7 @@ function row(a: Agent, over: Partial<Agents[number]> = {}): Agents[number] {
     threadId: a.threadId,
     address: a.address,
     role: a.role,
+    monType: null,
     project: a.project,
     priority: null,
     held: false,

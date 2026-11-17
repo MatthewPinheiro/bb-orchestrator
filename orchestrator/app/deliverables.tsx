@@ -1,11 +1,12 @@
 // Deliverables (docs/deliverables-plan.md): what leads hand the owner, each with its proof shown inline, newest first. The owner
-// approves one, or requests changes in their own words and the lead re-delivers. Approved and sent-back ones move to
-// Recent. Writes go through the page's one write gate (store.ts): one at a time, every button off while one is in
+// approves one, or requests changes in their own words and the lead re-delivers. Decided and withdrawn ones move to the
+// past list below (past.ts, past-view.tsx), with the outputs that aren't any deliverable's proof under its Files filter. Writes go through the page's one write gate (store.ts): one at a time, every button off while one is in
 // flight, and each write carries the revision the owner is looking at (a newer one is refused, never approved blind).
-import { useEffect, useRef, useState } from "react";
-import { Markdown, useBbNavigate } from "@get-bb/plugin-sdk/app";
-import type { z } from "zod";
-import { PROOF_ROUTE, WRITE_BASE, WRITES, type Deliverables, type approveBody, type requestChangesBody } from "../contract.ts";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Markdown, experimental_useRpcQuery, useBbNavigate, useRealtime, useSdk } from "@get-bb/plugin-sdk/app";
+import { manualSectionOrder, sidebarOrder } from "../core/project-order.ts";
+import { z } from "zod";
+import { CHANGED_CHANNEL, PROOF_ROUTE, WRITE_BASE, WRITES, rpcContract, type Deliverables, type Outputs, type ProjectOrder, type approveBody, type requestChangesBody } from "../contract.ts";
 import { Card, CardContent, CardHeader } from "./affect/card-clean.tsx";
 import { EmptyState } from "./affect/empty-state-clean.tsx";
 import { TextArea } from "./affect/text-area-clean.tsx";
@@ -14,20 +15,25 @@ import { Blocks } from "./blocks.tsx";
 import { lessText } from "./less-text.ts";
 import { Points } from "./visual-blocks.tsx";
 import { prKind } from "./palette.ts";
+import { openInBb } from "./open-proof.ts";
+import { ProofLink } from "./proof-link.tsx";
 import { gate, useGate, write } from "./store.ts";
 import { APPROVE_MS, pressApprove } from "./keys.ts";
 import { keyState, say, emitKeys } from "./key-state.ts";
 import { useViewKeys } from "./key-view.ts";
 import { age } from "./lanes.ts";
-import { Btn, Kind, Muted, PageError, ReadState, Section, Who, cx, when } from "./ui.tsx";
+import { Btn, Kind, PageError, ReadState, Who, cx, when } from "./ui.tsx";
+import { FoldedOutputs } from "./files.tsx";
+import { START, deliverablesTab, type View } from "./past.ts";
+import { DeliverablesTree } from "./past-view.tsx";
 
 type Deliverable = Deliverables[number];
 type Proof = Deliverable["revisions"][number]["proof"][number];
+type Output = Outputs[number];
 type Query = { data: Deliverables | undefined; error: { message: string } | null; refetch: () => Promise<void> };
 
 const TEXT_LINES = 200;
-const RECENT = 20;
-const proofSrc = (id: string) => `${WRITE_BASE}${PROOF_ROUTE}?id=${encodeURIComponent(id)}`;
+export const proofSrc = (id: string) => `${WRITE_BASE}${PROOF_ROUTE}?id=${encodeURIComponent(id)}`;
 
 /** In review, newest first: what the Deliverables tab and the badges count. */
 export const inReview = (all: Deliverables | undefined): Deliverable[] => (all ?? []).filter((d) => d.state === "review").sort((a, b) => b.updatedAt - a.updatedAt);
@@ -72,17 +78,24 @@ function TextProof({ id, markdown }: { id: string; markdown: boolean }) {
 /** A PR's number from its URL, for a PR pr-watch doesn't follow (it shows no live state then, but still says which). */
 const prNumber = (url: string | null | undefined) => url?.match(/\/pull\/(\d+)/)?.[1] ?? null;
 
-function ProofView({ p }: { p: Proof }) {
+export function ProofView({ p }: { p: Proof }) {
   const navigate = useBbNavigate();
   const [unopened, setUnopened] = useState(false);
   const caption = <figcaption className="orch-muted mt-1 text-xs [overflow-wrap:anywhere]">{p.caption}</figcaption>;
+  // every kind opens as a bb pane (open-proof.ts); a file's fallback is the proof route in a new tab
+  const file = p.kind === "image" || p.kind === "video" || p.kind === "text" ? proofSrc(p.id) : undefined;
+  const openLink = (
+    <ProofLink open={p} fallback={file} className="text-xs font-medium text-inherit underline-offset-2 hover:underline">
+      Open ↗
+    </ProofLink>
+  );
   if (p.kind === "image")
     return (
       <figure className="m-0" data-proof={p.id}>
-        {/* full size in a new tab */}
-        <a href={proofSrc(p.id)} target="_blank" rel="noopener noreferrer" className="orch-shot inline-block max-w-full">
+        {/* full size in a bb pane */}
+        <ProofLink open={p} fallback={file} className="orch-shot inline-block max-w-full">
           <img src={proofSrc(p.id)} alt={p.caption} loading="lazy" decoding="async" className="block h-auto max-h-80 w-auto max-w-full cursor-zoom-in" />
-        </a>
+        </ProofLink>
         {caption}
       </figure>
     );
@@ -90,40 +103,42 @@ function ProofView({ p }: { p: Proof }) {
     return (
       <figure className="m-0" data-proof={p.id}>
         <video src={proofSrc(p.id)} controls preload="metadata" className="orch-shot block h-64 w-full" />
-        {caption}
+        <div className="flex items-baseline gap-2">
+          {openLink}
+          {caption}
+        </div>
       </figure>
     );
   if (p.kind === "text")
     return (
       <figure className="m-0 min-w-0 max-w-full" data-proof={p.id}>
         <TextProof id={p.id} markdown={isMarkdown(p)} />
-        {caption}
+        <div className="flex items-baseline gap-2">
+          {openLink}
+          {caption}
+        </div>
       </figure>
     );
   if (p.kind === "pr")
     return (
       <div className="flex flex-wrap items-center gap-2" data-proof={p.id}>
-        <a href={p.url ?? undefined} target="_blank" rel="noopener noreferrer" className="no-underline">
+        <ProofLink open={p} className="no-underline">
           <Kind of="pr" group={p.pr ? prKind(p.pr) : undefined}>
             {p.pr ? `PR${p.pr.number ? ` #${p.pr.number}` : ""} · ${p.pr.state ?? "?"}${p.pr.attention && p.pr.attention !== "none" && p.pr.attention !== p.pr.state ? ` · ${p.pr.attention.replace(/_/g, " ")}` : ""}${p.pr.checks ? ` · checks ${p.pr.checks}` : ""}` : `PR${prNumber(p.url) ? ` #${prNumber(p.url)}` : ""}`}
           </Kind>
-        </a>
+        </ProofLink>
         <span className="orch-muted text-xs [overflow-wrap:anywhere]">{p.caption}</span>
       </div>
     );
-  // a doc or a link: a file opens in bb's preview on its host, a URL in a new tab
-  const open = () => {
-    const ok = p.hostId && p.path ? navigate.experimental_openFilePreview({ target: { kind: "host", hostId: p.hostId, path: p.path }, location: null }) : false;
-    setUnopened(!ok);
-  };
+  // a doc or a link: a file in bb's preview pane on its host, a URL in bb's browser pane
   return (
     <div className="flex flex-wrap items-center gap-2" data-proof={p.id}>
       {p.url ? (
-        <a href={p.url} target="_blank" rel="noopener noreferrer" className="font-medium text-inherit underline-offset-2 hover:underline [overflow-wrap:anywhere]">
+        <ProofLink open={p} className="font-medium text-inherit underline-offset-2 hover:underline [overflow-wrap:anywhere]">
           {p.kind === "doc" ? "Open doc" : "Open link"} ↗
-        </a>
+        </ProofLink>
       ) : (
-        <Btn onClick={open}>Open doc</Btn>
+        <Btn onClick={() => setUnopened(!openInBb(navigate, p))}>Open doc</Btn>
       )}
       <Kind of={p.kind} />
       <span className="orch-muted text-xs [overflow-wrap:anywhere]">{p.caption}</span>
@@ -245,7 +260,7 @@ export function NextLine({ n }: { n: NonNullable<Deliverable["next"]> }) {
 }
 
 /** Earlier revisions and the owner's feedback on each, folded under the card. */
-function History({ d }: { d: Deliverable }) {
+export function History({ d }: { d: Deliverable }) {
   const earlier = d.revisions.filter((r) => r.rev < d.rev);
   if (earlier.length === 0 && d.feedback.length === 0) return null;
   return (
@@ -275,13 +290,13 @@ function History({ d }: { d: Deliverable }) {
   );
 }
 
-function DeliverableCard({ d, refetchAll }: { d: Deliverable; refetchAll: () => void }) {
+function DeliverableCard({ d, refetchAll, outputs, outputsAfter }: { d: Deliverable; refetchAll: () => void; outputs: Output[]; outputsAfter: () => void }) {
   const latest = d.revisions.find((r) => r.rev === d.rev) ?? d.revisions[d.revisions.length - 1];
   const proof = latest?.proof ?? [];
   const media = proof.filter((p) => p.kind === "image" || p.kind === "video");
   const rest = proof.filter((p) => p.kind !== "image" && p.kind !== "video");
   const short = latest ? lessText(latest) : null;
-  if (short && latest) return <ShortCard d={d} rev={latest} layout={short} media={media} rest={rest} refetchAll={refetchAll} />;
+  if (short && latest) return <ShortCard d={d} rev={latest} layout={short} media={media} rest={rest} refetchAll={refetchAll} outputs={outputs} outputsAfter={outputsAfter} />;
   return (
     <Card as="article" data-deliverable={d.id}>
       <CardHeader title={d.title} titleAs="h3" description={d.project ?? "No project"} action={<Kind of="review">{d.rev > 1 ? `in review · rev ${d.rev}` : "in review"}</Kind>} />
@@ -311,13 +326,14 @@ function DeliverableCard({ d, refetchAll }: { d: Deliverable; refetchAll: () => 
         ) : null}
         <Review d={d} refetchAll={refetchAll} />
         <History d={d} />
+        <FoldedOutputs outputs={outputs} after={outputsAfter} />
       </CardContent>
     </Card>
   );
 }
 
 /** A deliverable with points (2026-11-14, "way less text"): pictures, then each decision and finding in a line; the rest closed. */
-function ShortCard({ d, rev, layout, media, rest, refetchAll }: { d: Deliverable; rev: Deliverable["revisions"][number]; layout: NonNullable<ReturnType<typeof lessText>>; media: Proof[]; rest: Proof[]; refetchAll: () => void }) {
+function ShortCard({ d, rev, layout, media, rest, refetchAll, outputs, outputsAfter }: { d: Deliverable; rev: Deliverable["revisions"][number]; layout: NonNullable<ReturnType<typeof lessText>>; media: Proof[]; rest: Proof[]; refetchAll: () => void; outputs: Output[]; outputsAfter: () => void }) {
   const part = (p: (typeof layout.parts)[number]) => {
     switch (p) {
       case "context":
@@ -373,16 +389,64 @@ function ShortCard({ d, rev, layout, media, rest, refetchAll }: { d: Deliverable
           <span>{when(d.updatedAt)}</span>
         </div>
         {layout.parts.map(part)}
+        <FoldedOutputs outputs={outputs} after={outputsAfter} />
       </CardContent>
     </Card>
   );
 }
 
-export function DeliverablesView({ q, refetchAll }: { q: Query; refetchAll: () => void }) {
+/**
+ * The projects in the viewer's sidebar order (2026-11-16: the tree's folders "in the same order as the sidebar's project
+ * sections"): bb's section list and the Thread list plugin's manualSectionOrder (the sidebar's own preference), read as
+ * the viewer through the page's bb client, applied to the server's placing order. Read once per visit; the placing order if bb can't say.
+ */
+const anything = z.unknown();
+function useSidebarOrder(place: ProjectOrder | undefined): ProjectOrder {
+  const sdk = useSdk();
+  const [bbOrder, setBbOrder] = useState<{ sections: { id: string; name: string }[]; manual: string[] } | null>(null);
+  useEffect(() => {
+    let live = true;
+    Promise.all([sdk.threadSections.list(), sdk.plugins.callRpc({ pluginId: "thread-list", method: "listPreferences", input: null, outputSchema: anything })])
+      .then(([sections, prefs]) => live && setBbOrder({ sections: sections.map((s) => ({ id: s.id, name: s.name })), manual: manualSectionOrder(prefs) }))
+      .catch(() => {}); // the placing order stands
+    return () => {
+      live = false;
+    };
+  }, [sdk]);
+  return useMemo(() => {
+    if (!place) return [];
+    if (!bbOrder) return place;
+    const type = new Map(place.map((p) => [p.slug, p.monType] as const));
+    return sidebarOrder(place.map((p) => p.slug), bbOrder.sections, bbOrder.manual).map((slug) => ({ slug, monType: type.get(slug) ?? null }));
+  }, [place, bbOrder]);
+}
+
+/**
+ * The Deliverables tab (2026-11-16, Deliverables and Outputs in one): what waits for the owner on top, exactly as before;
+ * below it every past deliverable and, under Files, the outputs that never became proof. `files`: opened from an old
+ * Outputs link, so the list starts on Files.
+ */
+export function DeliverablesView({ q, refetchAll, files = false }: { q: Query; refetchAll: () => void; files?: boolean }) {
   useGate();
   const root = useRef<HTMLDivElement>(null);
+  const outputs = experimental_useRpcQuery({ contract: rpcContract, method: "outputs", input: null });
+  // the sidebar's project order and accents, for the tree's folders
+  const order = experimental_useRpcQuery({ contract: rpcContract, method: "projectOrder", input: null });
+  const latestOutputs = useRef({ outputs: outputs.refetch, order: order.refetch });
+  latestOutputs.current = { outputs: outputs.refetch, order: order.refetch };
+  const refetchOutputs = useCallback(() => {
+    void latestOutputs.current.outputs();
+    void latestOutputs.current.order();
+  }, []);
+  useRealtime(CHANGED_CHANNEL, refetchOutputs);
+  const sorted = useSidebarOrder(order.data);
+  const [view, setView] = useState<View>(files ? { ...START, filter: "files" } : START);
+  useEffect(() => {
+    if (files) setView((v) => ({ ...v, filter: "files" }));
+  }, [files]);
   // Keys (2026-11-16): J/K select a deliverable; A, twice within APPROVE_MS, is "Done, nothing more". It clicks the card's own
   // button, so the page lock applies; with words in the next-move box the button is "Send to lead", which A never presses.
+  // Only in-review cards carry data-deliverable, so J/K never select a past row.
   useViewKeys("deliverables", root, "[data-deliverable]", (el) => el.dataset.deliverable ?? "", (a, sel) => {
     if (a.t !== "approve" || !sel) return false;
     const btn = sel.el.querySelector<HTMLButtonElement>(`[data-approve="${CSS.escape(sel.id)}"]`);
@@ -406,41 +470,17 @@ export function DeliverablesView({ q, refetchAll }: { q: Query; refetchAll: () =
     return true;
   });
   if (!q.data) return <ReadState q={q} what="the deliverables" />;
-  const review = inReview(q.data);
-  const recent = q.data.filter((d) => d.state === "approved" || d.state === "changes").slice(0, RECENT);
+  const tab = deliverablesTab(q.data, outputs.data ?? [], view, sorted);
+  const review = tab.review;
   return (
     <div ref={root} className="flex flex-col gap-4 pb-8">
       <ReadState q={q} what="the deliverables" />
       {review.length === 0 ? (
         <EmptyState title="Nothing to review" text="Leads deliver finished work here with proof (orch_deliver). You approve it or send it back." />
       ) : (
-        review.map((d) => <DeliverableCard key={d.id} d={d} refetchAll={refetchAll} />)
+        review.map((r) => <DeliverableCard key={r.d.id} d={r.d} refetchAll={refetchAll} outputs={r.outputs} outputsAfter={refetchOutputs} />)
       )}
-      <Section title="Recent" count={recent.length} data-recent="">
-        {recent.length === 0 ? <Muted>None yet.</Muted> : null}
-        <ul className="orch-rows m-0 list-none p-0">
-          {recent.map((d) => {
-            const last = d.feedback[d.feedback.length - 1];
-            return (
-              <li key={d.id} data-recent-deliverable={d.id} className="py-2.5">
-                <div className="flex items-start gap-3">
-                  <div className="min-w-0 flex-1">
-                    <div className="font-medium [overflow-wrap:anywhere]">{d.title}</div>
-                    <div className="orch-muted mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
-                      <Who address={d.lead} nowrap />
-                      <span>rev {d.rev}</span>
-                      <span>{when(d.updatedAt)}</span>
-                    </div>
-                  </div>
-                  <Kind of={d.state}>{d.state === "changes" ? "changes requested" : d.state}</Kind>
-                </div>
-                {last?.text ? <p className="orch-muted m-0 mt-1 whitespace-pre-wrap text-xs [overflow-wrap:anywhere]">{last.text}</p> : null}
-                {d.next ? <NextLine n={d.next} /> : null}
-              </li>
-            );
-          })}
-        </ul>
-      </Section>
+      <DeliverablesTree tab={tab} view={view} setView={setView} files={{ loaded: outputs.data !== undefined, error: outputs.error?.message ?? null }} outputsAfter={refetchOutputs} />
     </div>
   );
 }

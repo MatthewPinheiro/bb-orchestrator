@@ -24,6 +24,7 @@ import { keyState, emitKeys, say } from "./key-state.ts";
 import { useViewKeys } from "./key-view.ts";
 import { changed, gate, gone, pruneGone, useGate, write, type Hide, type WriteKind } from "./store.ts";
 import { KIND_TONES, css } from "./palette.ts";
+import { ACCENT, accentTone, accentVars } from "./accent.ts";
 import { AlertIcon, DoneIcon, css as inboxCss } from "./affect/decision-inbox-clean.tsx";
 import { DropdownMenu } from "./affect/dropdown-menu-clean.tsx";
 import { EmptyState } from "./affect/empty-state-clean.tsx";
@@ -126,7 +127,7 @@ type Act = {
   secret: (card: Card, list: List, value: string) => void;
 };
 
-function CardView({ card, list, presets, isArmed, act, mon }: { card: Card; list: List; presets: Preset[]; isArmed: boolean; act: Act; mon: string | null }) {
+function CardView({ card, list, presets, isArmed, act, mon, monType = null }: { card: Card; list: List; presets: Preset[]; isArmed: boolean; act: Act; mon: string | null; monType?: string | null }) {
   const [note, setNote] = useState("");
   const [unticked, setUnticked] = useState<Map<number, Set<number>>>(() => new Map());
   const toggle = (block: number, item: number) =>
@@ -155,7 +156,7 @@ function CardView({ card, list, presets, isArmed, act, mon }: { card: Card; list
 
   // One row of affectUI's decision inbox (its classes and CSS; never data-gone, always data-open, so it never folds or glides)
   return (
-    <article data-card={card.id} data-rev={card.rev} data-asker={card.asker} data-state={state} aria-busy={busy || undefined} className={cx("ui-dic__row", mine && "opacity-80")}>
+    <article data-card={card.id} data-rev={card.rev} data-asker={card.asker} data-state={state} data-accent={monType ?? undefined} aria-busy={busy || undefined} className={cx("ui-dic__row", mine && "opacity-80")} style={accentVars(monType)}>
       <div className="ui-dic__row-inner">
         <div className="ui-dic__item" data-open="">
           <header className="flex items-start gap-3">
@@ -165,7 +166,8 @@ function CardView({ card, list, presets, isArmed, act, mon }: { card: Card; list
               <h4 className="ui-dic__title">{card.title}</h4>
               {/* affectUI's quiet line: where it comes from, who asked, and any state */}
               <p className="orch-meta">
-                <span>{card.project ?? "no project"}</span>
+                {/* the project in its accent (accent.ts) */}
+                <span style={accentTone(monType) ? { color: ACCENT, fontWeight: 600 } : undefined}>{card.project ?? "no project"}</span>
                 <span aria-hidden>·</span>
                 <span className="orch-mono">{card.origin}</span>
                 {card.asker !== card.origin ? (
@@ -261,7 +263,7 @@ function CardView({ card, list, presets, isArmed, act, mon }: { card: Card; list
 type Query = { data: NeedsYou | undefined; error: { message: string } | null; refetch: () => Promise<void> };
 
 /** `mons`: address → its Pokémon, from the board's agents (for the asker's sprite on each card). */
-export function NeedsYouView({ q, refetchAll, mons, threads }: { q: Query; refetchAll: () => void; mons: ReadonlyMap<string, string | null>; threads: ReadonlyMap<string, string> }) {
+export function NeedsYouView({ q, refetchAll, mons, threads, accents }: { q: Query; refetchAll: () => void; mons: ReadonlyMap<string, string | null>; threads: ReadonlyMap<string, string>; accents?: ReadonlyMap<string, string | null> }) {
   useGate();
   const navigate = useBbNavigate();
   const live = q.data;
@@ -384,7 +386,7 @@ export function NeedsYouView({ q, refetchAll, mons, threads }: { q: Query; refet
         </header>
         <div className="ui-dic__card" data-list="cards">
           {view.cards.map((c) => (
-            <CardView key={c.id} card={c} list="cards" presets={view.presets} isArmed={arming.isArmed(c.id, c.rev)} act={act} mon={mons.get(c.origin) ?? null} />
+            <CardView key={c.id} card={c} list="cards" presets={view.presets} isArmed={arming.isArmed(c.id, c.rev)} act={act} mon={mons.get(c.origin) ?? null} monType={c.project ? (accents?.get(c.project) ?? null) : null} />
           ))}
           {questions.map((i) => (
             <QuestionCard key={i.id} ix={i} isArmed={arming.isArmed(ixKey(i), 0)} mon={mons.get(i.address) ?? null} onSend={(a) => answerQuestion(i, a)} onOpen={() => navigate.toThread(i.threadId)} />
@@ -436,7 +438,7 @@ export function NeedsYouView({ q, refetchAll, mons, threads }: { q: Query; refet
           </header>
           <div className="ui-dic__card" data-list="deferred">
             {view.deferred.map((c) => (
-              <CardView key={c.id} card={c} list="deferred" presets={view.presets} isArmed={arming.isArmed(c.id, c.rev)} act={act} mon={mons.get(c.origin) ?? null} />
+              <CardView key={c.id} card={c} list="deferred" presets={view.presets} isArmed={arming.isArmed(c.id, c.rev)} act={act} mon={mons.get(c.origin) ?? null} monType={c.project ? (accents?.get(c.project) ?? null) : null} />
             ))}
           </div>
         </section>

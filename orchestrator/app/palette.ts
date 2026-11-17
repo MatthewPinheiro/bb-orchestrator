@@ -23,7 +23,7 @@ export const KIND_TONES = {
   deferred: { label: "deferred", covers: ["deferred", "decision.deferred", "held"], light: "#78350f", dark: "#fbbf24" },
   done: { label: "answered", covers: ["answered", "acked", "decision.answer", "live"], light: "#14532d", dark: "#4ade80" },
   merge: { label: "merge", covers: ["merge", "pr", "prstate"], light: "#3730a3", dark: "#a5b4fc" },
-  message: { label: "message", covers: ["message"], light: "#0c4a6e", dark: "#38bdf8" },
+  message: { label: "message", covers: ["message", "direct"], light: "#0c4a6e", dark: "#38bdf8" },
   notice: { label: "notice", covers: ["notice", "import"], light: "#134e4a", dark: "#2dd4bf" },
   report: { label: "report", covers: ["report"], light: "#164e63", dark: "#22d3ee" },
   alarm: { label: "alarm", covers: ["alarm", "escalated"], light: "#991b1b", dark: "#fca5a5" },
@@ -66,6 +66,22 @@ export function prKind(pr: { state: string | null; attention: string | null; che
   if (pr.attention === "ready_to_merge") return "done";
   return "merge";
 }
+
+/** Open PRs (2026-11-16 rev 2): a state chip's colour by core/open-prs.ts prChips' tone, filled at TINT like a pill. */
+export const PR_CHIP_TONES = {
+  ok: { label: "approved, CI passing", light: "#14532d", dark: "#4ade80" },
+  warn: { label: "changes requested, conflicts", light: "#78350f", dark: "#fbbf24" },
+  fail: { label: "CI failing", light: "#991b1b", dark: "#fca5a5" },
+  pending: { label: "CI running", light: "#52525b", dark: "#a1a1aa" },
+  neutral: { label: "review required, blocked by rules", light: "#334155", dark: "#cbd5e1" },
+  muted: { label: "draft", light: "#57534e", dark: "#a8a29e" },
+} as const;
+
+/** The Slack preview's link and mention colours (Slack's own blues), a mention filled at TINT like Slack's. */
+export const SLACK_TONES = {
+  link: { label: "link", light: "#1264a3", dark: "#4fb3e8" },
+  mention: { label: "mention", light: "#1264a3", dark: "#4fb3e8" },
+} as const;
 
 /** How much of a kind's colour fills its pill (over whatever surface the pill sits on). */
 export const TINT = 0.12;

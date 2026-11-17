@@ -38,7 +38,7 @@ const confirm = z.string().min(1).max(200).optional();
 // What the switch has set (AWS_PROFILE, CLOUDSDK_ACTIVE_CONFIG_NAME): the server knows, the host marks the rows.
 const active = z.object({ aws: z.string().nullable(), gcp: z.string().nullable() }).strict();
 
-export const hostContract = defineRpcContract({
+export const cloudHostDefs = {
   "cs.config": { input: z.object({ configPath }).strict(), output: z.object({ path: z.string(), state: z.enum(["ok", "missing", "invalid"]), error: z.string().nullable() }) },
   "cs.list": { input: z.object({ loginConfig, configPath, active }).strict(), output: listingSchema, experimental_retryable: true },
   // The checks before the server sets the variable: the target exists, the prod gate, and a defined gcloud
@@ -58,4 +58,5 @@ export const hostContract = defineRpcContract({
     input: z.object({ confirm: z.literal(true) }).strict(),
     output: z.object({ steps: z.array(z.object({ command: z.string(), ok: z.boolean(), message: z.string() })) }),
   },
-});
+} as const;
+export const hostContract = defineRpcContract(cloudHostDefs);
