@@ -36,7 +36,8 @@ import { Chip, kitCss } from "./kit-ui.tsx";
 import { STATE_CHIP, inScopeEntry, plannerOf, scopeDone, scopeEntries, scopeNext, scopeQuiet, scopeStatus, type ScopeEntry, type ScopeStatus } from "./kit.ts";
 import { entryTitle, plannerName } from "./scope-names.ts";
 import { projectTitle } from "../core/model.ts";
-import { MonSprite } from "./mon.tsx";
+import { AgentFace, type Face } from "./face.tsx";
+import { personaName } from "./faces.ts";
 import { OpenRef } from "./project-book.tsx";
 import { panel } from "./refs.ts";
 import { age } from "./lanes.ts";
@@ -104,14 +105,17 @@ const entryWord = (e: ScopeEntry) => entryTitle(e).title;
  * 2026-11-18, the owner: a long thread name ran past the card's edge and under its count. The words are one line now that
  * ends in an ellipsis inside the card; the full line is the tooltip.
  */
-function PlannerLine({ e, mon, size = 20, slug = true, ...data }: { e: ScopeEntry; mon: (address: string) => string | null; size?: 20 | 24; slug?: boolean; [d: `data-${string}`]: string | undefined }) {
+function PlannerLine({ e, mon, size = 20, slug = true, ...data }: { e: ScopeEntry; mon: (address: string) => Face | null; size?: 20 | 24; slug?: boolean; [d: `data-${string}`]: string | undefined }) {
   const p = plannerName(e);
+  const face = mon(p.address);
+  // 2026-11-18: a lead with a persona is named by it ("Vesna"), as a person is
+  const name = p.address.startsWith("lead:") && face?.persona ? face.persona.name : p.name;
   const s = slug ? entryTitle(e).slug : null;
   return (
     <span className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground" title={`${plannerOf(e).text}${s ? ` · ${s}` : ""}`} {...data}>
-      <MonSprite mon={mon(p.address)} address={p.address} size={size} boost={false} />
+      <AgentFace face={face} address={p.address} size={size} boost={false} />
       <span className="min-w-0 truncate">
-        <span className="font-medium text-foreground">{p.name}</span>
+        <span className="font-medium text-foreground">{name}</span>
         {p.state ? ` · ${p.state}` : null}
         {s ? <span className="font-mono"> · {s}</span> : null}
       </span>
@@ -120,7 +124,7 @@ function PlannerLine({ e, mon, size = 20, slug = true, ...data }: { e: ScopeEntr
 }
 
 /** `focus`: the entry (scopeKey) a link elsewhere (a project's "Answer") asked to open here. */
-export function ScopeView({ q, projects, deliverables, refetchAll, mons, accents, focus = null }: { q: Query; projects: Projects | undefined; deliverables: Deliverables | undefined; refetchAll: () => void; mons: ReadonlyMap<string, string | null>; accents?: ReadonlyMap<string, string | null>; focus?: string | null }) {
+export function ScopeView({ q, projects, deliverables, refetchAll, mons, accents, focus = null }: { q: Query; projects: Projects | undefined; deliverables: Deliverables | undefined; refetchAll: () => void; mons: ReadonlyMap<string, Face>; accents?: ReadonlyMap<string, string | null>; focus?: string | null }) {
   useGate();
   const { ownerName, cosTitle } = useIdentity();
   const you = ownerOnScreen(ownerName);
@@ -187,8 +191,11 @@ export function ScopeView({ q, projects, deliverables, refetchAll, mons, accents
   const open = list.find((p) => p.slug === entry.slug)!;
   const task = entry.task?.id ?? null;
   const project = projects?.find((p) => p.slug === open.slug);
-  // an avatar's Pokémon: a lead's from its project (as in the sidebar), a scoping thread's from the board
-  const monOf = (address: string) => projects?.find((x) => `lead:${x.slug}` === address)?.lead?.mon ?? mons.get(address) ?? null;
+  // an avatar's face: a lead's from its project (as in the sidebar), a scoping thread's from the board
+  const monOf = (address: string): Face | null => {
+    const lead = projects?.find((x) => `lead:${x.slug}` === address)?.lead;
+    return lead && (lead.mon || lead.persona) ? { mon: lead.mon, persona: lead.persona } : (mons.get(address) ?? null);
+  };
   const pick = (e: ScopeEntry) => {
     setPicked(e.key);
     const p = projects?.find((x) => x.slug === e.slug);
@@ -235,7 +242,7 @@ export function ScopeView({ q, projects, deliverables, refetchAll, mons, accents
         <div key={p.slug} className="orch-scope__group" role="group" aria-label={projectTitle(p.slug)} data-scope-group={p.slug}>
           {/* the project as the sidebar names it, beside its lead's avatar */}
           <h3 className="m-0 flex min-w-0 items-center gap-2 px-1 text-sm font-semibold" title={p.slug}>
-            <MonSprite mon={monOf(`lead:${p.slug}`)} address={`lead:${p.slug}`} size={24} boost={false} />
+            <AgentFace face={monOf(`lead:${p.slug}`)} address={`lead:${p.slug}`} size={24} boost={false} />
             <span className="truncate">{projectTitle(p.slug)}</span>
             {p.whole === false ? <span className="shrink-0 text-xs font-normal text-muted-foreground">active</span> : null}
           </h3>
@@ -395,7 +402,7 @@ const DONE_SHOWN = 3;
  * the Pokémon when that setting is on), what they are on now, the scoping deliverables already reviewed (each a link
  * to it on Deliverables; none: no row), and what comes next. shadcn's Card, Item rows and Badges.
  */
-function StatusCard({ entry, s, done, next, now, mon }: { entry: ScopeEntry; s: ScopeStatus; done: Deliverables; next: string; now: number; mon: (address: string) => string | null }) {
+function StatusCard({ entry, s, done, next, now, mon }: { entry: ScopeEntry; s: ScopeStatus; done: Deliverables; next: string; now: number; mon: (address: string) => Face | null }) {
   const address = s.who.address ?? `lead:${entry.slug}`;
   const idle = s.who.idleSince !== null ? age(s.who.idleSince, now) : null;
   const state = s.who.working ? "working" : s.who.state === "idle" && idle ? `idle ${idle}` : s.who.state;
@@ -403,10 +410,11 @@ function StatusCard({ entry, s, done, next, now, mon }: { entry: ScopeEntry; s: 
   return (
     <UiCard role="region" className="orch-scope__status gap-4 py-4" data-scope-status={entry.key} aria-label={`${entry.slug}: who is scoping`}>
       <CardHeader className="flex items-center gap-3 px-4">
-        <MonSprite mon={mon(address)} address={address} size={32} boost={false} />
+        <AgentFace face={mon(address)} address={address} size={32} boost={false} />
         <div className="flex min-w-0 flex-1 flex-col gap-0.5">
           <CardTitle role="heading" aria-level={3} className="text-sm leading-5 [overflow-wrap:anywhere]">
-            <span data-scope-who={s.who.kind}>{s.who.name}</span>
+            {/* 2026-11-18: a lead with a persona is named by it ("Pilot Vesna") */}
+            <span data-scope-who={s.who.kind}>{s.who.kind === "lead" && mon(address)?.persona ? personaName(mon(address)!.persona!) : s.who.name}</span>
           </CardTitle>
           <CardDescription className="text-xs [overflow-wrap:anywhere]">{s.who.address ?? `No lead is running for ${entry.slug}`}</CardDescription>
         </div>

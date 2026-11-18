@@ -1,4 +1,4 @@
-// Each role agent's Pokémon (2026-11-13): the CoS is Rayquaza, the Steward Regigigas, leads start as the base
+// Each role agent's Pokémon (2026-11-13): the CoS is Rayquaza, the Steward Chansey, leads start as the base
 // form of a strong line and threads as early-route ones; both evolve as they level. Assigned at registration and kept
 // for the address's life. Only names, types and National Dex numbers live here: the sprites load at runtime from PokeAPI's public sprite repo, never bundled.
 
@@ -12,7 +12,7 @@ const m = (name: string, dex: number): Mon => ({ name, dex });
 // Requested 2026-11-16 ("each project gets a Pokémon type"): every live project holds one of the 18 types, its own.
 // Its lead is the strongest line of that type (shiny); its threads are other three-stage lines of the same type, then
 // of the lead's secondary type, then of a fixed sibling type, so a project's family reads as one. The CoS and the
-// Steward stay Rayquaza and Regigigas. A project's type is picked once by the words of its slug (or the first free
+// Steward stay Rayquaza and Chansey. A project's type is picked once by the words of its slug (or the first free
 // one) and kept in the projects table; nothing here names a project.
 
 export type MonType =
@@ -110,14 +110,17 @@ const LEAD_NAMES = new Set(TYPES.map((t) => t.lead));
 
 export const MON_POOLS: Record<"cos" | "steward" | "lead" | "thread", readonly Mon[]> = {
   cos: [m("Rayquaza", 384)],
-  steward: [m("Regigigas", 486)],
+  // 2026-11-18, the owner: Chansey, to match the Steward's Nurse persona (Regigigas before). It never evolves. Chansey is
+  // the middle of Happiny's line, a thread line: while the Steward is live it holds that whole line (held is by line,
+  // baseOf), so no thread shows a second Chansey
+  steward: [m("Chansey", 113)],
   lead: TYPES.map((t) => lineMon(t.lead)),
   thread: [...new Set(TYPES.flatMap((t) => t.threads))].map(lineMon),
 };
 /** Pokémon of earlier pools (before 2026-11-16): still named on old rows, so they keep resolving; never picked again. */
 const RETIRED_MONS: readonly Mon[] = [
   m("Bidoof", 399), m("Zigzagoon", 263), m("Rattata", 19), m("Sentret", 161), m("Patrat", 504), m("Kricketot", 401),
-  m("Larvesta", 636), m("Eevee", 133), m("Staryu", 120), m("Onix", 95), m("Joltik", 595),
+  m("Larvesta", 636), m("Eevee", 133), m("Staryu", 120), m("Onix", 95), m("Joltik", 595), m("Regigigas", 486),
 ];
 
 /**
@@ -141,17 +144,17 @@ export const monByName = (name: string | null | undefined): Mon | null => (name 
 export const builtInMon = (name: string): Mon | null => BY_NAME.get(name) ?? null;
 
 /**
- * The Pokémon a new agent gets; `taken` is every live agent's, whatever its role (no two share one).
+ * The Pokémon a new agent gets; `taken` is every live agent's, whatever its role (no two share a line: freeLine).
  * A lead: its type's line, else the first free lead line. A thread: the first free line of its family (own type,
  * lead's secondary, sibling), else any free thread line, else its family's lines in turn (only when all are held).
  */
 export function pickMon(role: keyof typeof MON_POOLS, taken: readonly string[], type: string | null = null): Mon {
-  const free = (n: string) => !taken.includes(n);
+  const free = freeLine(taken);
   const fam = typeFamily(type) ?? TYPES[0]!;
   if (role === "lead") return lineMon([fam.lead, ...TYPES.map((t) => t.lead)].find(free) ?? fam.lead);
   if (role === "thread") {
     const own = familyThreads(fam);
-    const name = own.find(free) ?? MON_POOLS.thread.map((x) => x.name).find(free) ?? own[taken.length % own.length]!;
+    const name = own.find(free) ?? MON_POOLS.thread.map((x) => x.name).find(free) ?? shared(own, taken);
     return lineMon(name);
   }
   const pool = MON_POOLS[role];
@@ -282,6 +285,21 @@ export function baseOf(name: string): string {
   for (const [base, line] of [...Object.entries(EVOLUTIONS), ...[...PACK].map(([b, x]) => [b, x.evolutions] as const)]) if (line.some((e) => e.mon.name === name)) return base;
   return name;
 }
+/**
+ * Whether a Pokémon's line is free, given the Pokémon live agents hold (`taken`, any form): no two share a line, so the
+ * Steward's Chansey holds Happiny's line (2026-11-18, the owner saw two Chanseys).
+ */
+export function freeLine(taken: readonly string[]): (name: string) => boolean {
+  const held = new Set(taken.map(baseOf));
+  return (n) => !held.has(baseOf(n));
+}
+/** With every line held, a thread shares its own lines in turn, never the CoS's or the Steward's. */
+function shared(own: readonly string[], taken: readonly string[]): string {
+  const standing = new Set([...MON_POOLS.cos, ...MON_POOLS.steward].map((x) => baseOf(x.name)));
+  const ok = own.filter((n) => !standing.has(baseOf(n)));
+  const pool = ok.length ? ok : own;
+  return pool[taken.length % pool.length]!;
+}
 /** A line's later forms: mons.ts's own, else a loaded pack's (none for a name with no line). */
 const evolutionsOf = (base: string | null | undefined): readonly Evolution[] => EVOLUTIONS[base ?? ""] ?? PACK.get(base ?? "")?.evolutions ?? [];
 /** mons.ts's own line for a base, whatever pack is loaded (null: it has none). */
@@ -353,9 +371,21 @@ export const packLineNames = (): string[] => [...PACK.keys()];
 export const familyLinesWithLeads = (t: TypeFamily): string[] => [...new Set(familyTypes(t).flatMap((x) => [typeFamily(x)!.lead, ...typeFamily(x)!.threads]))];
 
 /**
- * A thread's Pokémon while a pack applies: `first` (its trainer's lines, signature first), then its family with the lead
- * lines (familyLinesWithLeads), then any free line; never one in `skip` (another live trainer's signature). Lines in
- * `taken` are skipped; with every line held, its own lines are shared in turn, as pickMon does.
+ * The lines of a trainer's specialty type (2026-11-18, the owner: past its team a trainer's threads take lines of the
+ * type it specialises in): the type's lead line and thread lines, then every other line of mons.ts that carries the
+ * type, then the loaded pack's lines that do. Empty for no type (a Champion with no specialty).
+ */
+export function specialtyLines(type: string | null | undefined): string[] {
+  const t = typeFamily(type);
+  if (!t) return [];
+  const carries = (types: readonly MonType[]) => types.includes(t.type);
+  return [...new Set([t.lead, ...t.threads, ...Object.keys(LINES).filter((b) => carries(LINES[b]!.types)), ...[...PACK].filter(([, l]) => carries(l.types)).map(([b]) => b)])];
+}
+
+/**
+ * A thread's Pokémon while a pack applies: `first` (its trainer's lines: roster, specialty, fits; core/engine.ts threadTiers), then its family with the lead
+ * lines (familyLinesWithLeads), then any free line; never one in `skip` (another live trainer's signature). A line any
+ * of `taken` is on is skipped (freeLine); with every line held, its own lines are shared in turn, as pickMon does.
  */
 export function pickPackThread(taken: readonly string[], type: string | null, first: readonly string[], skip: readonly string[]): Mon {
   const fam = typeFamily(type) ?? TYPES[0]!;
@@ -363,7 +393,7 @@ export function pickPackThread(taken: readonly string[], type: string | null, fi
   const mine = [...new Set([...first, ...familyLinesWithLeads(fam)])];
   const own = mine.filter(ok).length ? mine.filter(ok) : mine;
   const any = [...new Set([...TYPES.flatMap((t) => [t.lead, ...t.threads]), ...packLineNames()])].filter(ok);
-  const free = (n: string) => !taken.includes(n);
-  const name = own.find(free) ?? any.find(free) ?? own[taken.length % own.length]!;
+  const free = freeLine(taken);
+  const name = own.find(free) ?? any.find(free) ?? shared(own, taken);
   return monByName(name)!;
 }

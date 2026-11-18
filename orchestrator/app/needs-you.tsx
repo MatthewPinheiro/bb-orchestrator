@@ -32,7 +32,7 @@ import { Card as Frame } from "./ui/card.tsx";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "./ui/dropdown-menu.tsx";
 import { Item, ItemGroup } from "./ui/item.tsx";
 import { cn } from "./ui/utils.ts";
-import { MonSprite } from "./mon.tsx";
+import { AgentFace, type Face } from "./face.tsx";
 import { Btn, EmptyState, Kind, ReadState, Section, Tag, Who, when } from "./ui.tsx";
 
 /** The device's zone, which the server works the defer presets out in. One value, so every read shares a cache entry. */
@@ -131,7 +131,7 @@ export type Act = {
 };
 
 /** One card, answerable in place: Needs you's cards, and the Scope tab's (with no defer presets there). */
-export function CardView({ card, list, presets, isArmed, act, mon, monType = null }: { card: Card; list: List; presets: Preset[]; isArmed: boolean; act: Act; mon: string | null; monType?: string | null }) {
+export function CardView({ card, list, presets, isArmed, act, mon, monType = null }: { card: Card; list: List; presets: Preset[]; isArmed: boolean; act: Act; mon: Face | null; monType?: string | null }) {
   const [note, setNote] = useState("");
   const [unticked, setUnticked] = useState<Map<number, Set<number>>>(() => new Map());
   const toggle = (block: number, item: number) =>
@@ -163,7 +163,7 @@ export function CardView({ card, list, presets, isArmed, act, mon, monType = nul
     <Frame role="article" data-card={card.id} data-rev={card.rev} data-asker={card.asker} data-state={state} data-accent={monType ?? undefined} aria-busy={busy || undefined} className={cn("gap-0 p-4", mine && "opacity-80")} style={accentVars(monType)}>
           <header className="flex items-start gap-3">
             {/* always drawn at its fixed size (the role avatar until the board names the mon), so the card never changes height */}
-            <MonSprite mon={mon} address={card.origin} size={28} />
+            <AgentFace face={mon} address={card.origin} size={28} />
             <div className="min-w-0 flex-1">
               <h4 className="m-0 text-sm leading-5 font-semibold [overflow-wrap:anywhere]">{card.title}</h4>
               {/* the quiet line: where it comes from, who asked, and any state */}
@@ -288,8 +288,8 @@ export function CardView({ card, list, presets, isArmed, act, mon, monType = nul
 
 type Query = { data: NeedsYou | undefined; error: { message: string } | null; refetch: () => Promise<void> };
 
-/** `mons`: address → its Pokémon, from the board's agents (for the asker's sprite on each card). */
-export function NeedsYouView({ q, refetchAll, mons, threads, accents }: { q: Query; refetchAll: () => void; mons: ReadonlyMap<string, string | null>; threads: ReadonlyMap<string, string>; accents?: ReadonlyMap<string, string | null> }) {
+/** `mons`: address → its face (its Pokémon or person), from the board's agents (for the asker's sprite on each card). */
+export function NeedsYouView({ q, refetchAll, mons, threads, accents }: { q: Query; refetchAll: () => void; mons: ReadonlyMap<string, Face>; threads: ReadonlyMap<string, string>; accents?: ReadonlyMap<string, string | null> }) {
   useGate();
   const navigate = useBbNavigate();
   const live = q.data;

@@ -17,7 +17,8 @@ import { Label } from "./ui/label.tsx";
 import { Textarea } from "./ui/textarea.tsx";
 import { cn } from "./ui/utils.ts";
 import { Fold } from "./answer-ui.tsx";
-import { MonSprite } from "./mon.tsx";
+import { AgentFace } from "./face.tsx";
+import { personaName } from "./faces.ts";
 import { Blocks } from "./blocks.tsx";
 import { lessText } from "./less-text.ts";
 import { GALLERY, Points, SHOT } from "./visual-blocks.tsx";
@@ -362,8 +363,9 @@ export function DeliverableCard({ d, refetchAll, outputs, outputsAfter }: { d: D
       <Head d={d} />
       <CardContent className="px-5">
         <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-          <MonSprite mon={d.leadMon} address={d.lead} size={28} />
+          <AgentFace face={{ mon: d.leadMon, persona: d.leadPersona }} address={d.lead} size={28} />
           <Who address={d.lead} nowrap />
+          {d.leadPersona ? <span data-lead-persona="">{personaName(d.leadPersona)}</span> : null}
           <span>{when(d.updatedAt)}</span>
         </div>
         <div className="mt-2 min-w-0 [overflow-wrap:anywhere]"><Markdown content={d.summary} /></div>
@@ -410,8 +412,9 @@ export function PastDeliverable({ d, files, folders, refetchAll, outputsAfter }:
       <Head d={d} />
       <CardContent className="grid gap-3 px-5">
         <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-          <MonSprite mon={d.leadMon} address={d.lead} size={28} />
+          <AgentFace face={{ mon: d.leadMon, persona: d.leadPersona }} address={d.lead} size={28} />
           <Who address={d.lead} nowrap />
+          {d.leadPersona ? <span data-lead-persona="">{personaName(d.leadPersona)}</span> : null}
           <span>{when(d.updatedAt)}</span>
         </div>
         <div className="min-w-0 [overflow-wrap:anywhere]">
@@ -514,8 +517,9 @@ function ShortCard({ d, rev, layout, media, rest, refetchAll, outputs, outputsAf
       <Head d={d} />
       <CardContent className="px-5">
         <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-          <MonSprite mon={d.leadMon} address={d.lead} size={28} />
+          <AgentFace face={{ mon: d.leadMon, persona: d.leadPersona }} address={d.lead} size={28} />
           <Who address={d.lead} nowrap />
+          {d.leadPersona ? <span data-lead-persona="">{personaName(d.leadPersona)}</span> : null}
           <span>{when(d.updatedAt)}</span>
         </div>
         {layout.parts.map(part)}

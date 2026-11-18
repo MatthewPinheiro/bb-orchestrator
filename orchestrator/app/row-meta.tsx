@@ -1,20 +1,17 @@
 // The sidebar's metadata line under each role agent's thread (2026-11-13: "make the sidebar prettier, more
 // colors"): a role chip in the role's colour, its Pokémon's name and a lead's
-// priority; the sprite itself replaces the row's provider icon (useRowIcons). bb draws the line only with the threadRowMetadata experiment on and Organize → Rows → Metadata checked.
+// priority, drawn by app/row-line.tsx; the sprite itself replaces the row's provider icon (useRowIcons). bb draws the line only with the threadRowMetadata experiment on and Organize → Rows → Metadata checked.
 // Plain inline styles: the sidebar is outside the app's [data-orch] scope, so the app's CSS doesn't reach it.
 import { useCallback, useEffect, useMemo, useRef } from "react";
 import { experimental_useRpcQuery, useRealtime } from "@get-bb/plugin-sdk/app";
 import type { ExperimentalThreadRowMetadataProps } from "@get-bb/plugin-sdk/app";
 import { CHANGED_CHANNEL, rpcContract, type Agents } from "../contract.ts";
-import { isShiny, monByName, monSprite } from "../mons.ts";
-import { PRIORITY_TONES, ROLE_TONES, css, roleOf, tint, type Priority } from "./palette.ts";
-import { sectionTitle } from "../core/model.ts";
-import { accentText, sectionCss } from "./accent.ts";
+import { rowIconCss } from "./faces.ts";
+import { sectionCss } from "./accent.ts";
+import { RowLine } from "./row-line.tsx";
 
 type Agent = Agents[number];
 export type RowData = Map<string, Agent>;
-
-const ROLE_LABEL: Record<string, string> = { cos: "Chief of Staff", steward: "Steward", lead: "Lead", thread: "Thread" };
 
 /** One agents query for the whole sidebar, refreshed when the orchestrator changes. */
 export function useRowData(): RowData {
@@ -38,30 +35,15 @@ export function useRowData(): RowData {
 }
 
 /**
- * Requested 2026-11-13: "move the sprites to the claude icons". bb has no per-thread row icon slot, so one stylesheet
- * swaps the provider mark of each role agent's row (found by its thread link's data-sidebar-thread-id) for its
- * sprite. Rows of threads that aren't role agents keep bb's own icon.
+ * Requested 2026-11-13: "move the sprites to the claude icons". One stylesheet swaps each role agent's row icon for its
+ * picture (faces.ts rowIconCss: its Pokémon, or with a personas pack its person, or the pair), and colours the sections.
  */
 function useRowIcons(map: RowData): void {
   useEffect(() => {
     const id = "orch-row-icons";
     const el = (document.getElementById(id) as HTMLStyleElement | null) ?? Object.assign(document.createElement("style"), { id });
     if (!el.isConnected) document.head.appendChild(el);
-    el.textContent = [...map.values()]
-      .flatMap((a) => {
-        const m = monByName(a.form ?? a.mon);
-        if (!m || !/^[\w-]+$/.test(a.threadId)) return [];
-        // the exact chain bb draws (link, then its title span, then the icon): a looser match leaks into a neighbour row
-        // the standing agents and leads stand out; their threads stay smaller. The icon sits on the title line: moved down
-        // to the middle of the two-line row, or its top is cut off by the row above, and kept clear of the sidebar's left
-        // edge (2026-11-13)
-        const px = a.role === "thread" ? 30 : 38;
-        const row = `a[data-sidebar-thread-id="${a.threadId}"] + span > span > [data-sidebar-thread-provider]`;
-        return [
-          `${row} > * { display: none !important; }`,
-          `${row} { width: ${px}px; height: ${px}px; margin: -${(px - 16) / 2}px 4px -${(px - 16) / 2}px -${px - 30}px; position: relative; top: 9px; background: url("${monSprite(m, true, isShiny(a.role))}") center / contain no-repeat; image-rendering: pixelated; }`,
-        ];
-      })
+    el.textContent = rowIconCss(map.values())
       .concat(sectionCss(map.values()))
       .join("\n");
   }, [map]);
@@ -70,25 +52,5 @@ function useRowIcons(map: RowData): void {
 
 export function RowMeta({ thread, data }: ExperimentalThreadRowMetadataProps<RowData>) {
   const a = data?.get(thread.id);
-  if (!a) return null;
-  const role = roleOf(a.address);
-  const tone = role ? ROLE_TONES[role] : null;
-  const m = monByName(a.form ?? a.mon);
-  const shiny = isShiny(a.role);
-  const priority = a.role === "lead" && a.priority && a.priority in PRIORITY_TONES ? (a.priority as Priority) : null;
-  const tip = `${m ? `${shiny ? "Shiny " : ""}${m.name} · ` : ""}${a.address}${priority ? ` · ${priority} priority` : ""}`;
-  return (
-    // indented as far as the sprite moved off the sidebar edge (useRowIcons), so the chips stay clear of it
-    <span title={tip} style={{ display: "inline-flex", alignItems: "center", gap: 6, marginLeft: 8, fontSize: 11, lineHeight: "18px", whiteSpace: "nowrap" }}>
-      {tone ? (
-        <span style={{ color: css(tone), background: tint(tone), borderRadius: 999, padding: "0 7px", fontWeight: 600 }}>{ROLE_LABEL[a.role] ?? a.role}</span>
-      ) : null}
-      <span style={{ fontWeight: 700 }}>Lv {a.level}</span>
-      {/* a lead's and its threads' Pokémon in their project's accent, so the family reads as one */}
-      {m ? <span style={{ color: accentText(a.monType, tone ? css(tone) : undefined) }}>{m.name}</span> : null}
-      {priority ? (
-        <span style={{ color: css(PRIORITY_TONES[priority]), background: tint(PRIORITY_TONES[priority]), borderRadius: 999, padding: "0 7px" }}>{priority}</span>
-      ) : null}
-    </span>
-  );
+  return a ? <RowLine a={a} /> : null;
 }

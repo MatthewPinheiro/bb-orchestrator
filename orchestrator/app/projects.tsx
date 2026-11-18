@@ -28,7 +28,8 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuRadioG
 import { Item } from "./ui/item.tsx";
 import { ToggleGroup, ToggleGroupItem } from "./ui/toggle-group.tsx";
 import { cn } from "./ui/utils.ts";
-import { MonSprite } from "./mon.tsx";
+import { AgentFace, ProfileCard, StandingFace } from "./face.tsx";
+import { partyOf } from "./faces.ts";
 import { PRIORITIES, PRIORITY_TONES, css, type Priority } from "./palette.ts";
 import { accentText, accentVars } from "./accent.ts";
 import { gate, useGate, write } from "./store.ts";
@@ -182,7 +183,10 @@ function ArchiveConfirm({ project, open, busy, refetchAll, onDone }: { project: 
   );
 }
 
-/** The lead's Pokémon (shiny, as in the sidebar), opening its thread; a neutral avatar with the setting off or no lead. */
+/**
+ * The lead's Pokémon (shiny, as in the sidebar), or with a personas pack its person (2026-11-18), opening its thread; a
+ * neutral avatar with the setting off or no lead.
+ */
 function Face({ project, size }: { project: Project; size: 24 | 32 }) {
   const navigate = useBbNavigate();
   const h = leadHead(project);
@@ -191,10 +195,10 @@ function Face({ project, size }: { project: Project; size: 24 | 32 }) {
     <span className="face" data-face={h.mon ?? ""}>
       {lead ? (
         <Button variant="ghost" className={cn("p-0", size === 32 ? "size-9" : "size-7")} data-open-thread={lead.threadId} title={`Open lead:${project.slug}`} onClick={() => navigate.toThread(lead.threadId)}>
-          <MonSprite mon={h.mon} address={lead.address} size={size} boost={false} />
+          <AgentFace face={{ mon: h.mon, persona: h.persona }} address={lead.address} size={size} boost={false} />
         </Button>
       ) : (
-        <MonSprite mon={null} address={`lead:${project.slug}`} size={size} boost={false} />
+        <AgentFace face={null} address={`lead:${project.slug}`} size={size} boost={false} />
       )}
     </span>
   );
@@ -217,7 +221,7 @@ function ArchivedRow({ project, busy, refetchAll, onOpen }: { project: Project; 
             <Button variant="link" className={cn("name", INLINE_LINK, "no-underline hover:underline")} data-open-project={project.slug} onClick={() => onOpen(project.slug)}>
               {project.slug}
             </Button>
-            {head.mon ? <span className="who">{head.name}</span> : null}
+            {head.shown ? <span className="who">{head.name}</span> : null}
             <span className="now">archived {when(project.archivedAt)}</span>
           </span>
           <span className="acts">
@@ -258,7 +262,8 @@ function StandingAgents({ agents, full, busy, refetchAll }: { agents: Board["age
           return (
             <span key={role} data-standing-role={role}>
               {i ? " · " : ""}
-              {label}{" "}
+              {/* 2026-11-18, with a personas pack: the pair, and the name that opens its profile card */}
+              <StandingFace face={a} address={role} label={label} level={f?.level ?? null} />{" "}
               {a ? (
                 <>
                   {f?.status ?? a.status}
@@ -354,9 +359,9 @@ function ListRow({ project, lanes, now, selected, quiet, onSelect }: { project: 
             {project.slug}
           </Button>
           {project.direct?.unread ? <i className="unread" role="img" aria-label="a new note from the lead" data-list-unread={project.slug} title="a new note from the lead: select the project to read it" /> : null}
-          {head.mon ? <span className="k-mon">{head.name}</span> : null}
-          {head.mon && head.type ? (
-            <span className="k-type" data-type={project.monType ?? ""} style={{ color: accentText(project.monType) }}>
+          {head.shown ? <span className="k-mon">{head.name}</span> : null}
+          {head.shown && head.type ? (
+            <span className="k-type" data-type={head.accent ?? ""} style={{ color: accentText(head.accent) }}>
               {head.type}
             </span>
           ) : null}
@@ -395,6 +400,9 @@ function DetailPanel({ project, lanes, busy, refetchAll, openCard, onOpen, onPic
   const askStatus = askStatusFor(project, now, refetchAll);
   const st = projectState(project, lanes);
   const forYou = needCount(project, lanes);
+  const leadLane = lanes?.find((l) => l.agent.role === "lead");
+  const leadLevel = leadLane ? leadLane.agent.level : null;
+  const party = partyOf((lanes ?? []).filter((l) => l.state !== "released").map((l) => l.agent), project.slug, head.persona?.roster);
   const startLead = () => {
     const body: z.input<typeof startLeadBody> = { slug: project.slug };
     void write(WRITES.startLead, body, { kind: "other", where: `lead:${project.slug}`, after: refetchAll });
@@ -410,9 +418,9 @@ function DetailPanel({ project, lanes, busy, refetchAll, openCard, onOpen, onPic
               <>
                 <Face project={project} size={32} />
                 <span className="name">{project.slug}</span>
-                {head.mon ? <span className="k-mon">{head.name}</span> : null}
-                {head.mon && head.type ? (
-                  <span className="k-type" data-type={project.monType ?? ""} style={{ color: accentText(project.monType) }}>
+                {head.shown ? <span className="k-mon">{head.name}</span> : null}
+                {head.shown && head.type ? (
+                  <span className="k-type" data-type={head.accent ?? ""} style={{ color: accentText(head.accent) }}>
                     {head.type}
                   </span>
                 ) : null}
@@ -433,6 +441,9 @@ function DetailPanel({ project, lanes, busy, refetchAll, openCard, onOpen, onPic
               <MoreMenu project={project} busy={busy} refetchAll={refetchAll} narrow={narrow} onArchive={() => setConfirming(true)} askStatus={askStatus} askInMenu onPin={() => setPinning(true)} />
             </span>
           </div>
+          {/* 2026-11-18: the lead's profile card, compact, right under the header (with a personas pack only). It holds the
+              lead's Lv, party and team, so the header above doesn't repeat them, at any width */}
+          {head.persona && project.lead ? <ProfileCard persona={head.persona} address={project.lead.address} project={project.slug} level={leadLevel} party={party} /> : null}
           {project.lead ? (
             <ChatCard slug={project.slug}>
               <ChatLog project={project} now={now} cos={cosTitle} busy={busy} refetchAll={refetchAll} onPick={onPick} />

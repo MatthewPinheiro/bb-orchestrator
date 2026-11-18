@@ -227,14 +227,14 @@ test("The owner gets a push when a card enters Needs you: asked by the CoS, esca
   assert.deepEqual(s.up, [d1.id, d2.id, d1.id]);
 });
 
-test("each role agent gets its Pokémon: Rayquaza, Regigigas, its type's lead line, the type's three-stage threads, no repeats while live", () => {
+test("each role agent gets its Pokémon: Rayquaza, Chansey, its type's lead line, the type's three-stage threads, no repeats while live", () => {
   const s = setup();
   const st = s.e.register("T-st", "steward", null);
   const lb = s.e.register("T-lb", "lead", "beta");
   const t1 = s.e.register("T-w1", "thread", "alpha", "T-la");
   const t2 = s.e.register("T-w2", "thread", "alpha", "T-la");
   assert.equal(s.cos.mon, "Rayquaza");
-  assert.equal(st.mon, "Regigigas");
+  assert.equal(st.mon, "Chansey");
   // alpha and beta match no type's words: the first free types, Normal then Fire
   assert.deepEqual([s.lead.mon, lb.mon], ["Porygon", "Charmander"], "leads start at the base of their type's line");
   assert.deepEqual([t1.mon, t2.mon], ["Whismur", "Lillipup"]);

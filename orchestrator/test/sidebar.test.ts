@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { test } from "node:test";
-import { type BbRun, SECTION_ORDER, setupSidebar } from "../core/sidebar.ts";
+import { type BbRun, SECTION_ORDER, cliRun, setupSidebar } from "../core/sidebar.ts";
 
 // A fake bb holding the sidebar state; set/pin calls mutate it, so a second run sees the first run's result.
 function fakeBb() {
@@ -44,4 +46,32 @@ test("setup sidebar only writes what differs", async () => {
   assert.equal(st.calls.length, 3);
   assert.ok(lines.some((l) => l === "already set: experiment threadRowMetadata = true"));
   assert.ok(lines.some((l) => l === "already set: Chief of Staff thread thr_cos pinned"));
+});
+
+// 2026-11-18: run in an isolated bb, setup sidebar called the live app at 127.0.0.1:38886: the CLI it ran got the plugin
+// process's environment, which named no server, and the CLI's default is the live one. A stand-in bb records the server
+// each call went to; nothing here reaches a real bb.
+test("setup sidebar's bb calls go to the bb the plugin runs in, whatever the plugin's environment names", async () => {
+  const root = join(import.meta.dirname, ".scratch");
+  mkdirSync(root, { recursive: true });
+  const dir = mkdtempSync(join(root, "sidebar-cli-"));
+  try {
+    const bin = join(dir, "bb");
+    writeFileSync(bin, `#!/bin/sh\necho "\${BB_SERVER_URL:-none} $*" >> "${join(dir, "calls")}"\necho '{}'\n`);
+    chmodSync(bin, 0o755);
+    const isolated = "http://127.0.0.1:39561";
+    for (const env of [{ PATH: process.env.PATH }, { PATH: process.env.PATH, BB_SERVER_URL: "http://127.0.0.1:38886" }]) {
+      rmSync(join(dir, "calls"), { force: true });
+      const run = cliRun(bin, isolated, env);
+      assert.equal(await run(["settings", "show", "--json"]), "{}\n");
+      await run(["thread", "pin", "thr_cos"]);
+      assert.deepEqual(readFileSync(join(dir, "calls"), "utf8").trim().split("\n"), [`${isolated} settings show --json`, `${isolated} thread pin thr_cos`], `with ${env.BB_SERVER_URL ?? "no server"} in the plugin's environment`);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a failed bb call is an error naming the call, not a result", async () => {
+  await assert.rejects(cliRun("/nonexistent/bb", "http://127.0.0.1:39561", {})(["settings", "show"]), /bb settings show: /);
 });

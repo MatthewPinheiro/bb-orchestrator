@@ -6,7 +6,7 @@ import { existsSync, mkdirSync, realpathSync, renameSync, writeFileSync } from "
 import { basename, dirname, isAbsolute, join, relative, resolve as resolvePath, sep } from "node:path";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { type BbRun, setupSidebar } from "./core/sidebar.ts";
+import { cliRun, setupSidebar } from "./core/sidebar.ts";
 // deliverables
 import { chmodSync, closeSync, cpSync, createReadStream, openSync, readdirSync, readSync, rmSync, statSync } from "node:fs";
 import { Readable } from "node:stream";
@@ -408,12 +408,45 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   let flushing: Promise<void> | null = null;
-  const flush = () => {
-    flushing ??= engine.flush().finally(() => {
+  // A flush asked for while one is in flight runs once more after it (2026-11-18, speed): the one in flight read its
+  // recipients before that call's mail existed, and waits on each delivery, so the new mail would wait for the next
+  // tool call or clock pass.
+  let flushAgain = false;
+  const flush = (): Promise<void> => {
+    if (flushing) {
+      flushAgain = true;
+      return flushing;
+    }
+    flushing = engine.flush().finally(() => {
       flushing = null;
+      if (flushAgain) {
+        flushAgain = false;
+        void flush();
+      } else armWake();
     });
     return flushing;
   };
+  // A batched wake comes due inboxDebounceMs after its mail (2026-11-18, speed). A timer runs the flush that sends it,
+  // so it doesn't wait for the next tool call or clock pass: the clock's pass waits behind pr-watch, xp and layout, and
+  // live wakes went up to 112 s late. Armed only while the clock service runs (bb starts it after a good activation;
+  // its abort clears the timer), for the earliest wake still to come due; one that is due already waits on its
+  // recipient (busy, held), whose turn ending flushes.
+  let wakeTimers = false;
+  let wakeTimer: ReturnType<typeof setTimeout> | null = null;
+  let wakeAt = Infinity;
+  function armWake(): void {
+    if (!wakeTimers || !engine.settings.batchInbox) return;
+    const now = Date.now();
+    const next = engine.batch.wakes().find((w) => w.state === "pending" && w.due_at > now);
+    if (!next || (wakeTimer && wakeAt <= next.due_at)) return;
+    if (wakeTimer) clearTimeout(wakeTimer);
+    wakeAt = next.due_at;
+    wakeTimer = setTimeout(() => {
+      wakeTimer = null;
+      wakeAt = Infinity;
+      void flush();
+    }, next.due_at - now + 20);
+  }
 
   // ---------------------------------------------------------------- agent tools
   const caller = (threadId: string | undefined | null): Agent => {
@@ -1775,6 +1808,13 @@ export default async function plugin(bb: BbPluginApi) {
           if (!signal.aborted) bb.log.warn(`clock: ${errText(e)}`);
         }
       };
+      wakeTimers = true;
+      signal.addEventListener("abort", () => {
+        wakeTimers = false;
+        if (wakeTimer) clearTimeout(wakeTimer);
+        wakeTimer = null;
+        wakeAt = Infinity;
+      }, { once: true });
       await unlessAborted(reconcile(), signal);
       while (!signal.aborted) {
         await unlessAborted(pass(), signal);
@@ -1893,20 +1933,35 @@ export default async function plugin(bb: BbPluginApi) {
     },
     async needsYou({ zone }) {
       const v = engine.needsYou();
-      const interactions: NeedsYou["interactions"] = [];
-      for (const a of engine.agents()) {
+      // every agent's pending interactions, asked of bb 8 at a time (2026-11-18, speed): one after another, the nav
+      // badge's read took a bb round trip per live agent on every change notice. All at once (58 together) was no faster
+      // in the isolated bb (one call p50 ~380 ms against ~209 ms at 8, four rounds out of four), and live bb was timing
+      // out at 75 s under load. In agent order, as before.
+      const list = engine.agents();
+      const perAgent: NeedsYou["interactions"][] = new Array(list.length);
+      let next = 0;
+      const one = async (a: (typeof list)[number]): Promise<NeedsYou["interactions"]> => {
         try {
           const rows = ((await bb.sdk.threads.interactions.list({ threadId: a.threadId })) as unknown as RawInteraction[]).filter((r) => (r.status ?? "pending") === "pending");
-          if (!rows.length) continue;
+          if (!rows.length) return [];
           const t = await bb.sdk.threads.get({ threadId: a.threadId });
-          for (const r of rows) {
+          return rows.map((r) => {
             const kind = r.kind ?? r.payload?.kind ?? "prompt";
-            interactions.push({ id: r.id, threadId: a.threadId, address: a.address, title: t.title ?? a.address, kind, since: r.createdAt ? new Date(r.createdAt).toISOString() : null, questions: kind === "user_question" ? toQuestions(r.payload) : [] });
-          }
+            return { id: r.id, threadId: a.threadId, address: a.address, title: t.title ?? a.address, kind, since: r.createdAt ? new Date(r.createdAt).toISOString() : null, questions: kind === "user_question" ? toQuestions(r.payload) : [] };
+          });
         } catch {
-          // a thread that is gone has nothing pending
+          return []; // a thread that is gone has nothing pending
         }
-      }
+      };
+      await Promise.all(
+        Array.from({ length: Math.min(8, list.length) }, async () => {
+          while (next < list.length) {
+            const i = next++;
+            perAgent[i] = await one(list[i]!);
+          }
+        }),
+      );
+      const interactions: NeedsYou["interactions"] = perAgent.flat();
       return {
         cards: v.cards.map((d) => card(d, v.held)),
         deferred: v.deferred.map((d) => card(d)),
@@ -1917,12 +1972,13 @@ export default async function plugin(bb: BbPluginApi) {
       };
     },
     board() {
+      const assigned = engine.personaAssignments();
       return {
         rows: engine.board(),
         watchers: watchersView(),
         directUnread: [...engine.directLines()].filter(([, d]) => d.unread).map(([slug]) => slug),
         dead: engine.deadLetters({ board: true }).map((i) => ({ id: i.id, recipient: i.recipient, sender: i.sender, kind: i.kind, body: i.body, note: i.note, createdAt: i.createdAt })),
-        agents: engine.agents().map((a) => ({ threadId: a.threadId, address: a.address, role: a.role, project: a.project, status: a.status, mon: a.mon, monType: engine.accentType(a.project) })),
+        agents: engine.agents().map((a) => ({ threadId: a.threadId, address: a.address, role: a.role, project: a.project, status: a.status, mon: a.mon, monType: engine.accentType(a.project), ...engine.faceOf(a, assigned) })), // dex and persona: 2026-11-18
         rules: engine.rules().map((r) => ({ id: r.id, text: r.text, project: r.project, kinds: r.kinds, expiresAt: r.expiresAt, source: r.source, createdAt: r.createdAt, revokedAt: r.revokedAt })),
         decisions: engine.decisions(50).map((d) => ({
           id: d.id,
@@ -2062,11 +2118,17 @@ export default async function plugin(bb: BbPluginApi) {
       return engine.deliverableFolders();
     },
     deliverables(): Deliverables {
+      const assigned = engine.personaAssignments();
+      const leadOf = (address: string) => {
+        const a = engine.agentByAddress(address);
+        return a ? engine.personaOf(a, assigned) : null;
+      };
       return engine.deliverables().map((d) => ({
         id: d.id,
         project: d.project,
         lead: d.lead,
         leadMon: engine.agentByAddress(d.lead)?.mon ?? null,
+        leadPersona: leadOf(d.lead), // 2026-11-18: the lead's person
         title: d.title,
         summary: d.summary,
         state: d.state,
@@ -2709,8 +2771,8 @@ export default async function plugin(bb: BbPluginApi) {
             if (rest[0] !== "sidebar") throw new EngineError("invalid", "setup sidebar");
             if (self) throw new EngineError("forbidden", "agents don't change the sidebar layout");
             const pins = engine.agents().filter((a) => a.role === "cos" || a.role === "steward").map((a) => ({ label: a.role === "cos" ? "Chief of Staff" : "Steward", threadId: a.threadId }));
-            const bin = process.env.BB_CLI || "bb";
-            const run: BbRun = (args) => new Promise((resolve, reject) => execFile(bin, args, { timeout: 60_000, maxBuffer: 8 << 20 }, (err, stdout, stderr) => (err ? reject(new EngineError("invalid", `bb ${args.join(" ")}: ${stderr || err.message}`.slice(0, 400))) : resolve(stdout))));
+            // the bb this plugin runs in, never the CLI's default address
+            const run = cliRun(process.env.BB_CLI || "bb", bb.server.loopbackBaseUrl);
             return out((await setupSidebar(run, pins)).join("\n"));
           }
           case "inbox": {

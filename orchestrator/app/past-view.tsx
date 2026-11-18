@@ -15,7 +15,7 @@ import { ChevronRight } from "lucide-react";
 import type { DeliverableFolders, Deliverables } from "../contract.ts";
 import { projectTitle } from "../core/model.ts";
 import { FILES_WHERE, FileRow2, FileTile, META_LINE } from "./files.tsx";
-import { ALL_PROJECTS, FILTERS, KINDS, START, folderKey, folderOpen, narrowed, rowsOf, treeKey, type Filter, type KindFilter, type Row, type Tab, type View } from "./past.ts";
+import { ALL_PROJECTS, FILTERS, KINDS, START, allOpen, folderKey, folderOpen, mergeOpen, narrowed, rowOpen, rowsOf, treeKey, trimOpen, type Filter, type KindFilter, type Row, type Tab, type View } from "./past.ts";
 import { REVEAL_EVENT, takeDeliverable } from "./reveal.ts";
 import { PastDeliverable } from "./deliverables.tsx";
 import { Input } from "./ui/input.tsx";
@@ -30,7 +30,6 @@ export const STATE_WORD: Record<Deliverable["state"], string> = { review: "in re
 const OPEN_KEY = "orchestrator.deliverables.open.v2";
 /** The project folders the viewer opened or closed (2026-11-18), by folder key: one store for the list and Files. */
 const FOLDERS_KEY = "orchestrator.deliverables.folders.v1";
-const OPEN_MAX = 500;
 
 /** Which past deliverables (narrow), or project folders, the viewer opened, by key; {} when storage is blocked or unreadable. */
 function loadOpen(key: string): Record<string, boolean> {
@@ -43,26 +42,28 @@ function loadOpen(key: string): Record<string, boolean> {
 }
 function saveOpen(key: string, m: Record<string, boolean>) {
   try {
-    const entries = Object.entries(m);
-    localStorage.setItem(key, JSON.stringify(Object.fromEntries(entries.slice(Math.max(0, entries.length - OPEN_MAX)))));
+    localStorage.setItem(key, JSON.stringify(trimOpen(m)));
   } catch {
     // a private window or blocked storage: this visit only
   }
 }
-/** A store of open rows: its state and a setter that saves it, the newest toggles last so a trim drops the oldest. */
+/**
+ * A store of open rows: its state, a setter that saves it, the newest toggles last so a trim drops the oldest, and one
+ * that replaces it whole (Expand all, Collapse all).
+ */
 function useOpenStore(key: string) {
   const [stored, setStored] = useState<Record<string, boolean>>(() => loadOpen(key));
   const set = (patch: Record<string, boolean>) =>
     setStored((m) => {
-      const next = { ...m };
-      for (const [k, v] of Object.entries(patch)) {
-        delete next[k];
-        next[k] = v;
-      }
+      const next = mergeOpen(m, patch);
       saveOpen(key, next);
       return next;
     });
-  return [stored, set] as const;
+  const replace = (next: Record<string, boolean>) => {
+    saveOpen(key, next);
+    setStored(next);
+  };
+  return [stored, set, replace] as const;
 }
 
 /** The project select's value for "No project" (shadcn's Select takes no empty value). */
@@ -203,15 +204,22 @@ export function PastRows({
   pick?: { id: string | null; on: (id: string) => void };
   onDeliverable: (id: string) => void;
 }) {
-  const [stored, setOpen] = useOpenStore(OPEN_KEY);
-  const [savedFolders, setFolderOpen] = useOpenStore(FOLDERS_KEY);
+  const [stored, setOpen, replaceOpen] = useOpenStore(OPEN_KEY);
+  const [savedFolders, setFolderOpen, replaceFolders] = useOpenStore(FOLDERS_KEY);
   // the folders opened or closed during this search, never saved; a new search starts again with its matches open
   const [searchFolders, setSearchFolders] = useState<Record<string, boolean>>({});
   useEffect(() => setSearchFolders({}), [view.query]);
   const searching = view.query.trim() !== "";
-  const isOpen = (d: Deliverable) => (pick ? false : (stored[`d:${d.id}`] ?? false));
+  const isOpen = (d: Deliverable) => (pick ? false : rowOpen(stored)(d));
   const rows = rowsOf(tab, view, isOpen, folderOpen(view, savedFolders, searchFolders));
   const host = folders.data?.hostId ?? null;
+  // Expand all or Collapse all: every row and, under All projects, every folder (allOpen)
+  const all = (open: boolean) => {
+    const next = allOpen({ rows: stored, folders: savedFolders, search: searchFolders }, tab, view, open);
+    replaceOpen(next.rows);
+    if (next.folders !== savedFolders) replaceFolders(next.folders);
+    setSearchFolders(next.search);
+  };
   const toggle = (r: Row) => {
     if (r.node.t === "project") {
       // during a search a folder opens or closes for that search only; the saved state waits for the search to clear
@@ -354,10 +362,10 @@ export function PastRows({
     <section className="grid grid-cols-[minmax(0,1fr)] gap-3 text-sm" data-past-list="" aria-label={heading}>
       {!pick && !files && rows.length > 0 ? (
         <div className="-ml-3 flex gap-1">
-          <Btn tone="ghost" size="sm" className="text-muted-foreground" data-expand-all="" onClick={() => setOpen(Object.fromEntries(tab.past.map((d) => [`d:${d.id}`, true])))}>
+          <Btn tone="ghost" size="sm" className="text-muted-foreground" data-expand-all="" onClick={() => all(true)}>
             Expand all
           </Btn>
-          <Btn tone="ghost" size="sm" className="text-muted-foreground" data-collapse-all="" onClick={() => setOpen(Object.fromEntries(tab.past.map((d) => [`d:${d.id}`, false])))}>
+          <Btn tone="ghost" size="sm" className="text-muted-foreground" data-collapse-all="" onClick={() => all(false)}>
             Collapse all
           </Btn>
         </div>

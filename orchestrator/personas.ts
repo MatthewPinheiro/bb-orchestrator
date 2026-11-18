@@ -9,15 +9,22 @@
 //     "version": 1,
 //     "note": "free text: sources, credits, notices (never shown)",
 //     "personas": { "<id>": { "name": "…", "title": "…", "image": "https://…", "credit": "…",
-//                             "team": ["display-only names for a profile card"], "roster": ["<line>", …] } },
+//                             "team": ["<name>" or { "name": "…", "dex": 445 }, …], "roster": ["<line>", …],
+//                             "type": "<one of the 18 types>", "fits": ["<line>", …] } },
 //     "roles": { "cos": "<id>", "steward": "<id>" },
 //     "byType": { "<type>": ["<id>", …] },          // a lead's persona by its project's Pokémon type, first free one
 //     "byProject": { "<project slug>": "<id>" },     // the owner's overrides, before byType
 //     "fallback": "<id>",                            // when byType has no free one
 //     "lines": { "<base>": { "dex": 1, "types": ["water"], "evolutions": [{ "at": 30, "name": "…", "dex": 2 }] } }
 //   }
-// `roster`: the lines its threads take first, the signature line first. Each is one of mons.ts's lines or the pack's,
+// `team`: the persona's party in the games, for the profile card only, each member in its own form (repeats allowed).
+// A member's dex is its National Dex number, for its sprite; a plain name keeps loading (its number then comes from
+// mons.ts, if it knows the name). `roster`: the lines its threads take first, the signature line first. Each is one of mons.ts's lines or the pack's,
 // and evolves at least once. The CoS's and the Steward's partner is the Pokémon they already have.
+// `type` (optional, 2026-11-18): the persona's specialty; a Champion with none leaves it out. `fits` (optional): the
+// lines that suit the persona past its roster and its specialty, in order, each a line a thread can take, as a roster's.
+// A thread's lines while a pack applies: the roster, then lines of the specialty type, then the fits, then (rarely) its
+// project's family and any free line (core/engine.ts threadTiers).
 import { readFileSync, statSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { z } from "zod";
@@ -25,6 +32,7 @@ import { builtInEvolutions, builtInMon, TYPES, type MonType, type PackLine } fro
 
 const MAX_DEX = 649; // the last Pokémon with an animated sprite (mons.ts monSprite)
 const MAX_BYTES = 1_000_000;
+const MAX_TEAM_DEX = 1025; // a team member only shows: past 649 it draws PokeAPI's still sprite
 
 const oneLine = (max: number) =>
   z
@@ -46,8 +54,10 @@ const personaSchema = z.strictObject({
   title: oneLine(40),
   image,
   credit: oneLine(200).optional(),
-  team: z.array(oneLine(40)).max(12).optional(),
+  team: z.array(z.union([oneLine(40), z.strictObject({ name: oneLine(40), dex: z.number().int().min(1).max(MAX_TEAM_DEX) })])).max(12).optional(),
   roster: z.array(oneLine(40)).max(12).optional(),
+  type: z.enum(TYPES.map((t) => t.type) as [MonType, ...MonType[]]).optional(),
+  fits: z.array(oneLine(40)).max(12).optional(),
 });
 const lineSchema = z.strictObject({
   dex,
@@ -70,8 +80,17 @@ export interface Persona {
   title: string;
   image: string;
   credit?: string;
-  team?: string[];
+  team?: (string | TeamMember)[];
   roster?: string[];
+  /** Its specialty type: a thread takes lines of it after the roster (none: a Champion with no specialty). */
+  type?: MonType;
+  /** Lines that suit it, after the roster and the specialty, in order. */
+  fits?: string[];
+}
+/** A member of a persona's team from the games: its name in its own form, and its National Dex number. */
+export interface TeamMember {
+  name: string;
+  dex: number;
 }
 export interface PersonaPack {
   version?: 1;
@@ -132,11 +151,18 @@ export function parsePersonaPack(json: unknown): PersonaPack {
   }
   // a roster takes lines that can be threads: they evolve, and every form has an animated sprite
   const threadLine = (n: string) => !!lines[n] || (!!builtInEvolutions(n)?.length && (builtInMon(n)?.dex ?? Infinity) <= MAX_DEX);
+  // a team member's number, where the plugin knows the name (mons.ts, or this pack's lines), must be that name's
+  const dexOf = (n: string) => builtInMon(n)?.dex ?? (lines[n] ? lines[n].dex : Object.values(lines).flatMap((l) => l.evolutions).find((e) => e.name === n)?.dex);
   for (const [pid, p] of Object.entries(pack.personas)) {
-    p.roster?.forEach((n, i) => {
-      if (!threadLine(n)) problems.push(`personas.${pid}.roster[${i}]: ${n} is not a line a thread can take (one that evolves, of mons.ts or this pack)`);
-      if (p.roster!.indexOf(n) !== i) problems.push(`personas.${pid}.roster[${i}]: ${n} is listed twice`);
+    p.team?.forEach((m, i) => {
+      const known = typeof m === "string" ? undefined : dexOf(m.name);
+      if (typeof m !== "string" && known !== undefined && known !== m.dex) problems.push(`personas.${pid}.team[${i}]: ${m.name} is dex ${known}, not ${m.dex}`);
     });
+    for (const key of ["roster", "fits"] as const)
+      p[key]?.forEach((n, i) => {
+        if (!threadLine(n)) problems.push(`personas.${pid}.${key}[${i}]: ${n} is not a line a thread can take (one that evolves, of mons.ts or this pack)`);
+        if (p[key]!.indexOf(n) !== i) problems.push(`personas.${pid}.${key}[${i}]: ${n} is listed twice`);
+      });
   }
   if (problems.length) throw new PackError(problems);
   return pack;
@@ -187,10 +213,19 @@ export interface AgentPersona {
   image: string;
   credit: string | null;
   team: string[];
+  /** Each team member's National Dex number, in team order (null: a plain name mons.ts doesn't know). */
+  teamDex: (number | null)[];
+  /** A lead's roster lines, signature first: its party lists the threads on them first (faces.ts partyOf). */
+  roster: string[];
   /** The CoS's and the Steward's own Pokémon (its form now); null for a lead, whose threads are its Pokémon. */
   partner: string | null;
+  /** Its specialty type from the pack, if any: the Projects label names it in place of the project's type. */
+  type?: MonType | null;
 }
-export const agentPersona = (p: Persona, partner: string | null): AgentPersona => ({ name: p.name, title: p.title, image: p.image, credit: p.credit ?? null, team: [...(p.team ?? [])], partner });
+export const agentPersona = (p: Persona, partner: string | null): AgentPersona => {
+  const team = (p.team ?? []).map((m) => (typeof m === "string" ? { name: m, dex: builtInMon(m)?.dex ?? null } : m));
+  return { name: p.name, title: p.title, image: p.image, credit: p.credit ?? null, team: team.map((m) => m.name), teamDex: team.map((m) => m.dex), roster: [...(p.roster ?? [])], partner, type: p.type ?? null };
+};
 
 /** The persona's sentence at the top of a brief: "You are Warden Tamsin. ", with the partner for the CoS and the Steward. */
 export const personaSentence = (p: { name: string; title: string; partner: string | null }): string => `You are ${p.title} ${p.name}${p.partner ? `; your partner is ${p.partner}` : ""}. `;

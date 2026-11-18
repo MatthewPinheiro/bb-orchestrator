@@ -10,7 +10,8 @@ import { useState } from "react";
 import { useBbNavigate } from "@get-bb/plugin-sdk/app";
 import type { z } from "zod";
 import { WRITES, type Board, type cosMessageBody } from "../contract.ts";
-import { MonSprite } from "./mon.tsx";
+import { AgentFace } from "./face.tsx";
+import { personaName } from "./faces.ts";
 import { stage, useGate, write, gate } from "./store.ts";
 import { admit, canSend, imageFiles } from "./lead-images.ts";
 import { AttachButton, ImageThumbs, attached, base64, useDrop, type Attached } from "./image-attach.tsx";
@@ -81,7 +82,7 @@ export function CosComposer({ agents, refetchAll, compact = false }: { agents: B
     <section data-cos-composer="" className="mb-4 flex flex-col gap-1" {...drop}>
       <div className="flex items-start gap-2">
         <span className="mt-1 flex-none">
-          <MonSprite mon={cos?.mon ?? null} address="cos" size={28} />
+          <AgentFace face={cos} address="cos" size={28} />
         </span>
         <Textarea
           data-cos-text=""
@@ -111,7 +112,7 @@ export function CosComposer({ agents, refetchAll, compact = false }: { agents: B
           disabled={!cos}
           // the usual hint while the agents load: "No Chief of Staff" only once the read says so (it wrapped to two lines
           // on the phone-width page, so the bar changed height as the page loaded)
-          placeholder={cos || !agents ? (compact ? PLACEHOLDER.compact : PLACEHOLDER.full) : "No Chief of Staff is running: start it from the Projects tab"}
+          placeholder={cos || !agents ? (compact ? PLACEHOLDER.compact : cos?.persona ? `Message ${personaName(cos.persona)}…` : PLACEHOLDER.full) : "No Chief of Staff is running: start it from the Projects tab"}
         />
         <span className="mt-1.5 flex-none">
           <AttachButton onFiles={attach} disabled={!cos || staging} data={{ "data-cos-attach": "" }} />

@@ -90,6 +90,11 @@ function useScope() {
   return experimental_useRpcQuery({ contract: rpcContract, method: "scope", input: null });
 }
 
+// The badge and the page read needsYou, deliverables and scope through bb's one query cache (measured 2026-11-18: one
+// fetch of each at load with both mounted). Both refetched them on every change notice, and bb's refetch restarts one in
+// flight, so each went to the server twice. While the page is mounted its refetch serves the badge too.
+let pagesMounted = 0;
+
 /** The rail badge: only the owner's items (cards + interactions, deliverables in review, and the Scope tab's cards), null at 0. */
 function useOrchestratorBadge(): ExperimentalBadge | null {
   const q = useNeedsYou();
@@ -104,6 +109,7 @@ function useOrchestratorBadge(): ExperimentalBadge | null {
   useRealtime(
     CHANGED_CHANNEL,
     useCallback(() => {
+      if (pagesMounted > 0) return;
       void refetch.current();
       void drefetch.current();
       void srefetch.current();
@@ -184,6 +190,12 @@ function OrchestratorPanel({ subPath }: PluginNavPanelProps) {
   const shown = new Set(compact ? [findPane(layout, layout.focus)?.view] : panes(layout.root).map((p) => p.view));
 
   const needs = useNeedsYou();
+  useEffect(() => {
+    pagesMounted++;
+    return () => {
+      pagesMounted--;
+    };
+  }, []);
   const board = experimental_useRpcQuery({ contract: rpcContract, method: "board", input: null });
   const config = experimental_useRpcQuery({ contract: rpcContract, method: "config", input: null });
   // the Scope tab's chat reads its project's direct line from the projects read
@@ -211,7 +223,8 @@ function OrchestratorPanel({ subPath }: PluginNavPanelProps) {
       void l.agents.refetch();
     } else if (l.shown.has("scope")) void l.projects.refetch();
   }, []);
-  const mons = useMemo(() => new Map((board.data?.agents ?? []).map((a) => [a.address, a.mon] as const)), [board.data]);
+  // each agent's face (app/face.tsx): its Pokémon, and with a personas pack its person (2026-11-18)
+  const mons = useMemo(() => new Map((board.data?.agents ?? []).map((a) => [a.address, { mon: a.mon, dex: a.dex, persona: a.persona }] as const)), [board.data]);
   // each project's accent type (accent.ts), from its agents: none with the pokemon setting off
   const accents = useMemo(() => new Map((board.data?.agents ?? []).filter((a) => a.project && a.monType).map((a) => [a.project!, a.monType] as const)), [board.data]);
   useRealtime(CHANGED_CHANNEL, refetchAll);

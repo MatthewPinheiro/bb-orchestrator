@@ -7,7 +7,7 @@ import type { NeedsYou } from "../contract.ts";
 import type { Answers } from "../interactions.ts";
 import { KIND_TONES, css } from "./palette.ts";
 import { META, OtherBox, Options, WHEN } from "./answer-ui.tsx";
-import { MonSprite } from "./mon.tsx";
+import { AgentFace, type Face } from "./face.tsx";
 import { gate } from "./store.ts";
 import { Card } from "./ui/card.tsx";
 import { cn } from "./ui/utils.ts";
@@ -25,7 +25,7 @@ export function complete(i: Interaction, picks: Answers): boolean {
 
 const REC = /\s*\(recommended\)\s*$/i;
 
-export function QuestionCard({ ix, isArmed, mon, onSend, onOpen }: { ix: Interaction; isArmed: boolean; mon: string | null; onSend: (answers: Answers) => void; onOpen: () => void }) {
+export function QuestionCard({ ix, isArmed, mon, onSend, onOpen }: { ix: Interaction; isArmed: boolean; mon: Face | null; onSend: (answers: Answers) => void; onOpen: () => void }) {
   const [picks, setPicks] = useState<Answers>({});
   const key = ixKey(ix);
   const lock = gate.lock;
@@ -47,7 +47,7 @@ export function QuestionCard({ ix, isArmed, mon, onSend, onOpen }: { ix: Interac
   return (
     <Card role="article" data-card={key} data-rev={0} data-question-card={ix.id} data-thread={ix.threadId} data-state={mine ? "answered" : "open"} aria-busy={busy || undefined} className={cn("gap-0 p-4", mine && "opacity-80")}>
           <header className="flex items-start gap-3">
-            <MonSprite mon={mon} address={ix.address} size={28} />
+            <AgentFace face={mon} address={ix.address} size={28} />
             <div className="min-w-0 flex-1">
               <h4 className="m-0 text-sm leading-5 font-semibold [overflow-wrap:anywhere]">{ix.questions.length === 1 ? (ix.questions[0]!.shortLabel ?? ix.title) : ix.title}</h4>
               <p className={META}>

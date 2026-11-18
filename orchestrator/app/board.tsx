@@ -5,7 +5,7 @@
 import { Children, Fragment, useId, useState, type ComponentProps, type FormEvent, type ReactElement, type ReactNode } from "react";
 import { WRITES, type Board, type archiveBody, type resendBody, type ruleAddBody, type ruleRevokeBody } from "../contract.ts";
 import type { z } from "zod";
-import { MonSprite } from "./mon.tsx";
+import { AgentFace } from "./face.tsx";
 import { gate, useGate, write } from "./store.ts";
 import { KIND_TONES, ROLE_TONES, ruleState } from "./palette.ts";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from "./ui/alert-dialog.tsx";
@@ -239,7 +239,7 @@ export function BoardView({ q, refetchAll }: { q: Query; refetchAll: () => void 
               data-agent={a.address}
               main={
                 <span className="inline-flex items-center gap-2">
-                  <MonSprite mon={a.mon} address={a.address} size={28} />
+                  <AgentFace face={a} address={a.address} size={28} />
                   <Who address={a.address} nowrap />
                 </span>
               }

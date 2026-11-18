@@ -5,8 +5,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Projects, SummaryWait } from "../contract.ts";
-import { attentionOrder, chatOrder, chatPreview, directShown, directState, followUpOf, isQuiet, leadHead, matches, outOfDateLine, pickWaits, quietWords, seenUpTo, stateOf, threadSprites, waitLine } from "../app/command-center.ts";
-import type { Lane } from "../app/lanes.ts";
+import { attentionOrder, chatOrder, chatPreview, directShown, directState, followUpOf, isQuiet, leadHead, matches, outOfDateLine, pickWaits, quietWords, seenUpTo, stateOf, waitLine } from "../app/command-center.ts";
 
 const NOW = Date.parse("2026-11-16T12:00:00Z");
 const H = 3_600_000;
@@ -75,17 +74,35 @@ test("a quiet row without a status names the latest finished thing and its age, 
   assert.notEqual(quietWords(p, NOW), "no status from the lead");
 });
 
-const lane = (n: number, state: Lane["state"]): Lane => ({ agent: { address: `thread:x:${n}`, role: "thread", threadId: `T${n}`, mon: "Pichu", form: null } as never, state, since: null, activity: null, model: null, wait: null });
-test("the threads line shows working sprites first, idle ones after, six at most and then +N", () => {
-  const s = threadSprites([lane(1, "idle"), lane(2, "working"), lane(3, "idle"), lane(4, "working"), lane(5, "idle"), lane(6, "idle"), lane(7, "idle"), lane(8, "released")]);
-  assert.deepEqual(s.shown.map((l) => l.agent.address), ["thread:x:2", "thread:x:4", "thread:x:1", "thread:x:3", "thread:x:5", "thread:x:6"]);
-  assert.equal(s.more, 1, "seven live threads: six drawn, +1; a released one isn't counted");
-});
-
 test("the row head names the lead's Pokémon and the project's type; with the setting off a neutral head", () => {
   const on = { ...project("p"), lead: { address: "lead:p", threadId: "T", status: "idle", mon: "Abra" }, monType: "psychic" } as P;
-  assert.deepEqual(leadHead(on), { mon: "Abra", name: "Abra", type: "Psychic" });
-  assert.deepEqual(leadHead(project("p")), { mon: null, name: "lead", type: null }, "pokemon off: no mon, no type (MonSprite draws the role avatar)");
+  assert.deepEqual(leadHead(on), { mon: "Abra", name: "Abra", type: "Psychic", accent: "psychic", persona: null, shown: true });
+  assert.deepEqual(leadHead(project("p")), { mon: null, name: "lead", type: null, accent: null, persona: null, shown: false }, "pokemon off: no mon, no type (MonSprite draws the role avatar)");
+});
+
+test("with a personas pack the head names the lead's person, title first, and still its type (2026-11-18)", () => {
+  const persona = { name: "Vesna", title: "Pilot", image: "https://personas.example.test/vesna.png", credit: null, team: [], partner: null };
+  const on = { ...project("p"), lead: { address: "lead:p", threadId: "T", status: "idle", mon: null, persona }, monType: "dark" } as P;
+  const h = leadHead(on);
+  assert.equal(h.name, "Pilot Vesna");
+  assert.equal(h.mon, null, "the lead's Pokémon is hidden while it is a person");
+  assert.ok(h.shown, "the head still names it and its type: a hidden Pokémon is not the setting off");
+  assert.equal(h.type, "Dark");
+});
+
+test("a person with a specialty type names it in the label; every colour still follows the project's type (2026-11-18)", () => {
+  // the owner: the trainer's type in the label, and the project's colour stays. Made-up person: a Dragon specialist
+  // leading a Flying project.
+  const persona = { name: "Brannoc", title: "Warden", image: "https://personas.example.test/brannoc.png", credit: null, team: [], partner: null, type: "dragon" };
+  const on = { ...project("p"), lead: { address: "lead:p", threadId: "T", status: "idle", mon: null, persona }, monType: "flying" } as P;
+  const h = leadHead(on);
+  assert.equal(h.type, "Dragon", "the label's words: the person's specialty, not the project's Flying");
+  assert.equal(h.accent, "flying", "the label's colour and the accents: still the project's type");
+  // no specialty (a Champion with no type), or an older plugin process that sends none: the project's type, as before
+  for (const p of [{ ...persona, type: null }, { ...persona, type: undefined }]) {
+    const x = leadHead({ ...on, lead: { ...on.lead!, persona: p } } as P);
+    assert.deepEqual([x.type, x.accent], ["Flying", "flying"]);
+  }
 });
 
 test("two waits show: the lead's own first, then the longest live one; the rest fold and name the oldest of them", () => {

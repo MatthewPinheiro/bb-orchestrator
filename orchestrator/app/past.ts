@@ -310,6 +310,50 @@ export function rowsOf(tab: Tab, v: View, isOpen: (d: Deliverable) => boolean, i
 export const folderOpen = (v: View, saved: Record<string, boolean>, session: Record<string, boolean>) => (key: string) =>
   v.query.trim() !== "" ? (session[key] ?? true) : (saved[key] ?? true);
 
+/** How many entries a store of open rows or folders keeps in localStorage, the newest. */
+export const OPEN_MAX = 500;
+/** The viewer's open rows (`d:<id>`), saved folders and this search's folders. */
+export type OpenStores = { rows: Record<string, boolean>; folders: Record<string, boolean>; search: Record<string, boolean> };
+
+/**
+ * The rows store's entry for every row it holds no entry for: Expand all's or Collapse all's choice (2026-11-18). One
+ * entry, so a list past OPEN_MAX deliverables stays expanded; the trim never drops it.
+ */
+export const ALL_ROWS = "*";
+
+/** Whether a past deliverable shows open: the viewer's own click on it, else Expand all's or Collapse all's choice, else closed. */
+export const rowOpen = (rows: Record<string, boolean>) => (d: Deliverable) => rows[`d:${d.id}`] ?? rows[ALL_ROWS] ?? false;
+
+/** A store with a patch applied, the patched keys moved last so a trim drops the oldest. */
+export function mergeOpen(m: Record<string, boolean>, patch: Record<string, boolean>): Record<string, boolean> {
+  const next = { ...m };
+  for (const [k, v] of Object.entries(patch)) {
+    delete next[k];
+    next[k] = v;
+  }
+  return next;
+}
+
+/** A store as saved: its newest `max` entries, and always its ALL_ROWS entry. */
+export function trimOpen(m: Record<string, boolean>, max = OPEN_MAX): Record<string, boolean> {
+  const entries = Object.entries(m).filter(([k]) => k !== ALL_ROWS);
+  const kept = Object.fromEntries(entries.slice(Math.max(0, entries.length - max)));
+  return ALL_ROWS in m ? { [ALL_ROWS]: m[ALL_ROWS]!, ...kept } : kept;
+}
+
+/**
+ * Expand all (`open`) or Collapse all (2026-11-18, the owner: they "don't work correctly"): the stores after it. Every
+ * row, the rows store replaced by the one choice (so the clicks before it no longer count, and it holds past OPEN_MAX).
+ * Under All projects, every project folder too: during a search the search's folders, as a folder click does then,
+ * leaving the saved ones for when it clears. One project picked: no folders, the rows only.
+ */
+export function allOpen(s: OpenStores, tab: Tab, v: View, open: boolean): OpenStores {
+  const rows = { [ALL_ROWS]: open };
+  if (v.project !== ALL_PROJECTS) return { ...s, rows };
+  const folders = Object.fromEntries(tab.projects.map((p) => [folderKey(p), open]));
+  return v.query.trim() !== "" ? { ...s, rows, search: mergeOpen(s.search, folders) } : { ...s, rows, folders: mergeOpen(s.folders, folders) };
+}
+
 export type TreeMove = { focus?: string; toggle?: string; activate?: string };
 
 /**

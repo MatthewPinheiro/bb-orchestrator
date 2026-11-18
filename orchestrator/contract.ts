@@ -105,10 +105,24 @@ export const watchJobSchema = z.object({
 export const watchersSchema = z.object({ waits: z.array(watchWaitSchema), jobs: z.array(watchJobSchema), conditions: z.array(z.string()) });
 export type Watchers = z.infer<typeof watchersSchema>;
 
+// The personas hook (personas.ts, 2026-11-18): an agent's persona, with the pokemon setting on and a pack loaded.
+export const personaSchema = z.object({
+  name: z.string(),
+  title: z.string(),
+  image: z.string(), // https, safe in a CSS url()
+  credit: z.string().nullable(),
+  team: z.array(z.string()), // names for a profile card only
+  teamDex: z.array(z.number().nullable()).optional(), // each team member's National Dex number, for its sprite (2026-11-18)
+  roster: z.array(z.string()).optional(), // a lead's roster lines: its party lists the threads on them first
+  partner: z.string().nullable(), // the CoS's and the Steward's own Pokémon (its form now); null for a lead
+  type: z.string().nullish(), // the pack's specialty type (2026-11-18): the Projects label names it; none: the project's
+});
+export type AgentPersona = z.infer<typeof personaSchema>;
+
 export const boardSchema = z.object({
   rows: z.array(z.object({ id: z.string(), kind: z.string(), from: z.string().nullable(), project: z.string().nullable(), title: z.string(), body: z.string(), ref: z.string().nullable(), at: z.number() })),
   dead: z.array(z.object({ id: z.string(), recipient: z.string(), sender: z.string(), kind: z.string(), body: z.string(), note: z.string().nullable(), createdAt: z.number() })),
-  agents: z.array(z.object({ threadId: z.string(), address: z.string(), role: z.string(), project: z.string().nullable(), status: z.string(), mon: z.string().nullable(), monType: z.string().nullable() })),
+  agents: z.array(z.object({ threadId: z.string(), address: z.string(), role: z.string(), project: z.string().nullable(), status: z.string(), mon: z.string().nullable(), monType: z.string().nullable(), dex: z.number().nullish(), persona: personaSchema.nullish() })), // dex and persona (2026-11-18): engine.faceOf
   rules: z.array(z.object({ id: z.string(), text: z.string(), project: z.string().nullable(), kinds: z.array(z.string()), expiresAt: z.number().nullable(), source: z.string(), createdAt: z.number(), revokedAt: z.number().nullable() })),
   decisions: z.array(z.object({ id: z.string(), state: z.string(), title: z.string(), origin: z.string(), asker: z.string(), level: z.string(), answer: z.string().nullable(), ack: z.string().nullable(), updatedAt: z.string() })),
   directUnread: z.array(z.string()).optional(), // projects with a lead's note the owner hasn't opened: the Projects tab's dot
@@ -204,16 +218,6 @@ export type ProjectBook = z.infer<typeof projectBookSchema>;
 export const cardHitsSchema = z.array(z.object({ id: z.string(), project: z.string().nullable(), title: z.string(), answer: z.string(), at: z.number() }));
 export type CardHits = z.infer<typeof cardHitsSchema>;
 
-// The personas hook (personas.ts, 2026-11-18): an agent's persona, with the pokemon setting on and a pack loaded.
-export const personaSchema = z.object({
-  name: z.string(),
-  title: z.string(),
-  image: z.string(), // https, safe in a CSS url()
-  credit: z.string().nullable(),
-  team: z.array(z.string()), // names for a profile card only
-  partner: z.string().nullable(), // the CoS's and the Steward's own Pokémon (its form now); null for a lead
-});
-export type AgentPersona = z.infer<typeof personaSchema>;
 
 export const projectsSchema = z.array(
   z.object({
@@ -359,6 +363,7 @@ export const deliverablesSchema = z.array(
     project: z.string().nullable(),
     lead: z.string(), // the delivering lead's address
     leadMon: z.string().nullable(),
+    leadPersona: personaSchema.nullish(), // the lead's person (2026-11-18): null with the setting off, no pack, or the lead gone
     title: z.string(),
     summary: z.string(),
     state: z.enum(["review", "approved", "changes", "withdrawn"]),

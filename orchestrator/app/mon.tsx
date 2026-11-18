@@ -5,7 +5,8 @@
 // fallback is the Avatar's neutral initial of the role.
 import { styleHref } from "./style-href.ts";
 import { useState, type CSSProperties } from "react";
-import { isShiny, monByName, monSprite } from "../mons.ts";
+import { isShiny, monSprite } from "../mons.ts";
+import { spriteMon } from "./faces.ts";
 import { Avatar, AvatarFallback } from "./ui/avatar.tsx";
 import { ROLE_TONES, roleOf } from "./palette.ts";
 
@@ -19,9 +20,12 @@ const MON_CSS = `
 
 const AVATAR_SIZES = [16, 20, 24, 32, 40, 48] as const;
 
-/** `size` is the box in px; the CoS's Rayquaza gets a quarter more, unless `boost` is off (a row it must line up in). */
-export function MonSprite({ mon, address, size = 32, boost = true }: { mon: string | null | undefined; address: string; size?: 16 | 20 | 24 | 28 | 32 | 40 | 48; boost?: boolean }) {
-  const m = monByName(mon);
+/**
+ * `size` is the box in px; the CoS's Rayquaza gets a quarter more, unless `boost` is off (a row it must line up in).
+ * `dex`: the server's number for `mon`, for a personas pack's line (2026-11-18, faces.ts spriteMon).
+ */
+export function MonSprite({ mon, dex, address, size = 32, boost = true }: { mon: string | null | undefined; dex?: number | null; address: string; size?: number; boost?: boolean }) {
+  const m = spriteMon(mon, dex);
   const role = roleOf(address);
   const box = role === "cos" && boost ? Math.round(size * 1.25) : size; // side by side with others, the same box
   const shiny = isShiny(role);

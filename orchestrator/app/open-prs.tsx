@@ -27,7 +27,17 @@
 // columns. Narrow (a side-by-side pane, a phone): a card with the title on up to two lines and the same few facts under
 // it. The summary and the rest open behind the row's or the card's expand. The review ask, its ticks, "since your last
 // copy", the pings and Copy and Post moved into one Dialog, so opening Post never moves the list.
-import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type MouseEvent } from "react";
+// Resizable columns (2026-11-18, the owner: "the columns aren't individually adjustable in width"): every column of the
+// wide table has a handle on its header's right edge (column-widths.ts). Drag sizes that column alone, double-click
+// resets it, and the widths are kept per viewer. Title fills what the others leave until it is dragged; wider than the
+// tab, the table scrolls inside its box.
+// The table fills the tab (2026-11-18, the owner: "on a wider screen it fills more of the space, so the columns get more
+// room"): the tab is no longer capped at 1024 px. Past today's box every column grows in proportion, and a resize is
+// kept as shares of the box, so it holds at any width (column-widths.ts).
+// Grouped by project (2026-11-18, the owner: easy to see which project each PR belongs to): one group per project the PR
+// already carries, by name, then Unassigned, each with its count and a collapse kept per viewer (pr-groups.ts). In the
+// table a group's header is a row spanning the drawn columns, so every group shares the one header and its handles.
+import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type MouseEvent } from "react";
 import { ChevronRight } from "lucide-react";
 import { experimental_useRpcQuery, useBbNavigate, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
 import { CHANGED_CHANNEL } from "../contract.ts";
@@ -53,6 +63,8 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "./ui/collap
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "./ui/dialog.tsx";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./ui/table.tsx";
 import { useWidth } from "./panes.tsx";
+import { useColumnWidths, type ColumnSpec, type HandleProps } from "./column-widths.ts";
+import { GROUPS_KEY, groupPrs, useCollapsed, type PrGroup } from "./pr-groups.ts";
 import { Label } from "./ui/label.tsx";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select.tsx";
 import { ToggleGroup, ToggleGroupItem } from "./ui/toggle-group.tsx";
@@ -156,6 +168,30 @@ const ciChip = (chips: Chip[]): Chip => chips.find((c) => c.key === "ci")!;
 /** A PR's reviewers in one line: its state's people (to ask, reviewed before, approved by), else the suggested ones. */
 const reviewersOf = (pr: OpenPr): string => (pr.stateWho.length ? pr.stateWho : pr.candidates).map((c) => c.say).join(", ");
 const samePr = (a: { pr: OpenPr }, b: { pr: OpenPr }) => JSON.stringify(a.pr) === JSON.stringify(b.pr);
+const sameRow = (a: { pr: OpenPr; span: number; filler: boolean }, b: { pr: OpenPr; span: number; filler: boolean }) => a.span === b.span && a.filler === b.filler && samePr(a, b);
+
+/** The wide table's columns: Title fills what the others leave until it is dragged; the rest start at their old widths in today's box, and grow past it. */
+const PR_COLS: ColumnSpec[] = [
+  { id: "title", label: "Title", width: null, min: 160 },
+  { id: "pr", label: "PR", width: 128, min: 64 },
+  { id: "state", label: "State", width: 176, min: 72 },
+  { id: "ci", label: "CI", width: 112, min: 56 },
+  { id: "reviewers", label: "Reviewers", width: 160, min: 72 },
+  { id: "updated", label: "Updated", width: 96, min: 64 },
+];
+/** Where the viewer's widths are kept (per browser, never on the server), as shares of the box; v1 kept px, read once. */
+const COLS_KEY = "orchestrator.open-prs.columns.v2";
+const OLD_COLS_KEY = "orchestrator.open-prs.columns.v1";
+
+/** A column's resize handle: a thin line on the header's right edge, wider to grab, darker on hover, focus or drag. */
+function ColHandle(p: HandleProps) {
+  return (
+    <span
+      {...p}
+      className="absolute inset-y-0 right-0 z-10 w-3 cursor-col-resize touch-none select-none outline-none after:absolute after:inset-y-2 after:right-0 after:w-px after:bg-border hover:after:w-0.5 hover:after:bg-ring focus-visible:after:w-0.5 focus-visible:after:bg-ring active:after:w-0.5 active:after:bg-ring"
+    />
+  );
+}
 /** A click on a row or a card's header toggles it, except on the link (it opens the PR) or the toggle (it toggles itself). */
 const toggleOn = (set: (f: (o: boolean) => boolean) => void) => (e: MouseEvent) => {
   if ((e.target as Element).closest("a, button")) return;
@@ -254,7 +290,7 @@ const PrCard = memo(function PrCard({ pr }: { pr: OpenPr }) {
  * title cut to one line, then the repo#n link, the state, CI, the reviewers and the age in their columns; its expand
  * opens a second row with PrDetails under it.
  */
-const PrRow = memo(function PrRow({ pr }: { pr: OpenPr }) {
+const PrRow = memo(function PrRow({ pr, span, filler }: { pr: OpenPr; span: number; filler: boolean }) {
   const [open, setOpen] = useState(false);
   const chips = prChips(pr);
   const state = stateChip(chips);
@@ -287,23 +323,65 @@ const PrRow = memo(function PrRow({ pr }: { pr: OpenPr }) {
         <TableCell className="text-xs text-muted-foreground" title={pr.updatedAt} data-updated="">
           <Ago at={Date.parse(pr.updatedAt)} /> ago
         </TableCell>
+        {filler ? <TableCell className="p-0" aria-hidden="true" /> : null}
       </TableRow>
       {open ? (
         <TableRow className="hover:bg-transparent" data-row-body={pr.url}>
-          <TableCell colSpan={6} className="px-3 pt-1 pb-3 pl-9 whitespace-normal">
+          <TableCell colSpan={span} className="px-3 pt-1 pb-3 pl-9 whitespace-normal">
             <PrDetails pr={pr} />
           </TableCell>
         </TableRow>
       ) : null}
     </>
   );
-}, samePr);
+}, sameRow);
 
-/** The PRs in the sort the Select picks: table rows when the page is wide, folding cards when it is narrow. */
+/** A group's collapse: its project's name and how many PRs it holds; a keyboard opens it too (a button with aria-expanded). */
+function GroupToggle({ g, open, onToggle }: { g: PrGroup<OpenPr>; open: boolean; onToggle: () => void }) {
+  const n = g.prs.length;
+  return (
+    <Button variant="ghost" size="xs" aria-expanded={open} data-state={open ? "open" : "closed"} onClick={onToggle} className="group h-auto min-h-6 max-w-full min-w-0 justify-start gap-1.5 rounded-sm px-0 text-left text-xs font-semibold hover:bg-transparent [&:is(.dark_*)]:hover:bg-transparent" data-group-toggle="">
+      <ChevronRight aria-hidden="true" className="size-4 shrink-0 text-muted-foreground transition-transform group-data-[state=open]:rotate-90" />
+      <span className="truncate">{g.name}</span>
+      <Badge variant="secondary" className="shrink-0 tabular-nums" aria-label={`${n} PR${n === 1 ? "" : "s"}`} data-group-count="">
+        {n}
+      </Badge>
+    </Button>
+  );
+}
+const groupData = (g: PrGroup<OpenPr>, open: boolean) => ({ "data-group": g.key ?? undefined, "data-unassigned": g.key === null ? "" : undefined, "data-group-open": open ? "true" : "false" });
+
+/** A group's header in the table: one row spanning the drawn columns, so the groups share the one header and its handles. */
+function GroupRow({ g, open, span, onToggle }: { g: PrGroup<OpenPr>; open: boolean; span: number; onToggle: () => void }) {
+  return (
+    <TableRow className="cursor-pointer bg-muted/50 hover:bg-muted/50" onClick={(e) => ((e.target as Element).closest("a, button") ? null : onToggle())} data-group-head="" {...groupData(g, open)}>
+      <TableCell colSpan={span} className="max-w-0 py-1.5">
+        <GroupToggle g={g} open={open} onToggle={onToggle} />
+      </TableCell>
+    </TableRow>
+  );
+}
+
+/** A group's header over its cards. */
+function GroupHead({ g, open, onToggle }: { g: PrGroup<OpenPr>; open: boolean; onToggle: () => void }) {
+  return (
+    <h3 className="m-0 flex min-w-0 px-1 text-xs" data-group-head="">
+      <GroupToggle g={g} open={open} onToggle={onToggle} />
+    </h3>
+  );
+}
+
+/**
+ * The PRs in the sort the Select picks, grouped by project (pr-groups.ts): table rows when the page is wide, folding
+ * cards when it is narrow. A collapsed group shows only its header.
+ */
 function PrList({ prs, wide }: { prs: OpenPr[]; wide: boolean }) {
   const [sort, setSort] = useState(SORTS[0]!.value);
   const s = SORTS.find((x) => x.value === sort) ?? SORTS[0]!;
   const rows = useMemo(() => sortPrs(prs, s.key, s.desc), [prs, s.key, s.desc]);
+  const groups = useMemo(() => groupPrs(rows), [rows]);
+  const { collapsed, toggle } = useCollapsed(GROUPS_KEY);
+  const { layout, handle, boxRef } = useColumnWidths(COLS_KEY, PR_COLS, OLD_COLS_KEY);
   return (
     <div className="grid min-w-0 gap-2" data-prs-list={wide ? "rows" : "cards"}>
       <div className="flex items-center gap-2">
@@ -324,39 +402,57 @@ function PrList({ prs, wide }: { prs: OpenPr[]; wide: boolean }) {
         </Select>
       </div>
       {wide ? (
-        <div className="rounded-lg border" data-prs-table="">
-          <Table className="table-fixed">
+        // min-w-0: a table dragged wider than the tab scrolls inside this box (ui/table.tsx's container), not the page
+        <div ref={boxRef} className="min-w-0 overflow-hidden rounded-lg border" data-prs-table="">
+          <Table className="table-fixed" style={layout.style}>
             <colgroup>
-              <col />
-              <col className="w-32" />
-              <col className="w-44" />
-              <col className="w-28" />
-              <col className="w-40" />
-              <col className="w-24" />
+              {layout.cols.map((w, i) => (
+                <col key={PR_COLS[i]!.id} style={w === null ? undefined : { width: w }} data-col={PR_COLS[i]!.id} />
+              ))}
+              {layout.filler ? <col data-col="filler" /> : null}
             </colgroup>
             <TableHeader>
               <TableRow className="text-xs hover:bg-transparent">
-                <TableHead className="pl-9 text-muted-foreground">Title</TableHead>
-                <TableHead className="text-muted-foreground">PR</TableHead>
-                <TableHead className="text-muted-foreground">State</TableHead>
-                <TableHead className="text-muted-foreground">CI</TableHead>
-                <TableHead className="text-muted-foreground">Reviewers</TableHead>
-                <TableHead className="text-muted-foreground">Updated</TableHead>
+                {PR_COLS.map((c) => (
+                  <TableHead key={c.id} className={`relative truncate text-muted-foreground${c.id === "title" ? " pl-9" : ""}`}>
+                    {c.label}
+                    <ColHandle {...handle(c)} />
+                  </TableHead>
+                ))}
+                {layout.filler ? <TableHead className="p-0" aria-hidden="true" /> : null}
               </TableRow>
             </TableHeader>
             <TableBody>
-              {rows.map((p) => (
-                <PrRow key={p.url} pr={p} />
-              ))}
+              {groups.map((g) => {
+                const open = !collapsed.has(g.key);
+                return (
+                  <Fragment key={g.key ?? ""}>
+                    <GroupRow g={g} open={open} span={layout.span} onToggle={() => toggle(g.key)} />
+                    {open ? g.prs.map((p) => <PrRow key={p.url} pr={p} span={layout.span} filler={layout.filler} />) : null}
+                  </Fragment>
+                );
+              })}
             </TableBody>
           </Table>
         </div>
       ) : (
-        <ul className="m-0 grid min-w-0 list-none gap-2 p-0" data-prs-cards="">
-          {rows.map((p) => (
-            <PrCard key={p.url} pr={p} />
-          ))}
-        </ul>
+        <div className="grid min-w-0 gap-3" data-prs-groups="">
+          {groups.map((g) => {
+            const open = !collapsed.has(g.key);
+            return (
+              <section key={g.key ?? ""} className="grid min-w-0 gap-2" {...groupData(g, open)}>
+                <GroupHead g={g} open={open} onToggle={() => toggle(g.key)} />
+                {open ? (
+                  <ul className="m-0 grid min-w-0 list-none gap-2 p-0" data-prs-cards="">
+                    {g.prs.map((p) => (
+                      <PrCard key={p.url} pr={p} />
+                    ))}
+                  </ul>
+                ) : null}
+              </section>
+            );
+          })}
+        </div>
       )}
     </div>
   );
@@ -703,7 +799,7 @@ export function OpenPrsView() {
   const ref = useRef<HTMLDivElement>(null);
   const width = useWidth(ref);
   return (
-    <div ref={ref} className="mx-auto max-w-5xl" data-layout={width === 0 ? "measuring" : width >= WIDE ? "rows" : "cards"}>
+    <div ref={ref} data-layout={width === 0 ? "measuring" : width >= WIDE ? "rows" : "cards"}>
       {width > 0 ? <OpenPrsBody wide={width >= WIDE} /> : null}
     </div>
   );

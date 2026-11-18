@@ -13,7 +13,7 @@ import { CHANGED_CHANNEL, rpcContract, type ProjectHistory, type Projects } from
 import { Badge } from "./ui/badge.tsx";
 import { Button } from "./ui/button.tsx";
 import { ToggleGroup, ToggleGroupItem } from "./ui/toggle-group.tsx";
-import { MonSprite } from "./mon.tsx";
+import { AgentFace } from "./face.tsx";
 import { KIND_TONES, ROLE_TONES, css, roleOf, tint, type Tone } from "./palette.ts";
 import { ACCENT, accentTone, accentVars } from "./accent.ts";
 import { useWidth } from "./panes.tsx";
@@ -285,7 +285,7 @@ function FlowNode({ r, lane, depth }: { r: Row; lane: Lane | undefined; depth: n
       {depth ? <span aria-hidden style={{ position: "absolute", left: 0, top: 15, width: 12, borderTop: "1.5px solid var(--orch-line)" }} /> : null}
       <div className="flex min-w-0 flex-wrap items-center gap-1.5">
         <Button variant="ghost" size="xs" onClick={() => navigate.toThread(last.threadId)} title={`Open ${r.address}`} className="h-7 gap-1.5 px-1">
-          {lane ? <MonSprite mon={lane.agent.form ?? lane.agent.mon} address={r.address} size={24} /> : null}
+          {lane ? <AgentFace face={{ mon: lane.agent.form ?? lane.agent.mon, dex: lane.agent.formDex, persona: lane.agent.persona }} address={r.address} size={24} /> : null}
           <span className="orch-mono font-medium" style={{ color: css(tone) }}>
             {rowName(r.address)}
           </span>
@@ -512,7 +512,7 @@ export function ProjectDetail({ project, lanes, onBack, openCard, ownerName }: {
         <Btn tone="ghost" data-detail-back="" onClick={onBack} aria-label="Back to Projects">
           ← Projects
         </Btn>
-        {lead ? <MonSprite mon={lead.mon} address={lead.address} size={28} /> : null}
+        {lead ? <AgentFace face={lead} address={lead.address} size={28} /> : null}
         <span className="min-w-0 font-semibold [overflow-wrap:anywhere]" style={accentTone(project.monType) ? { color: ACCENT } : undefined}>
           {project.slug}
         </span>

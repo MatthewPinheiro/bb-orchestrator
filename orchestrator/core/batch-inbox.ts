@@ -63,6 +63,8 @@ export class BatchInbox {
   }
 
   sync(): void {
+    // The open states by name (an item is pending, queued, delivered, closed or dead), so items_state finds the few open
+    // ones instead of this scanning every item ever sent: it runs on every flush and every inbox read (2026-11-18, speed).
     // Imported mail (external_mail) keeps its own policy: its severity, needs-reply and deadline, not the item's needs_ack.
     this.db.exec(`      INSERT OR IGNORE INTO inbox_entries(item_id,recipient,severity,needs_reply,due_at)
       SELECT i.id,i.recipient,
@@ -71,7 +73,7 @@ export class BatchInbox {
         CASE WHEN x.item_id IS NOT NULL THEN COALESCE(json_extract(x.json,'$.needsReply'),0) ELSE i.needs_ack END,
         x.due_at
       FROM items i LEFT JOIN external_mail x ON x.item_id=i.id
-      WHERE i.state NOT IN ('closed','dead') AND NOT EXISTS (SELECT 1 FROM inbox_entries e WHERE e.item_id=i.id) ORDER BY i.created_at,i.rowid;`);
+      WHERE i.state IN ('pending','queued','delivered') AND NOT EXISTS (SELECT 1 FROM inbox_entries e WHERE e.item_id=i.id) ORDER BY i.created_at,i.rowid;`);
   }
 
   /** An item's read time (its cursor ack) and its recipient's wake, if one covers it, for receipts. */
@@ -248,7 +250,10 @@ export class BatchInbox {
           `INSERT OR IGNORE INTO inbox_wakes(recipient,token,state,due_at,through_seq) VALUES(?,?,'pending',?,(SELECT MAX(seq) FROM inbox_entries WHERE recipient=? AND acked_at IS NULL))`,
         )
         .run(recipient, token(), now + o.debounceMs, recipient);
-      let w = this.db.prepare(`SELECT * FROM inbox_wakes WHERE recipient=?`).get(recipient) as Wake;
+      let w = this.db.prepare(`SELECT * FROM inbox_wakes WHERE recipient=?`).get(recipient) as Wake | undefined;
+      // Its mail was read and acked while this flush waited on an earlier recipient's delivery: nothing is left to wake
+      // for, so no wake row was made. Reading w.state threw and dropped the rest of the flush (and the clock's pass).
+      if (!w) continue;
       const a = o.agent(recipient);
       if (!a || o.held(a) || !["idle", "unknown", "error"].includes(a.status)) continue;
       if (["sent", "sending", "uncertain"].includes(w.state) && now - Math.max(w.last_at ?? now, a.idleAt ?? 0) >= o.retryMs) {

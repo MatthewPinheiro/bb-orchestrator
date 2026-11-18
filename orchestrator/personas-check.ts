@@ -10,6 +10,7 @@ if (!path) {
 }
 try {
   const p = readPersonaPack(path);
+  const teams = Object.values(p.personas).flatMap((x) => x.team ?? []);
   const types = TYPES.filter((t) => p.byType?.[t.type]?.length).map((t) => t.type);
   console.log(
     [
@@ -17,6 +18,8 @@ try {
       `roles: cos ${p.roles?.cos ?? "-"}, steward ${p.roles?.steward ?? "-"}; fallback ${p.fallback}`,
       `byType: ${types.length}/18 types${types.length < 18 ? ` (none for ${TYPES.filter((t) => !types.includes(t.type)).map((t) => t.type).join(", ")})` : ""}`,
       `byProject: ${Object.keys(p.byProject ?? {}).length} overrides`,
+      `teams: ${teams.length} members, ${teams.filter((m) => typeof m !== "string").length} with a dex number`,
+      `specialties: ${Object.values(p.personas).filter((x) => x.type).length} of ${Object.keys(p.personas).length} personas; fits: ${Object.values(p.personas).filter((x) => x.fits?.length).length} personas, ${Object.values(p.personas).reduce((n, x) => n + (x.fits?.length ?? 0), 0)} lines`,
     ].join("\n"),
   );
 } catch (e) {

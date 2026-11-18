@@ -16,7 +16,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { DeliverableFolders, Deliverables, Outputs } from "../contract.ts";
-import { ALL_PROJECTS, FILTERS, KINDS, START, deliverablesTab, fileItems, folderKey, folderOpen, fold, rowsOf, servedBy, shownDeliverable, treeKey, type Row, type View } from "../app/past.ts";
+import { ALL_PROJECTS, FILTERS, KINDS, OPEN_MAX, START, allOpen, deliverablesTab, fileItems, folderKey, folderOpen, fold, mergeOpen, rowOpen, rowsOf, servedBy, shownDeliverable, treeKey, trimOpen, type OpenStores, type Row, type View } from "../app/past.ts";
 import { RENAMED_VIEWS, panes, parse } from "../app/layout.ts";
 import { manualSectionOrder, sidebarOrder } from "../core/project-order.ts";
 
@@ -144,6 +144,76 @@ test("filters and search reach into folders: a folder with no match is gone, and
   assert.deepEqual(shape(rowsOf(deliverablesTab(ds, [], withdrawn), withdrawn, () => false)), ["[beta 1]", "  v-a2"]);
   const login = { ...START, query: "login" };
   assert.deepEqual(shape(rowsOf(deliverablesTab(ds, [], login), login, () => false)), ["[beta 2]", "  v-a1", "  v-a2"]);
+});
+
+// 2026-11-18, the owner: "Collapse all" and "Expand all" didn't work. They changed the rows only, so Collapse all left
+// every project folder open (from a fresh load it did nothing) and Expand all left a closed folder's rows hidden.
+const NONE: OpenStores = { rows: {}, folders: {}, search: {} };
+/** What the list draws from the stores, as past-view.tsx reads them; the rows store as it is saved. */
+const drawn = (tab: ReturnType<typeof deliverablesTab>, v: View, s: OpenStores) => rowsOf(tab, v, rowOpen(trimOpen(s.rows)), folderOpen(v, s.folders, s.search));
+const openShape = (rows: Row[]) => rows.map((r) => `${shape([r])[0]}${r.open ? " +" : ""}`);
+
+test("Collapse all closes every project folder and every row, even from a fresh load", () => {
+  const ds = [del({ id: "v-a", project: "beta", updatedAt: 2 }), del({ id: "v-b", updatedAt: 1 })];
+  const tab = deliverablesTab(ds, [], START, order("alpha", "beta"));
+  assert.deepEqual(openShape(drawn(tab, START, NONE)), ["[alpha 1] +", "  v-b", "[beta 1] +", "  v-a"], "folders start open");
+  assert.deepEqual(openShape(drawn(tab, START, allOpen(NONE, tab, START, false))), ["[alpha 1]", "[beta 1]"], "from a fresh load, it closes them");
+  const opened = allOpen({ ...NONE, rows: { "d:v-a": true } }, tab, START, false); // a row the viewer opened by hand
+  const reopened = { ...opened, folders: mergeOpen(opened.folders, { [folderKey("beta")]: true }) };
+  assert.deepEqual(openShape(drawn(tab, START, reopened)), ["[alpha 1]", "[beta 1] +", "  v-a"], "its rows are closed too: reopening the folder shows them closed");
+  const after = allOpen(allOpen(NONE, tab, START, true), tab, START, false);
+  assert.deepEqual(openShape(drawn(tab, START, after)), ["[alpha 1]", "[beta 1]"], "no folder is left open");
+  assert.deepEqual(openShape(drawn(tab, START, allOpen(after, tab, START, true))), ["[alpha 1] +", "  v-b +", "[beta 1] +", "  v-a +"], "and Expand all undoes it");
+});
+
+test("Expand all opens every folder, a closed one too, and every row in it", () => {
+  const ds = [del({ id: "v-a", project: "beta", updatedAt: 2 }), del({ id: "v-b", updatedAt: 1 }), del({ id: "v-c", updatedAt: 0 })];
+  const tab = deliverablesTab(ds, [], START, order("alpha", "beta"));
+  const closedOne: OpenStores = { ...NONE, folders: { [folderKey("beta")]: false } }; // the viewer closed beta by hand
+  assert.deepEqual(openShape(drawn(tab, START, closedOne)), ["[alpha 2] +", "  v-b", "  v-c", "[beta 1]"]);
+  const all = ["[alpha 2] +", "  v-b +", "  v-c +", "[beta 1] +", "  v-a +"];
+  const expanded = allOpen(closedOne, tab, START, true);
+  assert.deepEqual(openShape(drawn(tab, START, expanded)), all, "the closed folder reopens and shows its rows");
+  const shutAgain = { ...expanded, folders: mergeOpen(expanded.folders, { [folderKey("alpha")]: false }) };
+  assert.deepEqual(openShape(drawn(tab, START, allOpen(shutAgain, tab, START, true))), all, "a folder closed after Expand all reopens on the next one");
+});
+
+test("during a search the buttons change that search's folders; the saved folders wait for the search to clear", () => {
+  const ds = [del({ id: "v-a", project: "beta", title: "Login fix" }), del({ id: "v-b", title: "Login redo" }), del({ id: "v-c", project: "gamma", title: "Billing" })];
+  const saved = { [folderKey("beta")]: false }; // the viewer closed beta before searching
+  const login = { ...START, query: "login" };
+  const tab = deliverablesTab(ds, [], login, order("alpha", "beta", "gamma"));
+  const collapsed = allOpen({ ...NONE, folders: saved }, tab, login, false);
+  assert.deepEqual(openShape(drawn(tab, login, collapsed)), ["[alpha 1]", "[beta 1]"], "Collapse all closes the search's folders");
+  assert.deepEqual(collapsed.folders, saved, "the saved folders are untouched");
+  const expanded = allOpen(collapsed, tab, login, true);
+  assert.deepEqual(openShape(drawn(tab, login, expanded)), ["[alpha 1] +", "  v-b +", "[beta 1] +", "  v-a +"], "Expand all opens them, rows too");
+  assert.deepEqual(expanded.folders, saved, "still untouched");
+  const cleared = deliverablesTab(ds, [], START, order("alpha", "beta", "gamma"));
+  assert.deepEqual(openShape(drawn(cleared, START, { ...expanded, search: {} })), ["[alpha 1] +", "  v-b +", "[beta 1]", "[gamma 1] +", "  v-c +"], "clearing the search brings the saved folders back");
+});
+
+test("with one project picked there are no folders: the buttons change the rows only", () => {
+  const ds = [del({ id: "v-a", project: "beta", updatedAt: 2 }), del({ id: "v-b", updatedAt: 1 })];
+  const beta = { ...START, project: "beta" };
+  const tab = deliverablesTab(ds, [], beta);
+  const s: OpenStores = { ...NONE, folders: { [folderKey("beta")]: false } };
+  const expanded = allOpen(s, tab, beta, true);
+  assert.deepEqual(openShape(drawn(tab, beta, expanded)), ["v-a +"]);
+  assert.deepEqual(expanded.folders, s.folders, "the folders are left as the viewer had them");
+  assert.deepEqual(openShape(drawn(tab, beta, allOpen(expanded, tab, beta, false))), ["v-a"]);
+});
+
+test("Expand all holds on a list past the store's 500 entries, and a row closed after it stays closed", () => {
+  const ds = Array.from({ length: OPEN_MAX + 100 }, (_, i) => del({ id: `v-${i}`, updatedAt: i }));
+  const tab = deliverablesTab(ds, [], START);
+  let s = allOpen(NONE, tab, START, true);
+  s = { ...s, rows: trimOpen(s.rows) }; // as saved
+  assert.equal(drawn(tab, START, s).filter((r) => r.node.t === "deliverable" && r.open).length, ds.length, "every row open, none trimmed back");
+  // then the viewer toggles 500 rows: the oldest entries are trimmed, never Expand all's choice
+  for (let i = 0; i < OPEN_MAX; i++) s = { ...s, rows: trimOpen(mergeOpen(s.rows, { [`d:v-${i}`]: true })) };
+  assert.equal(drawn(tab, START, s).find((r) => r.node.key === `d:v-${OPEN_MAX + 50}`)?.open, true, "a row never touched since Expand all is still open");
+  assert.equal(drawn(tab, START, { ...s, rows: trimOpen(mergeOpen(s.rows, { "d:v-7": false })) }).find((r) => r.node.key === "d:v-7")?.open, false, "a row closed after Expand all stays closed");
 });
 
 test("Files are grouped the same way: each project's files and loose outputs in its folder, No project last", () => {

@@ -405,6 +405,16 @@ export const MIGRATIONS: string[] = [
   // that keeps two runs (or two plugin generations) from overlapping.
   `CREATE TABLE review_queue_state (id INTEGER PRIMARY KEY CHECK (id = 1), json TEXT NOT NULL);
    CREATE TABLE review_queue_lease (id INTEGER PRIMARY KEY CHECK (id = 1), token TEXT NOT NULL, expires INTEGER NOT NULL)`,
+  // Speed (2026-11-18): an address's last report (lastReport, lastReportAt) is read once per live agent on every agents
+  // and scope read; without this each one scanned the whole board and sorted it.
+  `CREATE INDEX board_from ON board (from_address, at)`,
+  // Speed (2026-11-18): each project's direct line (directLines: the owner's messages to its lead, newest first) is read on
+  // every board and projects read; items_recipient (recipient, state) found them but sorted them in a temp B-tree.
+  // Descending, so messages of the same millisecond keep the order that sort gave them (oldest of them first).
+  `CREATE INDEX items_recipient_kind ON items (recipient, kind, created_at DESC)`,
+  // Speed (2026-11-18): the batched inbox's backfill (BatchInbox.sync) looks for open items on every flush and every
+  // inbox read; nearly all items are closed, so by state it reads a few rows instead of scanning them all.
+  `CREATE INDEX items_state ON items (state)`,
 ];
 
 export function migrate(db: Db): void {

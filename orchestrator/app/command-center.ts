@@ -2,7 +2,7 @@
 // JSX, so node --test checks it. One state word, the most pressing first; wait lines in plain words, ending with their
 // source; at most two of them, the lead's own first, then the longest live one; the rest folded into "+N more waits".
 // Rows are ordered by attention: needs you, blocked, the longest wait, moving, the rest.
-import type { Projects, SummaryWait } from "../contract.ts";
+import type { AgentPersona, Projects, SummaryWait } from "../contract.ts";
 import { isStale, position } from "../core/status.ts";
 import { age, waitsOnOwner, type Lane } from "./lanes.ts";
 import { typeFamily } from "../mons.ts";
@@ -276,16 +276,17 @@ export function quietWords(p: Project, now: number): string {
   return p.lead ? "idle" : "no lead";
 }
 
-/** The threads' small sprites on the "N of M working" line: working ones first, at most six, then +N. */
-export const SPRITES_SHOWN = 6;
-export function threadSprites(lanes: Lane[] | undefined): { shown: Lane[]; more: number } {
-  const threads = (lanes ?? []).filter((l) => l.agent.role === "thread" && l.state !== "released");
-  const sorted = [...threads.filter((l) => l.state === "working"), ...threads.filter((l) => l.state !== "working")];
-  return { shown: sorted.slice(0, SPRITES_SHOWN), more: Math.max(0, sorted.length - SPRITES_SHOWN) };
-}
-
-/** The row head: the lead's Pokémon (null with the setting off: a neutral avatar), its name, the project's type. */
-export function leadHead(p: Project): { mon: string | null; name: string; type: string | null } {
+/**
+ * The row head: the lead's Pokémon (null with the setting off: a neutral avatar), its name, the project's type. With a
+ * personas pack (2026-11-18) the lead is a person: no Pokémon, its title and name ("Pilot Vesna"). `shown`: whether the
+ * head names the lead and its type at all (never with the setting off). `type` is the label's words: the person's own
+ * specialty type when the pack gives one (the owner, 2026-11-18), else the project's. `accent` is the type every colour
+ * follows (the label's, the accents): always the project's, so a project keeps its colour whoever leads it.
+ */
+export function leadHead(p: Project): { mon: string | null; name: string; type: string | null; accent: string | null; persona: AgentPersona | null; shown: boolean } {
   const mon = p.lead?.mon ?? null;
-  return { mon, name: mon ?? (p.lead ? "lead" : "no lead"), type: typeFamily(p.monType)?.label ?? null };
+  const persona = p.lead?.persona ?? null;
+  const name = persona ? `${persona.title} ${persona.name}` : (mon ?? (p.lead ? "lead" : "no lead"));
+  const type = (persona?.type ? typeFamily(persona.type) : null) ?? typeFamily(p.monType);
+  return { mon, name, type: type?.label ?? null, accent: p.monType, persona, shown: !!(mon || persona) };
 }

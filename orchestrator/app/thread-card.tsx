@@ -15,7 +15,8 @@ import { Button } from "./ui/button.tsx";
 import { Input } from "./ui/input.tsx";
 import { Label } from "./ui/label.tsx";
 import { RadioGroup, RadioGroupItem } from "./ui/radio-group.tsx";
-import { MonSprite } from "./mon.tsx";
+import { AgentFace } from "./face.tsx";
+import { personaName } from "./faces.ts";
 import { openInBb, plainClick } from "./open-proof.ts";
 import { pickableTasks, prChips, scopeActions, STATE_CHIP, taskNameFor, TASK_NAME_MAX, threadCards, ticketOf, titleOf, THREADS_SHOWN, type ScopeAction, type ThreadSpec } from "./kit.ts";
 import { Chip, ChipButton, CtxMeter } from "./kit-ui.tsx";
@@ -181,15 +182,17 @@ function ThreadCard({ t, openCard, ctl }: { t: ThreadSpec; openCard: OpenCard; c
   const a = l.agent;
   const lead = a.role === "lead";
   const mon = a.form ?? a.mon;
+  // 2026-11-18: a lead with a persona is its person, by name ("Pilot Vesna"), with its level as before
+  const who1 = a.persona ? personaName(a.persona) : mon;
   const open = () => nav.toThread(a.threadId);
   const title = titleOf(l.activity) ?? (lead ? "Lead" : a.address);
-  const who = [mon, lead ? "lead" : `thread ${a.address.split(":")[2] ?? ""}`, ticketOf(l.activity), l.model, mon ? `Lv ${a.level}` : null].filter(Boolean).join(" · ");
+  const who = [who1, lead ? "lead" : `thread ${a.address.split(":")[2] ?? ""}`, ticketOf(l.activity), l.model, who1 ? `Lv ${a.level}` : null].filter(Boolean).join(" · ");
   const w = l.wait;
   return (
     <li className="k-thread" data-lane={a.address} data-lane-state={l.state} data-lane-wait={w?.on ?? ""} data-rest={rest ? "true" : "false"}>
       <span className="k-face">
         <Button variant="ghost" size="icon-sm" className="size-8" data-open-thread={a.threadId} title={`Open ${a.address}`} onClick={open}>
-          <MonSprite mon={mon} address={a.address} size={28} boost={false} />
+          <AgentFace face={{ mon, dex: a.formDex, persona: a.persona }} address={a.address} size={28} boost={false} />
         </Button>
       </span>
       <div className="k-l1">

@@ -90,7 +90,7 @@ test("on: briefs name the Pokémon and evolutions reach the board, as before the
   const e = setup(true);
   const b = briefs(e);
   assert.match(b.cos!, /Your Pokémon is Rayquaza\. Your working folder/);
-  assert.match(b.steward!, /Your Pokémon is Regigigas\. Your working/);
+  assert.match(b.steward!, /Your Pokémon is Chansey\. Your working/);
   assert.match(b.lead!, /Your Pokémon is Deino\. Your working folder/);
   work(e);
   assert.ok(e.board().some((r) => /Sandile evolved into Krookodile/.test(r.title)));
@@ -111,7 +111,7 @@ test("agents registered and handed off while off show their Pokémon once it is 
 // (read from the pack, which allMonNames() doesn't list once it is unloaded). The pack here is made up.
 const PACK = readPersonaPack(join(import.meta.dirname, "fixtures", "personas-pack.json"));
 const PACK_TERMS = [
-  ...Object.values(PACK.personas).flatMap((p) => [p.name, p.title, p.image, p.credit ?? "", ...(p.team ?? []), ...(p.roster ?? [])]),
+  ...Object.values(PACK.personas).flatMap((p) => [p.name, p.title, p.image, p.credit ?? "", ...(p.team ?? []).map((m) => (typeof m === "string" ? m : m.name)), ...(p.roster ?? [])]),
   ...Object.entries(PACK.lines ?? {}).flatMap(([base, l]) => [base, ...l.evolutions.map((x) => x.name)]),
 ].filter(Boolean);
 const ANY_PACK = new RegExp(`(${PACK_TERMS.map((n) => n.replace(/[.*+?^${}()|[\]\\-]/g, "\\$&")).join("|")})`);
@@ -134,7 +134,8 @@ function shown(e: Engine): string {
   e.register("T-w3", "thread", "code-reviews", "T-la");
   e.gainXp("T-w3", tokensForLevel(40), 1);
   const rows = e.board().map((r) => `${r.title}\n${r.body ?? ""}`);
-  const agents = e.agents().map((a) => JSON.stringify({ ...a, persona: e.personaOf(a), form: e.formOf(a, e.xpOf(a.address).level)?.name ?? null }));
+  // the board's agents and the deliverable cards carry faceOf (its persona and the dex of its Pokémon; 2026-11-18)
+  const agents = e.agents().map((a) => JSON.stringify({ ...a, persona: e.personaOf(a), form: e.formOf(a, e.xpOf(a.address).level)?.name ?? null, face: e.faceOf(a) }));
   return [...briefText, ...rows, ...agents].join("\n");
 }
 
@@ -157,6 +158,7 @@ test("off with a pack loaded: no persona name, title, image or credit and no Pok
   assert.doesNotMatch(text, POKEMON_WORD);
   assert.doesNotMatch(text, /You are \w+ \w+[.;]/, "no persona sentence");
   for (const a of e.agents()) assert.equal(e.personaOf(a), null, a.address);
+  for (const a of e.agents()) assert.deepEqual(e.faceOf(a), { dex: null, persona: null }, a.address);
   assert.equal(e.personaForStart("cos", null), null);
   assert.equal(e.personaForStart("lead", "edge-cli"), null);
 });

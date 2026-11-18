@@ -8,7 +8,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, realpathSync, statSync } from "node:fs";
 import { extname, isAbsolute, sep } from "node:path";
 import { type Db, migrate, tx } from "./db.ts";
-import { MON_POOLS, builtInMon, familyThreads, formAt, levelFor, monByName, pickMon, pickPackThread, pickType, setPackLines, shownStage, typeFamily, type Mon, type MonType, type PackLine } from "../mons.ts";
+import { MON_POOLS, baseOf, builtInMon, familyThreads, formAt, levelFor, monByName, pickMon, pickPackThread, pickType, setPackLines, shownStage, specialtyLines, typeFamily, type Mon, type MonType, type PackLine } from "../mons.ts";
 import { agentPersona, assignPersonas, type AgentPersona, type PersonaPack } from "../personas.ts";
 import { blocksSchema, pointsSchema, type Block, type Point } from "../blocks.ts";
 import { ownerWords, type OwnerWords } from "./owner.ts";
@@ -659,6 +659,8 @@ export class Engine {
   private packLines: Record<string, PackLine> | null = null;
   readonly batch: BatchInbox;
   private inflight = new Set<string>();
+  /** The connection's write count at the last flush's change notice (changedSinceFlush); -1: none yet. */
+  private flushWrites = -1;
 
   private db: Db;
   private ports: Ports;
@@ -698,14 +700,21 @@ export class Engine {
 
   /**
    * Requested 2026-11-16, each project's Pokémon type (mons.ts TYPES), on top of 2026-11-13's rule that no two live
-   * agents share a Pokémon. Oldest first: every live project keeps its type unless an older live project holds it, and
+   * agents share a Pokémon (a line since 2026-11-18: baseOf, so a thread never shows the Steward's Chansey). Oldest first: every live project keeps its type unless an older live project holds it, and
    * one without a type picks one (pickType). Then every live lead and thread keeps its Pokémon when it still fits its
    * project's family and no older live agent holds it; the rest get the next free one (pickMon). A moved agent keeps
    * its stage (a StagePin at its current level); XP stays with its address, so its level is unchanged.
+   * With the pokemon setting on and a pack (2026-11-18, the owner: team lines, then the specialty's, then good fits),
+   * threads settle by their trainers' tiers (threadTiers), tier by tier across every project: in each, a thread already
+   * on one of its lines keeps it, then the rest, oldest first, take its first free line, never another live trainer's
+   * signature nor the CoS's or the Steward's line. A line goes to the thread that ranks it higher, even off another
+   * project's thread that holds it at a lower tier. A thread moved in a tier keeps its level and shows the new line's
+   * form at it (no StagePin). A thread past every tier keeps a free line it has, else takes the last resort (pickThread).
    * Idempotent: a second run moves nothing. Returns how many agents moved.
    */
   settleMons(): number {
     const pack = this.pack;
+    const people = this.leadsArePeople;
     return tx(this.db, () => {
       const projects = this.db.prepare(`SELECT slug, mon_type FROM projects WHERE archived_at IS NULL ORDER BY created_at, slug`).all() as { slug: string; mon_type: string | null }[];
       const types: string[] = [];
@@ -719,18 +728,16 @@ export class Engine {
         .all() as { thread_id: string; address: string; role: Role; project: string | null; mon: string | null; mon_stage: number | null; mon_stage_level: number | null }[];
       // with a pack a lead is a person: its Pokémon is kept, unseen and unmoved, and no longer holds its line (scope §3)
       if (pack) rows.splice(0, rows.length, ...rows.filter((r) => r.role !== "lead"));
-      // first every rightful holder keeps its Pokémon, then only the rest are re-picked, so no one else's changes
+      // first every rightful holder keeps its Pokémon, then only the rest are re-picked, so no one else's changes.
+      // `held` is by line (baseOf): the Steward's Chansey holds Happiny's line (2026-11-18, the owner saw two Chanseys)
       const held: string[] = [];
-      const redo = rows.filter((r) => {
-        if (!this.monFits(r.role, r.mon, r.project, held)) return true;
-        held.push(r.mon!);
-        return false;
-      });
+      // the Pokémon a misfit gets: a thread's by its trainer's lines (pickThread), any other's by its pool (pickMon); it
+      // keeps its stage (a StagePin at its level)
       let moved = 0;
-      for (const r of redo) {
+      const repick = (r: (typeof rows)[number]) => {
         const next = (pack && r.role === "thread" ? this.pickThread(held, r.project, true) : pickMon(r.role, held, this.projectType(r.project))).name;
-        held.push(next);
-        if (next === r.mon) continue;
+        held.push(baseOf(next));
+        if (next === r.mon) return;
         const { level } = this.xpOf(r.address);
         const pin = r.mon_stage != null && r.mon_stage_level != null ? { stage: r.mon_stage, level: r.mon_stage_level } : null;
         // a line no longer known (a pack's, after the pack went before this process started) has no stages to read: its
@@ -739,18 +746,60 @@ export class Engine {
         const stage = known ? shownStage(r.mon, level, pin) : (pin?.stage ?? null);
         this.db.prepare(`UPDATE agents SET mon = ?, mon_stage = ?, mon_stage_level = ? WHERE thread_id = ?`).run(next, stage, known ? level : (pin?.level ?? null), r.thread_id);
         moved++;
+      };
+      // with people, threads settle by their trainers' tiers below; first the CoS and the Steward, whose lines no thread takes
+      const threads = people ? rows.filter((r) => r.role === "thread") : [];
+      const misfits = rows.filter((r) => {
+        if (people && r.role === "thread") return false;
+        if (!this.monFits(r.role, r.mon, r.project, held)) return true;
+        held.push(baseOf(r.mon!));
+        return false;
+      });
+      for (const r of misfits) repick(r);
+      if (people) {
+        // 2026-11-18, the owner: team lines, then the specialty's, then the good fits (threadTiers). Tier by tier across
+        // every project, nothing held until claimed in this run: in each tier the threads already on one of its lines
+        // keep it, then the rest, oldest first, take its first free line. So a line goes to the thread that ranks it
+        // higher, over one holding it at a lower tier, and a second run moves nothing.
+        const assigned = this.personaAssignments();
+        const tiers = new Map<string | null, string[][]>();
+        const tiersOf = (project: string | null) => tiers.get(project) ?? tiers.set(project, this.threadTiers(project, assigned).tiers).get(project)!;
+        const claimed = new Map<string, string>();
+        const free = (n: string) => !held.includes(baseOf(n));
+        const claim = (r: (typeof rows)[number], line: string) => {
+          claimed.set(r.thread_id, line);
+          held.push(baseOf(line));
+        };
+        for (let k = 0; k < 3; k++) { // the roster, the specialty, the fits
+          for (const r of threads) if (!claimed.has(r.thread_id) && r.mon && free(r.mon) && tiersOf(r.project)[k]!.some((n) => baseOf(n) === baseOf(r.mon!))) claim(r, r.mon);
+          for (const r of threads) {
+            if (claimed.has(r.thread_id)) continue;
+            const line = tiersOf(r.project)[k]!.find(free);
+            if (line) claim(r, line);
+          }
+        }
+        for (const [threadId, line] of claimed) {
+          if (rows.find((r) => r.thread_id === threadId)!.mon === line) continue;
+          // a tier move keeps the level and shows the new line's form at it (no StagePin)
+          this.db.prepare(`UPDATE agents SET mon = ?, mon_stage = NULL, mon_stage_level = NULL WHERE thread_id = ?`).run(line, threadId);
+          moved++;
+        }
+        // the last resort (rare): a thread keeps a line no one claimed, else it gets the next free one
+        const rest = threads.filter((r) => !claimed.has(r.thread_id));
+        const keep = rest.filter((r) => this.monFits(r.role, r.mon, r.project, held) && !!held.push(baseOf(r.mon!)));
+        for (const r of rest) if (!keep.includes(r)) repick(r);
       }
       return moved;
     });
   }
 
-  /** Whether an agent's Pokémon may stay, given what older live agents hold (settleMons). */
+  /** Whether an agent's Pokémon may stay, given the lines older live agents hold (settleMons: `held` is by baseOf). */
   private monFits(role: Role, mon: string | null, project: string | null, held: readonly string[]): boolean {
-    if (!mon || held.includes(mon) || !(builtInMon(mon) || this.pack?.lines?.[mon])) return false;
+    if (!mon || held.includes(baseOf(mon)) || !(builtInMon(mon) || this.pack?.lines?.[mon])) return false;
     if (role === "cos" || role === "steward") return MON_POOLS[role].some((x) => x.name === mon);
     const fam = typeFamily(this.projectType(project));
     if (!fam) return false;
-    // with a pack, a thread keeps any Pokémon it can show that no older agent holds: loading a pack moves no thread
+    // with a pack, a thread keeps any Pokémon it can show that no older agent holds; its roster lines are settleMons's
     if (this.pack && role === "thread") return true;
     if (role === "lead") return mon === fam.lead || (held.includes(fam.lead) && MON_POOLS.lead.some((x) => x.name === mon));
     const own = familyThreads(fam);
@@ -794,14 +843,16 @@ export class Engine {
   }
   /**
    * New settings. A changed pack registers its lines and settles the Pokémon once, with the old pack's lines still
-   * readable so a thread that moves off one keeps its stage: loading a pack moves no thread, removing it gives the
-   * leads their Pokémon back and moves the threads on lines only the pack had. A pack that failed its checks changes
+   * readable so a thread that moves off one keeps its stage: loading a pack moves each lead's threads onto its
+   * persona's roster lines (settleMons), removing it gives the leads their Pokémon back and moves the threads on lines
+   * only the pack had. So does turning the pokemon setting on with a pack loaded. A pack that failed its checks changes
    * nothing until it is fixed or unset.
    */
   set settings(next: Settings) {
     const before = this._settings.personas ?? null;
+    const wasPeople = this.leadsArePeople;
     this._settings = next;
-    if ((next.personas ?? null) === before || this.packBroken) return;
+    if (this.packBroken || ((next.personas ?? null) === before && (wasPeople || !this.leadsArePeople))) return;
     const lines = this.pack?.lines ?? null;
     this.usePackLines({ ...(this.packLines ?? {}), ...(lines ?? {}) });
     this.settleLogged();
@@ -859,12 +910,27 @@ export class Engine {
 
   /** A thread's Pokémon while a pack is loaded: its trainer's lines first, never another live trainer's signature line. */
   private pickThread(taken: readonly string[], project: string | null, assign: boolean): Mon {
-    const pack = this.pack!;
     const type = this.typeFor(project, assign);
-    const held = this.personaAssignments();
-    const roster = (project && pack.personas[held.get(project) ?? ""]?.roster) || [];
-    const skip = [...held].filter(([p]) => p !== project).map(([, x]) => pack.personas[x]?.roster?.[0]).filter((n): n is string => !!n && n !== roster[0]);
-    return pickPackThread(taken, type, roster, skip);
+    const { tiers, skip } = this.threadTiers(project);
+    return pickPackThread(taken, type, tiers.flat(), skip);
+  }
+
+  /**
+   * A project's threads' lines while a pack is loaded (pickThread, settleMons), in tiers (2026-11-18, the owner): its lead's
+   * persona's roster (signature first), then the lines of its specialty type (mons.ts specialtyLines; none for a persona
+   * with no type), then its good fits. Each line once, in its first tier, by line. `skip`: every other live trainer's
+   * signature (roster[0]) unless it is this one's too, left out of every tier. The last resort (the project's family,
+   * then any free line) is pickPackThread's.
+   */
+  private threadTiers(project: string | null, assigned: Map<string, string> = this.personaAssignments()): { tiers: string[][]; skip: string[] } {
+    const pack = this.pack;
+    if (!pack) return { tiers: [[], [], []], skip: [] };
+    const persona = project ? pack.personas[assigned.get(project) ?? ""] : undefined;
+    const roster = persona?.roster ?? [];
+    const skip = [...assigned].filter(([p]) => p !== project).map(([, x]) => pack.personas[x]?.roster?.[0]).filter((n): n is string => !!n && n !== roster[0]);
+    const seen = new Set<string>();
+    const tier = (names: readonly string[]) => names.filter((n) => !!monByName(n) && !skip.includes(n) && !seen.has(baseOf(n)) && !!seen.add(baseOf(n)));
+    return { tiers: [tier(roster), tier(specialtyLines(persona?.type)), tier(persona?.fits ?? [])], skip };
   }
 
   /**
@@ -878,6 +944,15 @@ export class Engine {
     const p = id ? pack.personas[id] : undefined;
     if (!p) return null;
     return agentPersona(p, a.role === "lead" ? null : (this.formOf(a, this.xpOf(a.address).level)?.name ?? a.mon));
+  }
+
+  /**
+   * An agent's look for the screens that don't read the agents RPC (the board's agents, the deliverable cards; 2026-11-18):
+   * its persona (personaOf), and its Pokémon's National Dex number, which the browser's mons.ts doesn't know for a pack's
+   * line. Both null with the setting off, as `mon` is.
+   */
+  faceOf(a: Agent, assigned: Map<string, string> | null = null): { dex: number | null; persona: AgentPersona | null } {
+    return { dex: monByName(a.mon)?.dex ?? null, persona: this.personaOf(a, assigned) };
   }
 
   /** The persona registerStarted's agent will have, for its brief (null: none; see personaOf). */
@@ -1034,7 +1109,7 @@ export class Engine {
   }
 
   /**
-   * The Pokémon the next agent of this role gets (mons.ts pickMon): no live agent of any role holds it, and a lead's or
+   * The Pokémon the next agent of this role gets (mons.ts pickMon): no live agent of any role holds its line, and a lead's or
    * thread's fits its project's type. Picked with the setting off too, so switching it on shows one. `assign` false
    * only predicts it (the brief, before the thread exists): the project's type is not stored then.
    */
@@ -1308,7 +1383,7 @@ export class Engine {
         dead: (recipient, _token, note) => this.wakeDead(recipient, note),
         paused: (itemId) => this.importPaused(itemId),
       });
-      this.ports.changed();
+      this.changedSinceFlush();
       return;
     }
     const rows = (this.db.prepare(`SELECT * FROM items WHERE state = 'pending' ORDER BY created_at`).all() as ItemRow[]).map(toItem);
@@ -1339,6 +1414,19 @@ export class Engine {
         this.inflight.delete(it.id);
       }
     }
+    this.changedSinceFlush();
+  }
+
+  /**
+   * The change notice a flush gives, only when the database changed since the last flush's (2026-11-18, speed): flush
+   * runs on every tool call, every turn start and end and every clock pass, and each notice makes every open page
+   * re-read its RPCs. A quiet flush (the clock's, every few seconds) changed nothing, so it says nothing. Any write on
+   * this connection counts, whoever made it: a status flip, a tool's write, the flush's own wake rows.
+   */
+  private changedSinceFlush(): void {
+    const n = (this.db.prepare(`SELECT total_changes() AS n`).get() as { n: number }).n;
+    if (n === this.flushWrites) return;
+    this.flushWrites = n;
     this.ports.changed();
   }
 

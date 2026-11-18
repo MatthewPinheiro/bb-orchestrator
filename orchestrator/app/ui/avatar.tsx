@@ -89,12 +89,65 @@ function AvatarBadge({ className, ...props }: React.ComponentProps<"span">) {
   )
 }
 
+/**
+ * 2026-11-18: sprites (a party of Pokémon) take a 1 px outline in --background around their own shape in place of the
+ * ring (a ring would draw the transparent box), so a sprite over another still reads as two; they overlap a little less.
+ */
 function AvatarGroup({ className, ...props }: React.ComponentProps<"div">) {
   return (
     <div
       data-slot="avatar-group"
       className={cn(
         "group/avatar-group flex -space-x-2 *:data-[slot=avatar]:ring-2 *:data-[slot=avatar]:ring-background",
+        "has-data-[variant=sprite]:-space-x-1.5 *:data-[variant=sprite]:ring-0 *:data-[variant=sprite]:[filter:drop-shadow(1px_0_0_var(--background))_drop-shadow(-1px_0_0_var(--background))_drop-shadow(0_1px_0_var(--background))_drop-shadow(0_-1px_0_var(--background))]",
+        className
+      )}
+      {...props}
+    />
+  )
+}
+
+const PAIR_SIZES = {
+  "16": "h-4 w-5",
+  "20": "h-5 w-[25px]",
+  "24": "h-6 w-[30px]",
+  "28": "h-7 w-[35px]",
+  "32": "h-8 w-10",
+  "40": "h-10 w-[50px]",
+  "48": "h-12 w-15",
+} as const
+
+/**
+ * 2026-11-18: a person with their partner, for the two standing agents (the CoS and the Steward). The person's Avatar
+ * comes first, at the pair's `size`; AvatarPairPartner holds the partner's, at 60% of that, over the person's
+ * bottom-right corner with a 1 px --background outline around its shape. The box is a quarter wider than the person, so
+ * the partner never covers a neighbour. The pair is one image to assistive tech: give it an aria-label ("Warden Tamsin
+ * with Chansey").
+ */
+function AvatarPair({
+  className,
+  size = "32",
+  ...props
+}: React.ComponentProps<"span"> & { size?: keyof typeof PAIR_SIZES }) {
+  return (
+    <span
+      role="img"
+      data-slot="avatar-pair"
+      data-size={size}
+      className={cn("relative inline-flex shrink-0 items-start align-middle", PAIR_SIZES[size], className)}
+      {...props}
+    />
+  )
+}
+
+function AvatarPairPartner({ className, ...props }: React.ComponentProps<"span">) {
+  return (
+    <span
+      data-slot="avatar-pair-partner"
+      aria-hidden="true"
+      className={cn(
+        "absolute right-0 bottom-0 flex aspect-square h-3/5 items-center justify-center *:data-[slot=avatar]:size-full",
+        "[filter:drop-shadow(1px_0_0_var(--background))_drop-shadow(-1px_0_0_var(--background))_drop-shadow(0_1px_0_var(--background))_drop-shadow(0_-1px_0_var(--background))]",
         className
       )}
       {...props}
@@ -125,4 +178,6 @@ export {
   AvatarBadge,
   AvatarGroup,
   AvatarGroupCount,
+  AvatarPair,
+  AvatarPairPartner,
 }

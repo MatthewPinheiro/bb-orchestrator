@@ -8,7 +8,7 @@ import { test } from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { Engine, type DeliverResult } from "../core/engine.ts";
 import { migrate } from "../core/db.ts";
-import { MON_POOLS, TYPES, allMonNames, familyThreads, familyTypes, levelFor, lineTypes, monByName, pickType, shownStage, tokensForLevel, typeFamily } from "../mons.ts";
+import { MON_POOLS, TYPES, allMonNames, baseOf, familyThreads, familyTypes, levelFor, lineTypes, monByName, pickType, shownStage, tokensForLevel, typeFamily } from "../mons.ts";
 import { ACCENT_VAR, accentText, accentTone, accentVars, sectionCss } from "../app/accent.ts";
 import { css, projectTone } from "../app/palette.ts";
 import { sectionTitle } from "../core/model.ts";
@@ -61,14 +61,45 @@ function crowd(threads: number | number[] = BUSY) {
 }
 
 test("no two live agents share a Pokémon, across every role and project, even past what the families hold", () => {
-  const { db } = crowd(7); // 63 threads: every three-stage thread line there is (MON_POOLS.thread) held at once
-  assert.equal(live(db).filter((r) => r.role === "thread").length, MON_POOLS.thread.length);
-  const mons = live(db).map((r) => r.mon);
+  // 62 threads: every three-stage thread line there is (MON_POOLS.thread) held at once, but Happiny's, which the
+  // Steward's Chansey holds (2026-11-18: by line, not name)
+  const { db } = crowd([7, 7, 7, 7, 7, 7, 7, 7, 6]);
+  assert.equal(live(db).filter((r) => r.role === "thread").length, MON_POOLS.thread.length - 1);
+  const mons = live(db).map((r) => baseOf(r.mon));
   assert.equal(new Set(mons).size, mons.length, `shared: ${mons.filter((m, i) => mons.indexOf(m) !== i).join(", ")}`);
   // and after a restart (the settle runs again), still none
   new Engine(db as never, ports, { pokemon: true });
-  const again = live(db).map((r) => r.mon);
+  const again = live(db).map((r) => baseOf(r.mon));
   assert.equal(new Set(again).size, again.length);
+});
+
+test("no thread holds the line of the CoS's or the Steward's Pokémon: a thread on it moves, the Steward stays", () => {
+  // 2026-11-18, the owner on the sidebar: two Chanseys, the Steward's and a Lv 21 thread on Happiny's line. No two live
+  // agents share a line (baseOf), not just a name: Chansey is the middle of Happiny's line, so the Steward holds it all.
+  const standing = new Set([...MON_POOLS.cos, ...MON_POOLS.steward].map((m) => baseOf(m.name)));
+  assert.ok(standing.has("Happiny"), "the Steward's Chansey is on Happiny's line");
+  const db = new DatabaseSync(":memory:");
+  let t = Date.parse("2026-11-16T12:00:00Z");
+  const e = new Engine(db as never, { ...ports, now: () => (t += 1000) }, { pokemon: true });
+  e.register("L-a", "lead", "alpha"); // no type's words: Normal, the first free; its lines are Whismur, Lillipup, Slakoth, Happiny, …
+  e.register("W-0", "thread", "alpha", "L-a");
+  // a thread that took Happiny before the Steward started, as on the owner's install
+  db.prepare(`UPDATE agents SET mon = 'Happiny', mon_stage = NULL, mon_stage_level = NULL WHERE thread_id = 'W-0'`).run();
+  e.gainXp("W-0", tokensForLevel(21), 1);
+  e.register("T-cos", "cos", null);
+  e.register("T-st", "steward", null);
+  for (let n = 1; n <= 30; n++) e.register(`W-${n}`, "thread", "alpha", "L-a");
+  const lineOf = (id: string) => baseOf(e.agentByThread(id)!.mon!);
+  for (let n = 1; n <= 30; n++) assert.ok(!standing.has(lineOf(`W-${n}`)), `W-${n}: a new thread never gets a standing agent's line (got ${lineOf(`W-${n}`)})`);
+  assert.equal(e.agentByThread("W-0")!.mon, "Happiny", "the old thread is still there until a settle");
+  const steward = JSON.stringify(live(db).find((r) => r.role === "steward"));
+  new Engine(db as never, ports, { pokemon: true }); // a restart (the install) settles
+  assert.ok(!standing.has(lineOf("W-0")), `the old thread moved off the Steward's line (to ${lineOf("W-0")})`);
+  assert.equal(e.xpOf(e.agentByThread("W-0")!.address).level, 21, "and kept its level");
+  assert.equal(JSON.stringify(live(db).find((r) => r.role === "steward")), steward, "the Steward never moves");
+  const lines = live(db).map((r) => baseOf(r.mon));
+  assert.equal(new Set(lines).size, lines.length, "no two live agents share a line");
+  assert.equal(e.settleMons(), 0, "a second settle moves nothing");
 });
 
 test("each live project holds its own type, picked from its words, and its lead is that type's line", () => {
@@ -135,7 +166,7 @@ function before() {
   const rows: [string, string, string | null, string, number][] = [
     // thread_id, role, project, old mon, level
     ["T-cos", "cos", null, "Rayquaza", 54],
-    ["T-st", "steward", null, "Regigigas", 7],
+    ["T-st", "steward", null, "Regigigas", 7], // the Steward before 2026-11-18: settling moves it to Chansey
     ["L1", "lead", "agent-evals", "Solosis", 38], // Duosion: Metang at 38 too
     ["L2", "lead", "edge-cli", "Bagon", 16], // Bagon at 16; Shinx would be Luxio by level: the pin keeps it Shinx
     ["L3", "lead", "vm-storage", "Drilbur", 22],
@@ -177,6 +208,11 @@ test("the move to the families keeps every agent's level and evolution stage, an
   assert.equal(e.agentByAddress("lead:edge-cli")!.mon, "Shinx");
   assert.equal(e.formOf(e.agentByAddress("lead:edge-cli")!, 16)!.name, "Shinx", "not Luxio: it was a base form");
   assert.equal(stageOf(db, after.find((r) => r.address === "thread:vm-storage:1")!), 2, "Beautifly stays a final form");
+  // the Steward's Pokémon changed (2026-11-18, the owner): a stored Regigigas is no longer the Steward's, so it moves;
+  // the CoS keeps Rayquaza
+  assert.equal(e.agentByAddress("steward")!.mon, "Chansey");
+  assert.equal(e.formOf(e.agentByAddress("steward")!, 7)!.name, "Chansey");
+  assert.equal(e.agentByAddress("cos")!.mon, "Rayquaza");
   // it really moved them, to their families
   assert.deepEqual(["agent-evals", "edge-cli", "vm-storage", "ship-train", "orchestrator-core"].map((p) => e.agentByAddress(`lead:${p}`)!.mon), ["Beldum", "Shinx", "Gible", "Dratini", "Gastly"]);
   const mons = after.map((r) => r.mon);
