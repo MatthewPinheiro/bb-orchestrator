@@ -1,5 +1,7 @@
-// Phase-1 click-through on the runner's bb: one step per run, so the proof can interleave with real agent turns.
-//   node test/e2e/proof.mjs <step> [args…] --out <dir>
+// Phase-1 click-through: one step per run, so the proof can interleave with real agent turns.
+//   node test/e2e/proof.mjs <step> [args…] --base <harness URL> --out <dir> [--live]
+// --base is required (2026-11-18): there is no default. The live app (127.0.0.1:38886) is refused unless --live is given
+// too, because these steps answer, defer and resend for real (live-guard.ts). Point it at your harness.
 // Steps:
 //   shot <name> [view]                 screenshot a view (needs-you | board | rules)
 //   answer <decisionId> <optionId> <name>   one tap on an option; waits for the card to show answered
@@ -14,16 +16,24 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
-import { chromium } from "playwright-core";
+import { checkBase, isLiveBase } from "./live-guard.ts";
 
-const { values, positionals } = parseArgs({ allowPositionals: true, options: { out: { type: "string" }, base: { type: "string", default: "http://127.0.0.1:38886" } } });
+const { values, positionals } = parseArgs({ allowPositionals: true, options: { out: { type: "string" }, base: { type: "string" }, live: { type: "boolean", default: false } } });
+const base = checkBase(values.base, values.live);
 const out = values.out;
 if (!out) throw new Error("--out DIR");
 mkdirSync(out, { recursive: true });
 const [step, ...args] = positionals;
 const report = { step, args, at: new Date().toISOString(), console: [], notes: [] };
 
-const state = (id) => JSON.parse(execFileSync("bb", ["orchestrator", "decision", id], { encoding: "utf8" })).state;
+// A decision's state from the same bb the page is on: the bb CLI for the runner's own bb, the base's /decision route for
+// any other (a harness on made-up data). Never the CLI for another base, so a harness run can't read the live bb.
+const state = async (id) =>
+  isLiveBase(base)
+    ? JSON.parse(execFileSync("bb", ["orchestrator", "decision", id], { encoding: "utf8" })).state
+    : (await (await fetch(`${base}/decision?id=${encodeURIComponent(id)}`)).json()).state;
+// Playwright loads only after the base passed the guard
+const { chromium } = await import("playwright-core");
 const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
 page.on("console", (m) => { if (m.type() === "error") report.console.push(m.text()); });
@@ -31,7 +41,7 @@ page.on("pageerror", (e) => report.console.push(String(e)));
 const shot = async (name) => { await page.waitForTimeout(300); await page.screenshot({ path: join(out, `${name}.png`), fullPage: true }); report.notes.push(`screenshot ${name}.png`); };
 const go = async (view = "needs-you") => {
   const sub = view === "needs-you" ? "" : `/${view}`;
-  await page.goto(`${values.base}/plugins/orchestrator/home${sub}`, { waitUntil: "load", timeout: 60_000 });
+  await page.goto(`${base}/plugins/orchestrator/home${sub}`, { waitUntil: "load", timeout: 60_000 });
   await page.locator(`[data-view="${view}"]`).waitFor({ timeout: 60_000 });
   await page.waitForTimeout(800);
 };
@@ -48,14 +58,14 @@ try {
       const [id, opt, name] = args;
       await go();
       await armed(id, opt);
-      report.before = state(id);
+      report.before = await state(id);
       await shot(`${name}-before`);
       await card(id).locator(`[data-option="${opt}"]`).click();
       await card(id).and(page.locator('[data-state="answered"]')).waitFor({ timeout: 15_000 }).catch(() => report.notes.push("no answered placeholder seen"));
       await shot(`${name}-tapped`);
       await page.waitForTimeout(1500);
       await shot(`${name}-after`);
-      report.after = state(id);
+      report.after = await state(id);
       break;
     }
     case "doubletap": {
@@ -63,7 +73,7 @@ try {
       await go();
       await armed(id);
       const ids = await page.locator("[data-card]").evaluateAll((els) => els.map((e) => e.getAttribute("data-card")));
-      report.cardsBefore = Object.fromEntries(ids.map((i) => [i, state(i)]));
+      report.cardsBefore = Object.fromEntries(await Promise.all(ids.map(async (i) => [i, await state(i)])));
       await shot(`${name}-before`);
       const box = await card(id).locator('[data-option="1"]').boundingBox();
       const x = box.x + box.width / 2, y = box.y + box.height / 2;
@@ -85,7 +95,7 @@ try {
       await shot(`${name}-during`);
       await page.waitForTimeout(2500);
       await shot(`${name}-after`);
-      report.cardsAfter = Object.fromEntries(ids.map((i) => [i, state(i)]));
+      report.cardsAfter = Object.fromEntries(await Promise.all(ids.map(async (i) => [i, await state(i)])));
       const changed = ids.filter((i) => report.cardsBefore[i] !== report.cardsAfter[i]);
       report.changed = changed;
       if (changed.length !== 1 || changed[0] !== id) throw new Error(`expected only ${id} answered, changed: ${changed.join(", ")}`);
@@ -99,7 +109,7 @@ try {
       await armed(b);
       const boxA = await card(a).locator('[data-option="1"]').boundingBox();
       const x = boxA.x + boxA.width / 2, y = boxA.y + boxA.height / 2;
-      report.before = { [a]: state(a), [b]: state(b) };
+      report.before = { [a]: await state(a), [b]: await state(b) };
       await page.mouse.click(x, y);
       const t0 = Date.now();
       let landed = null;
@@ -115,7 +125,7 @@ try {
       await shot(`${name}-at-second-click`);
       await page.waitForTimeout(2000);
       await shot(`${name}-after`);
-      report.after = { [a]: state(a), [b]: state(b) };
+      report.after = { [a]: await state(a), [b]: await state(b) };
       if (report.after[b] !== "asked") throw new Error(`${b} was answered by the second click`);
       break;
     }
@@ -138,7 +148,7 @@ try {
       await card(id).locator("[data-note-send]").click();
       await page.waitForTimeout(2000);
       await shot(`${name}-after`);
-      report.after = state(id);
+      report.after = await state(id);
       break;
     }
     case "defer": {

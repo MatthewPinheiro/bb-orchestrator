@@ -1,16 +1,17 @@
 // An agent's own question (Claude Code's AskUserQuestion, held by bb as a user_question interaction) drawn as a Needs
-// you card (2026-11-13), in the same affectUI parts as their orchestrator cards (answer-ui.tsx). One question with
+// you card (2026-11-13), in the same parts as their orchestrator cards (answer-ui.tsx; a shadcn Card since 2026-11-17). One question with
 // one pick: an option answers at once. Several questions or multi-select: options toggle and "Send my answers" sends
 // them together. Where the question allows his own text, "Other" is an open box; ⌘/Ctrl+Enter in it sends.
 import { useState } from "react";
 import type { NeedsYou } from "../contract.ts";
 import type { Answers } from "../interactions.ts";
 import { KIND_TONES, css } from "./palette.ts";
-import { Badge } from "./affect/badge-clean.tsx";
-import { OtherBox, Options } from "./answer-ui.tsx";
+import { META, OtherBox, Options, WHEN } from "./answer-ui.tsx";
 import { MonSprite } from "./mon.tsx";
 import { gate } from "./store.ts";
-import { Btn, cx, when } from "./ui.tsx";
+import { Card } from "./ui/card.tsx";
+import { cn } from "./ui/utils.ts";
+import { Btn, Tag, when } from "./ui.tsx";
 
 type Interaction = NeedsYou["interactions"][number];
 
@@ -44,21 +45,19 @@ export function QuestionCard({ ix, isArmed, mon, onSend, onOpen }: { ix: Interac
   const setText = (qid: string, text: string) => setPicks((p) => ({ ...p, [qid]: { selected: p[qid]?.selected ?? [], freeText: text } }));
 
   return (
-    <article data-card={key} data-rev={0} data-question-card={ix.id} data-thread={ix.threadId} data-state={mine ? "answered" : "open"} aria-busy={busy || undefined} className={cx("ui-dic__row", mine && "opacity-80")}>
-      <div className="ui-dic__row-inner">
-        <div className="ui-dic__item" data-open="">
+    <Card role="article" data-card={key} data-rev={0} data-question-card={ix.id} data-thread={ix.threadId} data-state={mine ? "answered" : "open"} aria-busy={busy || undefined} className={cn("gap-0 p-4", mine && "opacity-80")}>
           <header className="flex items-start gap-3">
             <MonSprite mon={mon} address={ix.address} size={28} />
             <div className="min-w-0 flex-1">
-              <h4 className="ui-dic__title">{ix.questions.length === 1 ? (ix.questions[0]!.shortLabel ?? ix.title) : ix.title}</h4>
-              <p className="orch-meta">
+              <h4 className="m-0 text-sm leading-5 font-semibold [overflow-wrap:anywhere]">{ix.questions.length === 1 ? (ix.questions[0]!.shortLabel ?? ix.title) : ix.title}</h4>
+              <p className={META}>
                 <span className="orch-mono">{ix.address}</span>
                 <span aria-hidden>·</span>
                 <span>asked in its chat</span>
-                {ix.questions.length > 1 ? <Badge tone="neutral">{ix.questions.length} questions</Badge> : null}
+                {ix.questions.length > 1 ? <Tag>{`${ix.questions.length} questions`}</Tag> : null}
               </p>
             </div>
-            <span data-mark={mine ? "" : undefined} className={cx("orch-when", mine && "font-medium")} style={{ color: mine ? css(KIND_TONES.done) : undefined }}>
+            <span data-mark={mine ? "" : undefined} className={cn(WHEN, mine && "font-medium")} style={{ color: mine ? css(KIND_TONES.done) : undefined }}>
               {mine ? "Answered ✓" : ix.since ? when(ix.since) : null}
             </span>
           </header>
@@ -71,9 +70,9 @@ export function QuestionCard({ ix, isArmed, mon, onSend, onOpen }: { ix: Interac
           {ix.questions.map((q, n) => {
             const sel = picks[q.id]?.selected ?? [];
             return (
-              <div key={q.id} data-question={q.id} className={n > 0 ? "orch-q mt-4 pt-3" : "mt-2"}>
-                <p className="ui-dic__detail !mt-0 whitespace-pre-wrap">
-                  {ix.questions.length > 1 && q.shortLabel ? <span className="font-medium text-[var(--ui-dic-ink)]">{q.shortLabel}: </span> : null}
+              <div key={q.id} data-question={q.id} className={n > 0 ? "mt-4 border-t pt-3" : "mt-2"}>
+                <p data-question-text="" className="m-0 text-sm whitespace-pre-wrap [overflow-wrap:anywhere]">
+                  {ix.questions.length > 1 && q.shortLabel ? <span className="font-medium">{q.shortLabel}: </span> : null}
                   {q.prompt}
                   {q.multiSelect ? <span className="text-xs"> · pick any</span> : null}
                 </p>
@@ -116,8 +115,6 @@ export function QuestionCard({ ix, isArmed, mon, onSend, onOpen }: { ix: Interac
               </Btn>
             ) : null}
           </footer>
-        </div>
-      </div>
-    </article>
+    </Card>
   );
 }

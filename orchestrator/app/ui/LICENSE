@@ -1,0 +1,27 @@
+The components in this folder are shadcn/ui (https://ui.shadcn.com), copied in as shadcn intends, from
+https://github.com/shadcn-ui/ui apps/v4/registry/new-york-v4/ui at c257f688cf4de7ec10cc1be84cad29cd4631182c
+(2026-09-04). Changes, each marked in the source with a 2026-11-17 comment: imports point at this folder, Radix
+portals carry bb's plugin marks (utils.ts PORTAL), menus have no entry or exit animation, the joined toggle group and
+the scroll bar use no left border, error words (the destructive Alert and menu item) are bb's --destructive-text, `dark:` is written `[&:is(.dark_*)]:` (bb's .dark class), and Avatar has 16 to 48 px sizes and a sprite variant for pixel art.
+
+MIT License
+
+Copyright (c) 2023 shadcn
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

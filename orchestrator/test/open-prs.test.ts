@@ -50,6 +50,9 @@ const pr = (p: Partial<RawPr> = {}): RawPr => ({
   checks: "SUCCESS",
   approvedBy: [],
   required: 2,
+  author: "dev-one",
+  reviews: [],
+  requested: [],
   ...p,
 });
 
@@ -258,7 +261,9 @@ test("the preview component takes only the copied string, so it cannot show anyt
   assert.match(src, /function SlackMessage\(\{ text, name, \.\.\.p \}: \{ text: string; name: string;/);
   assert.match(src, /slackLines\(text\)\.map/, "it draws through core's formatter");
   assert.match(src, /const html = slackHtml\(slackLines\(text\)\)/, "the clipboard's HTML comes from the same tokens");
-  for (const at of ["data-ask-text", "data-post-text"]) assert.match(src, new RegExp(`<SlackMessage text=\\{text\\}[^>]*${at}`), `${at} is the copied string drawn`);
+  // 2026-11-18: the review ask and Post are one preview now, in Post's dialog: what it draws is what Copy and Post take
+  assert.match(src, /<SlackMessage text=\{text\}[^>]*data-post-text/, "the preview is the copied string drawn");
+  assert.doesNotMatch(src, /data-ask-text/, "no second ask on the page that could drift from Post's text");
 });
 
 test("every row carries a visible repo#n PR link that opens through bb, never a bare #number", () => {
@@ -266,8 +271,17 @@ test("every row carries a visible repo#n PR link that opens through bb, never a 
   assert.equal(prRef({ repo: "acme-co/widgets", number: 8540 }), "widgets#8540");
   assert.doesNotMatch(prRef({ repo: "acme-co/widgets", number: 1 }), BARE_REF);
   const src = readFileSync(new URL("../app/open-prs.tsx", import.meta.url), "utf8");
-  const row = src.slice(src.indexOf("function Row("), src.indexOf("\n}\n", src.indexOf("function Row(")));
-  assert.match(row, /<ProofLink open=\{\{ url: pr\.url \}\} className="orch-prs__link" data-pr-link=\{pr\.url\}[^>]*>\s*\{prRef\(pr\)\}\s*<\/ProofLink>/, "Row renders the link unconditionally");
+  // 2026-11-17: each PR is a folding card now (PrCard); its link sits in the header, so it shows while the card is folded
+  const row = src.slice(src.indexOf("function PrCard("), src.indexOf("<CollapsibleContent", src.indexOf("function PrCard(")));
+  assert.ok(row.length > 200, "the card's header is found");
+  // 2026-11-17: the link's classes are Tailwind's now (shadcn pass), so the check reads the link, not its class name
+  assert.match(row, /<ProofLink open=\{\{ url: pr\.url \}\}[^>]*data-pr-link=\{pr\.url\}[^>]*>\s*\{prRef\(pr\)\}\s*<\/ProofLink>/, "the folded header renders the link unconditionally");
+  assert.doesNotMatch(row, /\?\s*<ProofLink[^>]*data-pr-link/, "and not behind a condition");
+  // 2026-11-18: a wide pane draws table rows (PrRow); the link is in the row itself, not behind its expand
+  const wide = src.slice(src.indexOf("function PrRow("), src.indexOf("{open ? (", src.indexOf("function PrRow(")));
+  assert.ok(wide.length > 200, "the row is found");
+  assert.match(wide, /<ProofLink open=\{\{ url: pr\.url \}\}[^>]*data-pr-link=\{pr\.url\}[^>]*>\s*\{prRef\(pr\)\}\s*<\/ProofLink>/, "the folded row renders the link unconditionally");
+  assert.doesNotMatch(wide, /\?\s*<ProofLink[^>]*data-pr-link/, "and not behind a condition");
 });
 
 test("chip colours follow the state: green good, amber act, red broken, grey running, neutral waiting, muted draft", () => {
@@ -309,4 +323,91 @@ test("the wide table's sort: ascending puts what needs a hand first, and ties ke
   assert.deepEqual(sortPrs(prs, "review", false).map((p) => p.url).at(-1), "d"); // approved last
   assert.deepEqual(sortPrs(prs, "updated", true).map((p) => p.url), ["d", "b", "c", "a"]);
   assert.equal(sortPrs(prs, "project", false).at(-1)!.url, "c"); // no project sorts last
+});
+
+// ---------------------------------------------------------------- fast first paint: the kept snapshot (2026-11-17)
+
+test("a kept snapshot is used only for the same login and version, and a malformed one is no snapshot", async () => {
+  // A wrong snapshot shown at once is worse than a skeleton: another login's PRs, or a shape the page can't draw.
+  const { parseKept, KEPT_VERSION } = await import("../core/open-prs.ts");
+  const kp = { url: "https://github.com/acme-co/widgets/pull/1", number: 1, title: "t", repo: "acme-co/widgets", updatedAt: "2026-11-17T10:00:00Z", draft: false, reviewDecision: null, mergeable: null, mergeState: null, checks: null, approvedBy: [], required: null, summary: "s", agent: null, cands: [] };
+  const good = { v: KEPT_VERSION, login: "dev-one", at: 1000, more: false, prs: [kp] };
+  assert.equal(parseKept(good, "dev-one")?.prs.length, 1);
+  assert.equal(parseKept(good, "dev-two"), null, "another login's PRs are never shown");
+  assert.equal(parseKept({ ...good, v: 0 }, "dev-one"), null, "an older shape is dropped, not misread");
+  assert.equal(parseKept({ ...good, prs: [{ ...kp, url: "javascript:alert(1)" }] }, "dev-one"), null, "a link that isn't a PR URL is never served");
+  assert.equal(parseKept(undefined, "dev-one"), null);
+  assert.equal(parseKept("junk", "dev-one"), null);
+});
+
+test("kept reviewers get their @handle from the current map, so a map edited after the read still applies", async () => {
+  const { keptCands, sayCands } = await import("../core/open-prs.ts");
+  const kept = keptCands([{ name: "rev-a", say: "rev-a", owner: true, recent: 1 }]);
+  assert.equal("say" in kept[0]!, false, "the handle isn't kept");
+  assert.equal(sayCands(kept, { "rev-a": "alpha" })[0]!.say, "@alpha");
+  assert.equal(sayCands(kept, {})[0]!.say, "rev-a", "unmapped: the plain name");
+});
+
+/** registerOpenPrs on a fake bb: kv in memory, one connected machine whose gh read waits until `release` is called. */
+async function openPrsServer(kv: Map<string, unknown>, opts: { login?: string } = {}) {
+  const { registerOpenPrs } = await import("../open-prs/server.ts");
+  const handlers: Record<string, (i: unknown) => Promise<any>> = {};
+  const routes: Record<string, (c: any) => Promise<Response>> = {};
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  const calls: string[] = [];
+  const raw = { url: "https://github.com/acme-co/widgets/pull/2", number: 2, title: "Fresh one", body: "", repo: "acme-co/widgets", draft: false, updatedAt: "2026-11-17T11:00:00Z", branch: "b", sha: "s2", reviewDecision: "REVIEW_REQUIRED", mergeable: "MERGEABLE", mergeState: "BLOCKED", checks: "SUCCESS", approvedBy: [], required: 2 };
+  const bb: any = {
+    hosts: { experimental_client: () => ({ call: async (m: string) => (calls.push(m), m === "prs.open" ? (await gate, { prs: [raw], more: false }) : m === "prs.files" ? { sha: "s2", files: [] } : { codeowners: null, recent: [] }) }) },
+    sdk: { hosts: { list: async () => [{ id: "h1", type: "persistent", lifecycle: { phase: "active" }, status: "connected" }] }, threads: { get: async () => null } },
+    storage: { kv: { get: async (k: string) => kv.get(k), set: async (k: string, v: unknown) => void kv.set(k, JSON.parse(JSON.stringify(v))) } },
+    rpc: { register: (_c: unknown, h: any) => Object.assign(handlers, h) },
+    http: { route: (_m: string, path: string, h: any) => (routes[path] = h) },
+    realtime: { publish: () => {} },
+    log: { warn: () => {}, info: () => {} },
+  };
+  const engine: any = { agents: () => [], prByUrl: () => null, agentByThreadEver: () => null };
+  const settings = { githubLogin: opts.login ?? "dev-one", reviewChannel: "", reviewExcludedProjects: "", slackHandleMap: "", prPollMinutes: 5 };
+  const api = registerOpenPrs(bb, engine, () => settings);
+  return { read: () => handlers.openPrs!(null), release, calls, settings, api, routes };
+}
+
+test("after a restart the read answers at once from the kept snapshot, marked with its time, while GitHub is read", async () => {
+  // The owner waited 18-21 s on an empty tab after each install: the page must never wait on gh when a snapshot exists.
+  const { KEPT_VERSION } = await import("../core/open-prs.ts");
+  const kept = { v: KEPT_VERSION, login: "dev-one", at: 1_000, more: false, prs: [{ url: "https://github.com/acme-co/widgets/pull/1", number: 1, title: "Kept one", repo: "acme-co/widgets", updatedAt: "2026-11-17T10:00:00Z", draft: false, reviewDecision: "REVIEW_REQUIRED", mergeable: "MERGEABLE", mergeState: "BLOCKED", checks: "SUCCESS", approvedBy: [], required: 2, summary: "s", agent: null, cands: [{ name: "rev-a", owner: true, recent: 0 }] }] };
+  const kv = new Map<string, unknown>([["openPrs.snapshot.v1", kept]]);
+  const s = await openPrsServer(kv);
+  s.settings.slackHandleMap = '{"rev-a":"alpha"}';
+  const v = await s.read(); // gh's read is held open: this must still answer
+  assert.equal(v.state, "ok");
+  assert.equal(v.fetchedAt, 1_000, "marked with when it was checked");
+  assert.equal(v.checking, true, "and says a check runs");
+  assert.deepEqual(v.prs.map((p: any) => p.title), ["Kept one"]);
+  assert.equal(v.prs[0].candidates[0].say, "@alpha", "kept reviewers tagged from the current map");
+  await new Promise((r) => setTimeout(r, 10));
+  assert.deepEqual(s.calls, ["prs.open"], "the GitHub read started in the background");
+  s.release();
+  await new Promise((r) => setTimeout(r, 20));
+  const after = await s.read();
+  assert.deepEqual(after.prs.map((p: any) => p.title), ["Fresh one"], "the new read replaces it when it lands");
+  assert.equal(after.checking, false);
+  assert.ok(after.fetchedAt > 1_000);
+  assert.deepEqual((kv.get("openPrs.snapshot.v1") as any).prs.map((p: any) => p.title), ["Fresh one"], "and is kept for the next restart");
+  assert.equal("body" in (kv.get("openPrs.snapshot.v1") as any).prs[0], false, "PR bodies are not kept");
+});
+
+test("with no snapshot ever, the read says loading (the page's skeleton) and doesn't wait on GitHub either", async () => {
+  const s = await openPrsServer(new Map());
+  const v = await s.read();
+  assert.equal(v.state, "loading");
+  assert.equal(v.checking, true);
+  s.release();
+});
+
+test("another login's kept snapshot is never served", async () => {
+  const { KEPT_VERSION } = await import("../core/open-prs.ts");
+  const s = await openPrsServer(new Map([["openPrs.snapshot.v1", { v: KEPT_VERSION, login: "dev-one", at: 1, more: false, prs: [] }]]), { login: "dev-two" });
+  assert.equal((await s.read()).state, "loading");
+  s.release();
 });

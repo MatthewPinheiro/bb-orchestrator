@@ -1,19 +1,27 @@
 // Generative UI: draws an agent's typed blocks (blocks.ts) as components, on Needs you cards (and deliverables).
 // Requested 2026-11-13: "different cards for like login codes and flows and also better generative ui components".
+// On shadcn/ui since 2026-11-17: the sign-in is a muted Card, its code field an Input, a list's ticks Checkboxes, and
+// every colour one of bb's tokens.
 import { useEffect, useState } from "react";
 import { UrlLink, experimental_SourceCode as SourceCode } from "@get-bb/plugin-sdk/app";
 import type { Block } from "../blocks.ts";
 import type { Card } from "../contract.ts";
 import { PrChip } from "./agent-bits.tsx";
 import { Changes, Checks, Decisions, Diagram, Facts, Rca, Verdicts } from "./visual-blocks.tsx";
-import { Btn, Tag, cx } from "./ui.tsx";
+import { buttonVariants } from "./ui/button.tsx";
+import { Card as Frame } from "./ui/card.tsx";
+import { Checkbox } from "./ui/checkbox.tsx";
+import { Input } from "./ui/input.tsx";
+import { cn } from "./ui/utils.ts";
+import { Btn, Tag } from "./ui.tsx";
 
 type Pr = Card["prs"][number];
 
 /** The selectable lists' unticked items, by block index: the card names them in the answer. */
 export type Unticked = ReadonlyMap<number, ReadonlySet<number>>;
 
-const TONE: Record<"good" | "warn" | "bad", string> = { good: "var(--success, #2f9e44)", warn: "var(--warning-text, #b7791f)", bad: "var(--destructive-text, #e03131)" };
+/** A block's small heading: plain words, muted (no uppercase labels). */
+const LABEL = "text-xs font-medium text-muted-foreground";
 
 /** Seconds left until `at`, ticking each second; null without a time. */
 function useLeft(at: string | undefined): number | null {
@@ -51,30 +59,30 @@ function Login({ b, onPaste, busy }: { b: Extract<Block, { kind: "login" }>; onP
   const [value, setValue] = useState("");
   const clock = left === null ? null : expired ? "Expired" : `${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")} left`;
   return (
-    <div data-block="login" data-expired={expired || undefined} className={cx("orch-wash grid gap-3 rounded-lg p-3", expired && "opacity-70")}>
+    <Frame data-block="login" data-expired={expired || undefined} className={cn("gap-3 bg-muted/50 p-3 shadow-none", expired && "opacity-70")}>
       <div className="flex flex-wrap items-center gap-2">
         <span className="font-semibold">Sign in · {b.service}</span>
         {b.account ? <Tag>{b.account}</Tag> : null}
         {clock ? (
-          <span data-clock="" className="ml-auto text-xs font-semibold tabular-nums" style={{ color: expired ? TONE.bad : left !== null && left < 120 ? TONE.warn : undefined }}>
+          <span data-clock="" className={cn("ml-auto text-xs font-semibold tabular-nums", expired ? "text-(--destructive-text)" : left !== null && left < 120 && "text-(--warning-text)")}>
             {clock}
           </span>
         ) : null}
       </div>
       {b.code ? (
         <div className="flex flex-wrap items-center gap-3">
-          <code data-code="" className="orch-mono rounded-md px-3 py-1.5 text-xl font-bold tracking-[.18em]" style={{ background: "var(--background, transparent)" }}>
+          <code data-code="" className="orch-mono rounded-md border bg-background px-3 py-1.5 text-xl font-bold tracking-[.18em]">
             {b.code}
           </code>
           <Copy text={b.code} label="Copy code" />
         </div>
       ) : null}
       <div className="flex flex-wrap items-center gap-2">
-        <UrlLink href={b.url} data-login-open="" className="inline-flex items-center rounded-md bg-[var(--primary,#3b82f6)] px-3 py-1.5 text-sm font-medium text-[var(--primary-foreground,#fff)] no-underline hover:opacity-90">
+        <UrlLink href={b.url} data-login-open="" className={cn(buttonVariants({ size: "sm" }), "no-underline")}>
           Open sign-in page ↗
         </UrlLink>
         <Copy text={b.url} label="Copy link" />
-        <span className="orch-muted min-w-0 truncate text-xs" title={b.url}>
+        <span className="min-w-0 truncate text-xs text-muted-foreground" title={b.url}>
           {(() => {
             try {
               return new URL(b.url).host;
@@ -94,7 +102,7 @@ function Login({ b, onPaste, busy }: { b: Extract<Block, { kind: "login" }>; onP
             setValue("");
           }}
         >
-          <input
+          <Input
             data-paste=""
             type="password"
             autoComplete="off"
@@ -103,31 +111,31 @@ function Login({ b, onPaste, busy }: { b: Extract<Block, { kind: "login" }>; onP
             maxLength={4000}
             onChange={(e) => setValue(e.target.value)}
             placeholder="Paste the code the page gives you"
-            className="min-w-0 flex-1 rounded-md border border-[var(--border,#8884)] bg-transparent px-3 py-1.5 text-sm"
+            className="h-8 w-auto min-w-0 flex-1 bg-background"
           />
           <Btn type="submit" data-paste-send="" disabled={busy || !value.trim()}>
             Send code
           </Btn>
-          <span className="orch-muted w-full text-xs">Sent straight to the agent as a file it reads once; not saved with the card.</span>
+          <span className="w-full text-xs text-muted-foreground">Sent straight to the agent as a file it reads once; not saved with the card.</span>
         </form>
       ) : null}
-    </div>
+    </Frame>
   );
 }
 
 function Steps({ b }: { b: Extract<Block, { kind: "steps" }> }) {
   return (
     <div data-block="steps" className="grid gap-1.5">
-      {b.title ? <div className="text-xs font-semibold uppercase tracking-wide opacity-70">{b.title}</div> : null}
+      {b.title ? <div className={LABEL}>{b.title}</div> : null}
       <ol className="m-0 grid list-none gap-1.5 p-0">
         {b.items.map((s, i) => (
           <li key={i} className="flex items-start gap-2.5">
-            <span className="mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[11px] font-bold" style={{ background: "var(--orch-wash, #8882)" }}>
+            <span className="mt-0.5 inline-flex size-5 shrink-0 items-center justify-center rounded-full bg-muted text-xs font-medium tabular-nums">
               {i + 1}
             </span>
             <span className="min-w-0 [overflow-wrap:anywhere]">
               {s.text}
-              {s.expect ? <span className="orch-muted block text-xs">You should see: {s.expect}</span> : null}
+              {s.expect ? <span className="block text-xs text-muted-foreground">You should see: {s.expect}</span> : null}
             </span>
           </li>
         ))}
@@ -147,7 +155,7 @@ function PrBlock({ b, pr }: { b: Extract<Block, { kind: "pr" }>; pr: Pr | null }
           <Tag>PR {n ? `#${n}` : "link"}</Tag>
         </UrlLink>
       )}
-      {b.note ? <span className="orch-muted text-xs">{b.note}</span> : null}
+      {b.note ? <span className="text-xs text-muted-foreground">{b.note}</span> : null}
     </div>
   );
 }
@@ -157,15 +165,16 @@ function List({ b, off, toggle }: { b: Extract<Block, { kind: "list" }>; off: Re
   return (
     <div data-block="list" className="grid gap-1">
       <div className="flex items-center gap-2 text-xs">
-        {b.title ? <span className="font-semibold uppercase tracking-wide opacity-70">{b.title}</span> : null}
-        <span className="orch-muted ml-auto">{b.selectable ? `${n} of ${b.items.length} selected` : `${b.items.length} items`}</span>
+        {b.title ? <span className={LABEL}>{b.title}</span> : null}
+        <span className="ml-auto text-muted-foreground">{b.selectable ? `${n} of ${b.items.length} selected` : `${b.items.length} items`}</span>
       </div>
-      <ul className="orch-wash m-0 grid max-h-64 list-none gap-0 overflow-y-auto rounded-lg p-1">
+      <ul className="m-0 grid max-h-64 list-none gap-0 divide-y overflow-y-auto rounded-lg border p-0">
         {b.items.map((it, i) => (
-          <li key={i} className={cx("flex items-center gap-2 rounded px-2 py-1 text-sm", off.has(i) && "opacity-50 line-through")}>
-            {b.selectable && toggle ? <input type="checkbox" data-list-item={i} checked={!off.has(i)} onChange={() => toggle(i)} aria-label={it.label} /> : null}
+          <li key={i} className={cn("flex min-h-9 items-center gap-2 px-3 py-1.5 text-sm", off.has(i) && "text-muted-foreground line-through")}>
+            {/* the 16 px box gets a 24 px hit area (2026-11-17: every target at least 24 px) */}
+            {b.selectable && toggle ? <Checkbox data-list-item={i} checked={!off.has(i)} onCheckedChange={() => toggle(i)} aria-label={it.label} className="relative after:absolute after:-inset-1 after:content-['']" /> : null}
             <span className="min-w-0 flex-1 [overflow-wrap:anywhere]">{it.url ? <UrlLink href={it.url}>{it.label}</UrlLink> : it.label}</span>
-            {it.meta ? <span className="orch-muted shrink-0 text-xs tabular-nums">{it.meta}</span> : null}
+            {it.meta ? <span className="shrink-0 text-xs text-muted-foreground tabular-nums">{it.meta}</span> : null}
           </li>
         ))}
       </ul>
@@ -177,12 +186,12 @@ function Command({ b }: { b: Extract<Block, { kind: "command" }> }) {
   return (
     <div data-block="command" className="grid min-w-0 gap-1">
       <div className="flex items-center gap-2 text-xs">
-        <span className="font-semibold uppercase tracking-wide opacity-70">Command</span>
+        <span className={LABEL}>Command</span>
         {b.where ? <Tag>{b.where}</Tag> : null}
         <span className="ml-auto" />
         <Copy text={b.text} />
       </div>
-      <div className="min-w-0 max-w-full overflow-hidden rounded-lg">
+      <div className="min-w-0 max-w-full overflow-hidden rounded-lg border">
         <SourceCode content={b.text} path={`command.${b.language ?? "sh"}`} overflow="wrap" />
       </div>
     </div>

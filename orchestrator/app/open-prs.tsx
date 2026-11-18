@@ -1,89 +1,90 @@
 // The Open PRs tab (2026-11-16): every open PR the owner authored, with its project and lead, state and a plain summary;
 // a Needs review filter; the running review ask (one block of text, one click copies it); and Post, which shows the
-// exact text with a tick per PR, then copies it and opens the code-review channel. It never sends anything itself.
+// exact text with a tick per PR, then copies it and opens the code-review channel (with a Slack token: posts it, below).
 // The text in all three places is core/open-prs.ts buildPrompt's, so what you see is what is copied.
 // Rev 2 (2026-11-16): a repo#n link on every row, coloured state chips (prChips, PR_CHIP_TONES), the summary as a
 // bullet, and the review ask drawn as the Slack message it becomes: SlackMessage takes only the copied string and
 // draws it through core's slackLines, the same tokens the clipboard's HTML flavour is written from.
-//
-// Readability (PLAN.md "Readability changes"): sizes 16/14/12, weights 400/600, colour only for meaning (CI failing
-// red, approved green), no boxes or uppercase labels, one column on a phone.
-import { styleHref } from "./style-href.ts";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { experimental_useRpcQuery, useBbNavigate, useRealtime } from "@get-bb/plugin-sdk/app";
+// shadcn (2026-11-17): app/ui's parts on bb's tokens and type scale (text-xs/sm/base = 12/13/15, 400 body, 500 controls
+// and badges, 600 titles): the filters a ToggleGroup, the chips Badges in
+// PR_CHIP_TONES, the ticks Checkboxes, and the Slack preview a Card with an Avatar. Colour only for meaning (CI failing
+// red, approved green), no uppercase labels, one column on a phone.
+// Cards (2026-11-17, the owner: "each pr in a collapsible card that we can expand to make it look cleaner"): one Card
+// per PR that folds (Collapsible), the same cards at every width, and the table's sorts in a Select.
+// Fast first paint (2026-11-17): after a restart the server answers with the kept snapshot at once; the line says how old
+// it is and that a check runs. A skeleton shows only when there has never been a read. Ages tick on one shared minute
+// clock (useMinute), so neither the clock nor a refetch that changes nothing redraws the cards (PrCard is memoised).
+// Post really posts (2026-11-17, the owner: "Post as me"): with the slackToken setting, Post sends from the server after a
+// preview and a confirm that shows the message exactly as it will appear; without it, Post copies and opens, as before.
+// Review states and "since your last copy" (2026-11-18, folded in from a contributor's public PR #4): First review,
+// Re-review and Approved on head filters beside Needs review, each card's state chip, and the ask and Post following the
+// selected filter (Re-review asks the earlier reviewers). A copy or a post that succeeds keeps what it held as that
+// filter's baseline; the next ask lists what changed since, above the copied text unless unticked. The Post confirm
+// names who gets pinged.
+// Layout (2026-11-18, the owner: "it's still really jank and wonky … it still shows way too much text and when you click
+// 'post a code review,' the checkboxes come up … it's just too much to scroll"): the page measures its own width. Wide
+// (a full or a stacked pane): one table row per PR, the title on one line, then PR, state, CI, reviewers and age in
+// columns. Narrow (a side-by-side pane, a phone): a card with the title on up to two lines and the same few facts under
+// it. The summary and the rest open behind the row's or the card's expand. The review ask, its ticks, "since your last
+// copy", the pings and Copy and Post moved into one Dialog, so opening Post never moves the list.
+import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type MouseEvent } from "react";
+import { ChevronRight } from "lucide-react";
+import { experimental_useRpcQuery, useBbNavigate, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
 import { CHANGED_CHANNEL } from "../contract.ts";
-import { OPEN_PRS_CHANNEL, openPrsContract, type OpenPr, type OpenPrsView } from "../open-prs/contract.ts";
-import { buildPrompt, initialTicks, prChips, prRef, slackHtml, slackLines, sortPrs, type PrSort } from "../core/open-prs.ts";
-import { PR_CHIP_TONES, SLACK_TONES, TINT } from "./palette.ts";
-import { EmptyState } from "./affect/empty-state-clean.tsx";
+import { OPEN_PRS_CHANNEL, OPEN_PRS_COPIED, OPEN_PRS_POST, openPrsContract, type OpenPr, type OpenPrsPosted, type OpenPrsPrepared, type OpenPrsView } from "../open-prs/contract.ts";
+import { buildPrompt, initialTicks, mentionHandles, prChips, prRef, slackHtml, slackLines, sortPrs, type Chip, type PrSort, type PromptPr } from "../core/open-prs.ts";
+import { changesForSent, changesSince, withChanges, type CopiedPr, type CopyChange, type Section } from "../core/open-prs-copies.ts";
+import { PR_CHIP_TONES, SLACK_TONES, css, tint } from "./palette.ts";
 import { openInBb } from "./open-proof.ts";
 import { useIdentity } from "./identity.ts";
+import { ARM_MS } from "./gate.ts";
+import { gate, useGate, write } from "./store.ts";
 import { ProofLink } from "./proof-link.tsx";
-import { Btn, Muted, ReadState, when } from "./ui.tsx";
-import { useElementWidth } from "./panes.tsx";
-import { isWide } from "./source.ts";
+import { Btn, EmptyState, Muted, ReadState, when } from "./ui.tsx";
 import { age } from "./lanes.ts";
+import { Avatar, AvatarFallback } from "./ui/avatar.tsx";
+import { Badge } from "./ui/badge.tsx";
+import { AlertDialog, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "./ui/alert-dialog.tsx";
+import { Button } from "./ui/button.tsx";
+import { Card } from "./ui/card.tsx";
+import { Skeleton } from "./ui/skeleton.tsx";
+import { Checkbox } from "./ui/checkbox.tsx";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "./ui/collapsible.tsx";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "./ui/dialog.tsx";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./ui/table.tsx";
+import { useWidth } from "./panes.tsx";
+import { Label } from "./ui/label.tsx";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select.tsx";
+import { ToggleGroup, ToggleGroupItem } from "./ui/toggle-group.tsx";
 
-type Filter = "needs" | "all";
+type Filter = "needs" | "first" | "rereview" | "approved" | "all";
+/** The filters, what each one means, and what it says when empty. Needs review, First review and Re-review have an ask. */
+const FILTERS: { value: Filter; label: string; means: string; none: string }[] = [
+  { value: "needs", label: "Needs review", means: "Needs review: ready, not fully approved, CI not failing.", none: "Nothing needs review." },
+  { value: "first", label: "First review", means: "First review: no person has reviewed it yet.", none: "No PR waits for a first review." },
+  { value: "rereview", label: "Re-review", means: "Re-review: someone's latest review is on an older commit.", none: "No PR needs a re-review." },
+  { value: "approved", label: "Approved on head", means: "Approved on head: a person approved its current commit.", none: "No PR is approved on its current commit." },
+  { value: "all", label: "All", means: "All your open PRs.", none: "No open PRs." },
+];
+const inFilter = (p: OpenPr, f: Filter) => (f === "all" ? true : f === "needs" ? p.needsReview : p.state === f);
+const sectionOf = (f: Filter): Section | null => (f === "needs" || f === "first" || f === "rereview" ? f : null);
+/** A PR as a baseline keeps it. */
+const copiedRow = (p: OpenPr): CopiedPr => ({ url: p.url, repo: p.repo, number: p.number, title: p.title, sha: p.sha, state: p.state, review: p.review, ci: p.ci });
+/** The ask's PRs: First review and Re-review ask the state's people (requested, or the earlier reviewers) when it has them. */
+const askPrs = (prs: OpenPr[], section: Section): PromptPr[] => prs.map((p) => (section !== "needs" && p.stateWho.length ? { ...p, candidates: p.stateWho } : p));
+/** The review ask for a section, with the change header when ticked and there is a baseline. */
+const askText = (prs: OpenPr[], section: Section, changes: CopyChange[] | null) => withChanges(buildPrompt(askPrs(prs, section), 5, section === "rereview"), changes);
+/** After a successful copy or post: the section's baseline becomes these PRs. False when it couldn't be kept. */
+async function keepCopy(section: Section, prs: OpenPr[]): Promise<boolean> {
+  const out = await write(OPEN_PRS_COPIED, { section, prs: prs.map(copiedRow) }, { kind: "other", where: "open-prs", after: () => {} });
+  return !!out?.ok;
+}
+const STATE_WHO: Record<string, string> = { first: "Ask", rereview: "Reviewed before", approved: "Approved by" };
 
-const CSS = `
-[data-orch] .orch-prs { display: grid; gap: 24px; }
-[data-orch] .orch-prs h3 { margin: 0; font-size: 16px; line-height: 24px; font-weight: 600; }
-[data-orch] .orch-prs__bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; }
-[data-orch] .orch-prs__filters { display: flex; flex-wrap: wrap; gap: 4px; }
-[data-orch] .orch-prs__filters button { border: 0; border-radius: 6px; padding: 6px 10px; min-height: 32px; background: none; font: inherit; font-size: 14px; color: var(--orch-muted); cursor: pointer; }
-[data-orch] .orch-prs__filters button:hover { color: var(--orch-ink); }
-[data-orch] .orch-prs__filters button[aria-pressed="true"] { background: light-dark(rgba(0, 0, 0, 0.07), rgba(255, 255, 255, 0.1)); color: var(--orch-ink); font-weight: 600; }
-[data-orch] .orch-prs__note { margin: 0; font-size: 12px; line-height: 16px; color: var(--orch-muted); }
-[data-orch] .orch-prs__list { display: grid; gap: 16px; margin: 0; padding: 0; list-style: none; min-width: 0; }
-[data-orch] .orch-prs__row { display: grid; gap: 4px; min-width: 0; }
-[data-orch] .orch-prs__title { font-size: 14px; line-height: 20px; font-weight: 600; color: var(--orch-ink); text-decoration: none; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
-[data-orch] .orch-prs__title:hover { text-decoration: underline; text-underline-offset: 2px; }
-[data-orch] .orch-prs__meta { display: flex; flex-wrap: wrap; gap: 2px 12px; font-size: 12px; line-height: 16px; color: var(--orch-muted); min-width: 0; }
-[data-orch] .orch-prs__meta > span { overflow-wrap: anywhere; }
-[data-orch] .orch-prs__state { display: flex; flex-wrap: wrap; gap: 2px 12px; font-size: 12px; line-height: 16px; color: var(--orch-ink); }
-[data-orch] .orch-prs__state { gap: 4px 6px; }
-[data-orch] .orch-prs__chip { --c: currentColor; display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; align-items: center; border-radius: 999px; padding: 2px 8px; font-size: 12px; line-height: 16px; color: var(--c); background: color-mix(in srgb, var(--c) ${TINT * 100}%, transparent); }
-${Object.entries(PR_CHIP_TONES)
-  .map(([k, t]) => `[data-orch] .orch-prs__chip[data-tone="${k}"] { --c: light-dark(${t.light}, ${t.dark}); }`)
-  .join("\n")}
-[data-orch] .orch-prs__chip[data-tone="ok"], [data-orch] .orch-prs__chip[data-tone="warn"], [data-orch] .orch-prs__chip[data-tone="fail"] { font-weight: 600; }
-[data-orch] .orch-prs__link { font-size: 12px; line-height: 16px; font-weight: 600; color: light-dark(${SLACK_TONES.link.light}, ${SLACK_TONES.link.dark}); text-decoration: underline; text-underline-offset: 2px; }
-[data-orch] .orch-prs__bullets { margin: 0; padding-left: 20px; list-style: disc; font-size: 14px; line-height: 20px; color: var(--orch-ink); overflow-wrap: anywhere; }
-[data-orch] .orch-prs__bullets li::marker { color: var(--orch-muted); }
-/* the ask and the Post preview keep a reading width beside the wide table */
-[data-orch] [data-layout="table"] [data-ask], [data-orch] [data-layout="table"] [data-post] { max-width: 768px; }
-/* wide: one table, a row per PR (the payload is flat per PR, so there is no more to show in a detail beside it) */
-[data-orch] .orch-prs__table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 14px; line-height: 20px; }
-[data-orch] .orch-prs__table th { padding: 8px; text-align: start; font-size: 12px; line-height: 16px; font-weight: 600; color: var(--orch-muted); border-bottom: 1px solid var(--orch-line); }
-[data-orch] .orch-prs__table th button { border: 0; padding: 0; background: none; font: inherit; color: inherit; cursor: pointer; }
-[data-orch] .orch-prs__table th button:hover, [data-orch] .orch-prs__table th[aria-sort] button { color: var(--orch-ink); }
-[data-orch] .orch-prs__table td { padding: 10px 8px; vertical-align: top; border-bottom: 1px solid var(--orch-line); min-width: 0; overflow-wrap: anywhere; }
-[data-orch] .orch-prs__table tr:hover td { background: var(--orch-wash); }
-[data-orch] .orch-prs__table .orch-prs__sum { margin-top: 2px; font-size: 12px; line-height: 16px; color: var(--orch-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-[data-orch] .orch-prs__table .orch-prs__cell { display: flex; flex-wrap: wrap; gap: 4px; }
-[data-orch] .orch-prs__table .orch-prs__sub { font-size: 12px; line-height: 16px; color: var(--orch-muted); }
-/* the Slack message card: avatar, name, then the text as Slack draws it */
-[data-orch] .orch-slack { display: grid; grid-template-columns: 36px minmax(0, 1fr); gap: 0 8px; padding: 12px; border: 1px solid var(--orch-line); border-radius: 8px; background: light-dark(#ffffff, #1a1d21); }
-[data-orch] .orch-slack__avatar { width: 36px; height: 36px; border-radius: 6px; display: grid; place-items: center; font-size: 16px; font-weight: 600; color: #ffffff; background: light-dark(#4a154b, #7c3a7e); }
-[data-orch] .orch-slack__who { display: flex; gap: 8px; align-items: baseline; font-size: 14px; line-height: 20px; }
-[data-orch] .orch-slack__who b { font-weight: 600; color: var(--orch-ink); }
-[data-orch] .orch-slack__who span { font-size: 12px; color: var(--orch-muted); }
-[data-orch] .orch-slack__body { min-width: 0; font-size: 14px; line-height: 22px; color: var(--orch-ink); overflow-wrap: anywhere; }
-[data-orch] .orch-slack__line { margin: 0; min-height: 22px; }
-[data-orch] .orch-slack__line[data-bullet] { padding-left: 12px; }
-[data-orch] .orch-slack b { font-weight: 600; }
-[data-orch] .orch-slack a { color: light-dark(${SLACK_TONES.link.light}, ${SLACK_TONES.link.dark}); text-decoration: none; }
-[data-orch] .orch-slack a:hover { text-decoration: underline; }
-[data-orch] .orch-slack__mention { border-radius: 3px; padding: 0 2px; color: light-dark(${SLACK_TONES.mention.light}, ${SLACK_TONES.mention.dark}); background: color-mix(in srgb, light-dark(${SLACK_TONES.mention.light}, ${SLACK_TONES.mention.dark}) ${TINT * 100}%, transparent); }
-[data-orch] .orch-prs__actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
-[data-orch] .orch-prs__ticks { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
-[data-orch] .orch-prs__ticks label { display: flex; gap: 8px; align-items: flex-start; font-size: 14px; line-height: 20px; cursor: pointer; min-height: 32px; }
-[data-orch] .orch-prs__ticks input { margin-top: 3px; width: 16px; height: 16px; flex: none; }
-[data-orch] .orch-prs__said { margin: 0; font-size: 14px; line-height: 20px; font-weight: 600; }
-/* affectUI's button labels on the tab's scale too (14 px, 600) */
-[data-orch] .orch-prs .ui-buttonc__label { font-size: 14px; font-weight: 600; }
-`;
+/** A note line: small and muted. */
+const NOTE = "m-0 text-xs text-muted-foreground";
+/** A PR's repo#n link, in the Slack link blue it has in the channel. */
+const LINK = { color: css(SLACK_TONES.link) };
 
 /** The read, refetched when a GitHub read lands, on any orchestrator change, and each minute while the tab is shown. */
 function useOpenPrs() {
@@ -100,30 +101,264 @@ function useOpenPrs() {
   return q;
 }
 
-function Row({ pr }: { pr: OpenPr }) {
+/** One clock for every age on the tab: it ticks each minute, and only the components that show an age redraw. */
+const minute = { now: Date.now(), subs: new Set<() => void>(), timer: undefined as ReturnType<typeof setInterval> | undefined };
+function useMinute(): number {
+  return useSyncExternalStore(
+    (cb) => {
+      minute.subs.add(cb);
+      if (!minute.timer)
+        minute.timer = setInterval(() => {
+          minute.now = Date.now();
+          for (const f of minute.subs) f();
+        }, 60_000);
+      return () => {
+        minute.subs.delete(cb);
+        if (minute.subs.size === 0) {
+          clearInterval(minute.timer);
+          minute.timer = undefined;
+        }
+      };
+    },
+    // with no age on screen the clock is stopped: the first one shown reads the time afresh when the clock is a minute
+    // or more behind (so every read in one render agrees), never the minute the tab was last open
+    () => (minute.subs.size || Date.now() - minute.now < 60_000 ? minute.now : (minute.now = Date.now())),
+  );
+}
+
+/** "5m", "3h": how long ago, on the shared minute clock. */
+function Ago({ at }: { at: number }) {
+  const now = useMinute();
+  return <>{age(at, Math.max(now, at))}</>;
+}
+
+/** A state chip: a Badge in its tone's colour (PR_CHIP_TONES), cut short with an ellipsis in a narrow column. */
+function PrChip({ c, title }: { c: Chip; title?: string }) {
+  const tone = PR_CHIP_TONES[c.tone];
   return (
-    <li className="orch-prs__row" data-pr={pr.url} data-needs={pr.needsReview ? "true" : "false"}>
-      <ProofLink open={{ url: pr.url }} className="orch-prs__title" title={pr.title}>
-        {pr.title}
-      </ProofLink>
-      <div className="orch-prs__meta">
-        <ProofLink open={{ url: pr.url }} className="orch-prs__link" data-pr-link={pr.url} title={pr.url}>
-          {prRef(pr)}
-        </ProofLink>
-        <span>{pr.project ? `${pr.project}${pr.lead ? `, ${pr.lead}` : ", no lead"}` : "No project"}</span>
-        <span title={pr.updatedAt}>Updated {when(pr.updatedAt)}</span>
-      </div>
-      <div className="orch-prs__state">
-        {prChips(pr).map((c) => (
-          <span key={c.key} className="orch-prs__chip" data-chip={c.key} data-tone={c.tone}>
-            {c.text}
-          </span>
-        ))}
-      </div>
-      <ul className="orch-prs__bullets">
+    <Badge variant="secondary" data-chip={c.key} data-tone={c.tone} title={title} className="max-w-full shrink" style={{ color: css(tone), background: tint(tone) }}>
+      <span className="truncate">{c.text}</span>
+    </Badge>
+  );
+}
+
+const SORTS: { value: string; key: PrSort; desc: boolean; label: string }[] = [
+  { value: "updated-desc", key: "updated", desc: true, label: "Newest update first" },
+  { value: "updated-asc", key: "updated", desc: false, label: "Oldest update first" },
+  { value: "review-asc", key: "review", desc: false, label: "Review: changes requested first" },
+  { value: "ci-asc", key: "ci", desc: false, label: "CI: failing first" },
+  { value: "project-asc", key: "project", desc: false, label: "Project A to Z" },
+];
+
+/** The one chip a folded PR shows for its state: its review state, else Draft, else how its review stands. */
+const stateChip = (chips: Chip[]): Chip => chips.find((c) => c.key === "state") ?? chips.find((c) => c.key === "draft") ?? chips.find((c) => c.key === "review")!;
+const ciChip = (chips: Chip[]): Chip => chips.find((c) => c.key === "ci")!;
+/** A PR's reviewers in one line: its state's people (to ask, reviewed before, approved by), else the suggested ones. */
+const reviewersOf = (pr: OpenPr): string => (pr.stateWho.length ? pr.stateWho : pr.candidates).map((c) => c.say).join(", ");
+const samePr = (a: { pr: OpenPr }, b: { pr: OpenPr }) => JSON.stringify(a.pr) === JSON.stringify(b.pr);
+/** A click on a row or a card's header toggles it, except on the link (it opens the PR) or the toggle (it toggles itself). */
+const toggleOn = (set: (f: (o: boolean) => boolean) => void) => (e: MouseEvent) => {
+  if ((e.target as Element).closest("a, button")) return;
+  set((o) => !o);
+};
+
+/** What a PR's expand holds: the summary, the chips the folded row leaves out, the project and lead, who, and when. */
+function PrDetails({ pr }: { pr: OpenPr }) {
+  const chips = prChips(pr);
+  const shown = stateChip(chips);
+  const rest = chips.filter((c) => c !== shown && c.key !== "ci");
+  return (
+    <>
+      <ul className="m-0 list-disc pl-4 text-sm [overflow-wrap:anywhere] marker:text-muted-foreground">
         <li>{pr.summary}</li>
       </ul>
+      {rest.length ? (
+        <div className="mt-2 flex flex-wrap gap-1.5 text-xs" data-more-chips="">
+          {rest.map((c) => (
+            <PrChip key={c.key} c={c} title={c.text} />
+          ))}
+        </div>
+      ) : null}
+      <dl className="m-0 mt-2 grid grid-cols-[max-content_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs">
+        <dt className="text-muted-foreground">Project</dt>
+        <dd className="m-0 [overflow-wrap:anywhere]">{pr.project ?? "No project"}</dd>
+        {pr.project ? (
+          <>
+            <dt className="text-muted-foreground">Lead</dt>
+            <dd className="m-0 [overflow-wrap:anywhere]">{pr.lead ?? "no lead"}</dd>
+          </>
+        ) : null}
+        {pr.state && pr.stateWho.length ? (
+          <>
+            <dt className="text-muted-foreground">{STATE_WHO[pr.state]}</dt>
+            <dd className="m-0 [overflow-wrap:anywhere]" data-state-who="">
+              {pr.stateWho.map((c) => c.say).join(", ")}
+            </dd>
+          </>
+        ) : null}
+        <dt className="text-muted-foreground">Updated</dt>
+        <dd className="m-0">{when(pr.updatedAt)}</dd>
+      </dl>
+    </>
+  );
+}
+
+/**
+ * One PR in a narrow pane: a Card that folds (2026-11-17, the owner: "each pr in a collapsible card that we can
+ * expand"). Folded (2026-11-18): the title on up to two lines, then the repo#n link, the state, CI, the reviewers and
+ * the age; opened, PrDetails. The title is the Collapsible's trigger (a button with aria-expanded, so a keyboard opens
+ * it), and a click elsewhere on the header toggles too, except on the link, which opens the PR.
+ */
+const PrCard = memo(function PrCard({ pr }: { pr: OpenPr }) {
+  const [open, setOpen] = useState(false);
+  const chips = prChips(pr);
+  const state = stateChip(chips);
+  const who = reviewersOf(pr);
+  return (
+    <li data-pr={pr.url} data-needs={pr.needsReview ? "true" : "false"} data-open={open ? "true" : "false"}>
+      <Collapsible open={open} onOpenChange={setOpen} asChild>
+        <Card className="gap-0 rounded-lg py-0 shadow-none">
+          <div className="grid cursor-pointer gap-1 px-3 py-2.5" onClick={toggleOn(setOpen)} data-card-head="">
+            <CollapsibleTrigger className="group flex min-h-6 min-w-0 items-start gap-1.5 rounded-sm text-left text-sm font-semibold outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50" data-toggle="" title={pr.title}>
+              <ChevronRight aria-hidden="true" className="mt-0.5 size-4 shrink-0 text-muted-foreground transition-transform group-data-[state=open]:rotate-90" />
+              <span className="line-clamp-2 [overflow-wrap:anywhere]">{pr.title}</span>
+            </CollapsibleTrigger>
+            {/* the facts wrap rather than squeeze a chip to "R…" beside a long repo name (a phone) */}
+            <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 pl-5.5 text-xs" data-card-facts="">
+              <ProofLink open={{ url: pr.url }} className="inline-flex min-h-6 shrink-0 items-center font-medium underline underline-offset-2" style={LINK} data-pr-link={pr.url} title={pr.url}>
+                {prRef(pr)}
+              </ProofLink>
+              <PrChip c={state} title={state.text} />
+              <PrChip c={ciChip(chips)} />
+              {who ? (
+                <span className="max-w-full min-w-0 truncate text-muted-foreground" title={who} data-reviewers="">
+                  {who}
+                </span>
+              ) : null}
+              <span className="ml-auto shrink-0 text-muted-foreground" title={pr.updatedAt} data-updated="">
+                <Ago at={Date.parse(pr.updatedAt)} /> ago
+              </span>
+            </div>
+          </div>
+          <CollapsibleContent className="border-t px-3 py-3 pl-9" data-card-body="">
+            <PrDetails pr={pr} />
+          </CollapsibleContent>
+        </Card>
+      </Collapsible>
     </li>
+  );
+}, samePr);
+
+/**
+ * One PR in a wide pane (2026-11-18, the owner: "a landscape view that's a little bit cleaner"): one table row, the
+ * title cut to one line, then the repo#n link, the state, CI, the reviewers and the age in their columns; its expand
+ * opens a second row with PrDetails under it.
+ */
+const PrRow = memo(function PrRow({ pr }: { pr: OpenPr }) {
+  const [open, setOpen] = useState(false);
+  const chips = prChips(pr);
+  const state = stateChip(chips);
+  const who = reviewersOf(pr);
+  return (
+    <>
+      <TableRow className="cursor-pointer" onClick={toggleOn(setOpen)} data-pr={pr.url} data-needs={pr.needsReview ? "true" : "false"} data-open={open ? "true" : "false"}>
+        <TableCell className="max-w-0">
+          <Button variant="ghost" size="xs" aria-expanded={open} data-state={open ? "open" : "closed"} onClick={() => setOpen((o) => !o)} className="group h-auto min-h-6 w-full min-w-0 justify-start gap-1.5 rounded-sm px-0 text-left text-sm font-semibold hover:bg-transparent [&:is(.dark_*)]:hover:bg-transparent" data-toggle="" title={pr.title}>
+            <ChevronRight aria-hidden="true" className="size-4 shrink-0 text-muted-foreground transition-transform group-data-[state=open]:rotate-90" />
+            <span className="truncate">{pr.title}</span>
+          </Button>
+        </TableCell>
+        <TableCell className="max-w-0 text-xs">
+          <ProofLink open={{ url: pr.url }} className="inline-flex min-h-6 max-w-full items-center truncate font-medium underline underline-offset-2" style={LINK} data-pr-link={pr.url} title={pr.url}>
+            {prRef(pr)}
+          </ProofLink>
+        </TableCell>
+        <TableCell className="max-w-0">
+          <PrChip c={state} title={state.text} />
+        </TableCell>
+        <TableCell className="max-w-0">
+          <PrChip c={ciChip(chips)} />
+        </TableCell>
+        <TableCell className="max-w-0 text-xs text-muted-foreground">
+          <span className="block truncate" title={who} data-reviewers="">
+            {who || "none yet"}
+          </span>
+        </TableCell>
+        <TableCell className="text-xs text-muted-foreground" title={pr.updatedAt} data-updated="">
+          <Ago at={Date.parse(pr.updatedAt)} /> ago
+        </TableCell>
+      </TableRow>
+      {open ? (
+        <TableRow className="hover:bg-transparent" data-row-body={pr.url}>
+          <TableCell colSpan={6} className="px-3 pt-1 pb-3 pl-9 whitespace-normal">
+            <PrDetails pr={pr} />
+          </TableCell>
+        </TableRow>
+      ) : null}
+    </>
+  );
+}, samePr);
+
+/** The PRs in the sort the Select picks: table rows when the page is wide, folding cards when it is narrow. */
+function PrList({ prs, wide }: { prs: OpenPr[]; wide: boolean }) {
+  const [sort, setSort] = useState(SORTS[0]!.value);
+  const s = SORTS.find((x) => x.value === sort) ?? SORTS[0]!;
+  const rows = useMemo(() => sortPrs(prs, s.key, s.desc), [prs, s.key, s.desc]);
+  return (
+    <div className="grid min-w-0 gap-2" data-prs-list={wide ? "rows" : "cards"}>
+      <div className="flex items-center gap-2">
+        <Label htmlFor="open-prs-sort" className="text-xs font-normal text-muted-foreground">
+          Sort
+        </Label>
+        <Select value={sort} onValueChange={setSort}>
+          <SelectTrigger id="open-prs-sort" size="sm" className="text-xs" data-sort-select="">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {SORTS.map((o) => (
+              <SelectItem key={o.value} value={o.value} className="text-xs" data-sort={o.value}>
+                {o.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+      {wide ? (
+        <div className="rounded-lg border" data-prs-table="">
+          <Table className="table-fixed">
+            <colgroup>
+              <col />
+              <col className="w-32" />
+              <col className="w-44" />
+              <col className="w-28" />
+              <col className="w-40" />
+              <col className="w-24" />
+            </colgroup>
+            <TableHeader>
+              <TableRow className="text-xs hover:bg-transparent">
+                <TableHead className="pl-9 text-muted-foreground">Title</TableHead>
+                <TableHead className="text-muted-foreground">PR</TableHead>
+                <TableHead className="text-muted-foreground">State</TableHead>
+                <TableHead className="text-muted-foreground">CI</TableHead>
+                <TableHead className="text-muted-foreground">Reviewers</TableHead>
+                <TableHead className="text-muted-foreground">Updated</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {rows.map((p) => (
+                <PrRow key={p.url} pr={p} />
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+      ) : (
+        <ul className="m-0 grid min-w-0 list-none gap-2 p-0" data-prs-cards="">
+          {rows.map((p) => (
+            <PrCard key={p.url} pr={p} />
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
 
@@ -152,26 +387,28 @@ async function copy(text: string): Promise<boolean> {
 /** The copied string drawn as Slack draws it in the channel. It takes only that string: nothing else can reach it. */
 function SlackMessage({ text, name, ...p }: { text: string; name: string; [data: `data-${string}`]: string | undefined }) {
   return (
-    <div className="orch-slack" data-copy-text={text} {...p}>
-      <div className="orch-slack__avatar" aria-hidden="true">
-        {(name.trim()[0] ?? "?").toUpperCase()}
-      </div>
-      <div className="orch-slack__body">
-        <div className="orch-slack__who">
-          <b>{name}</b>
-          <span>now</span>
+    <Card className="grid grid-cols-[32px_minmax(0,1fr)] gap-x-2 gap-y-0 rounded-lg p-3 shadow-none" data-copy-text={text} {...p}>
+      <Avatar size="32" aria-hidden="true">
+        <AvatarFallback className="font-semibold">{(name.trim()[0] ?? "?").toUpperCase()}</AvatarFallback>
+      </Avatar>
+      <div className="min-w-0 text-sm leading-6 [overflow-wrap:anywhere]">
+        <div className="flex items-baseline gap-2">
+          <b className="font-semibold">{name}</b>
+          <span className="text-xs text-muted-foreground">now</span>
         </div>
         {slackLines(text).map((l, i) => (
-          <p key={i} className="orch-slack__line" data-bullet={l.bullet ? "" : undefined}>
+          <p key={i} className="m-0 min-h-6 data-[bullet]:pl-3" data-bullet={l.bullet ? "" : undefined}>
             {l.toks.map((t, j) =>
               t.kind === "link" ? (
-                <ProofLink key={j} open={{ url: t.raw }}>
+                <ProofLink key={j} open={{ url: t.raw }} className="no-underline hover:underline" style={LINK}>
                   {t.show}
                 </ProofLink>
               ) : t.kind === "bold" ? (
-                <b key={j}>{t.show}</b>
+                <b key={j} className="font-semibold">
+                  {t.show}
+                </b>
               ) : t.kind === "mention" ? (
-                <span key={j} className="orch-slack__mention" data-mention="">
+                <span key={j} className="rounded-sm px-0.5" style={{ color: css(SLACK_TONES.mention), background: tint(SLACK_TONES.mention) }} data-mention="">
                   {t.show}
                 </span>
               ) : (
@@ -181,179 +418,293 @@ function SlackMessage({ text, name, ...p }: { text: string; name: string; [data:
           </p>
         ))}
       </div>
-    </div>
+    </Card>
   );
 }
 
 const MENTION_NOTE = "@names may need a tap to become mentions.";
 
-/** The running review ask: every PR that needs review, kept current, one click copies it. */
-function Ask({ prs, name }: { prs: OpenPr[]; name: string }) {
-  const text = useMemo(() => buildPrompt(prs), [prs]);
-  const [said, setSaid] = useState<string | null>(null);
-  useEffect(() => setSaid(null), [text]);
-  return (
-    <section className="grid gap-2" data-ask="">
-      <h3>Review ask</h3>
-      <p className="orch-prs__note">How it shows in Slack once pasted.</p>
-      <SlackMessage text={text} name={name} data-ask-text="" />
-      <div className="orch-prs__actions">
-        <Btn data-copy-ask="" onClick={() => void copy(text).then((ok) => setSaid(ok ? "Copied." : "Couldn't copy: select the text and copy it."))}>
-          Copy
-        </Btn>
-        {said ? <span className="orch-prs__note">{said}</span> : null}
-      </div>
-      <p className="orch-prs__note">{MENTION_NOTE}</p>
-    </section>
-  );
-}
+/** A new Post's key (its dedupe key on the server): one per opened preview. */
+const newKey = () => (typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `k${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`);
+const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
-/** Post: the exact text with a tick per PR (excluded projects start unticked), then one Confirm that copies and opens. */
-function Post({ prs, view, name, onClose }: { prs: OpenPr[]; view: OpenPrsView; name: string; onClose: () => void }) {
+/**
+ * Post, in a Dialog over the list (2026-11-18, the owner: "it's just too much to scroll"; before, it opened above the
+ * list and pushed it down): the exact text with a tick per PR (the selected filter's PRs; excluded projects start
+ * unticked), what changed since the last copy, who it pings, then Copy and Post. Copy copies the ticked PRs' ask and
+ * keeps them as the filter's baseline. Without a Slack token, Confirm copies it and opens the channel, as before. With
+ * one (2026-11-17, the owner: "Post as me"): "Post to #channel…" asks the server to find the channel and the mentions
+ * (nothing is sent), then a confirm draws the message exactly as it will show and only its own Post sends it, once:
+ * the key is minted when the dialog opens, the write gate drops a second click while one runs, and the server answers
+ * a repeated key with the first outcome. The dialog won't close while a step runs or the confirm is open, so its key
+ * and what it posted stay.
+ */
+function Post({ prs, view, name, section, found, since, onClose }: { prs: OpenPr[]; view: OpenPrsView; name: string; section: Section; found: CopyChange[] | null; since: number | null; onClose: () => void }) {
   const nav = useBbNavigate();
+  const rpc = useRpc<typeof openPrsContract>();
   const [ticks, setTicks] = useState<Record<string, boolean>>(() => initialTicks(prs, view.excluded));
+  const [withSince, setWithSince] = useState(true);
   const [done, setDone] = useState<string | null>(null);
-  // a PR that appears while the preview is open starts as its project says
+  const [key] = useState(newKey);
+  const [busy, setBusy] = useState(false);
+  const [ready, setReady] = useState<OpenPrsPrepared | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [posted, setPosted] = useState<OpenPrsPosted | null>(null);
+  useGate(); // redraws when the write gate changes
+  const held = busy || !!ready || (!!gate.lock && !gate.lock.done);
+  // a PR that appears while the dialog is open starts as its project says
   const ticked = (p: OpenPr) => ticks[p.url] ?? initialTicks([p], view.excluded)[p.url]!;
   const chosen = prs.filter(ticked);
-  const text = buildPrompt(chosen);
-  const confirm = async () => {
+  const changes = withSince ? found : null;
+  // the header names only the ticked PRs and those that left the list, never one this message leaves out
+  const text = askText(chosen, section, changes && changesForSent(changes, chosen.map((p) => p.url), prs.map((p) => p.url)));
+  const pings = mentionHandles(text);
+  const channel = view.channel?.name ?? null;
+  const doCopy = async () => {
+    if (!(await copy(text))) return setDone("Couldn't copy: select the text above and copy it.");
+    setDone((await keepCopy(section, chosen)) ? "Copied." : "Copied, but not kept as the last copy.");
+  };
+  const copyAndOpen = async () => {
     const ok = await copy(text);
     if (!ok) return setDone("Couldn't copy: select the text above and copy it.");
+    await keepCopy(section, chosen);
     if (view.channel) {
       if (!openInBb(nav, { url: view.channel.url })) window.open(view.channel.url, "_blank", "noopener,noreferrer");
       setDone(`Copied. Paste it in ${view.channel.name}`);
     } else setDone("Copied. Set reviewChannel to open the channel too.");
   };
+  const prepare = async () => {
+    if (busy) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      setReady(await rpc.call("openPrsPrepare", { key, text, copied: { section, prs: chosen.map(copiedRow) } }));
+    } catch (e) {
+      setErr(errMsg(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const send = async () => {
+    const out = await write(OPEN_PRS_POST, { key }, { kind: "other", where: "open-prs", after: () => {} });
+    if (out === null) return; // another write holds the page: this click is dropped
+    if (out.ok) {
+      setPosted(out.result as OpenPrsPosted);
+      setReady(null);
+    } else setErr(out.message);
+  };
   return (
-    <section className="grid gap-3" data-post="">
-      <h3>Post to code reviews</h3>
-      <p className="orch-prs__note">Untick a PR to leave it out. Confirm copies this text and opens {view.channel?.name ?? "nothing (no reviewChannel set)"}; it never posts by itself.</p>
-      <ul className="orch-prs__ticks">
-        {prs.map((p) => (
-          <li key={p.url}>
-            <label>
-              <input type="checkbox" data-tick={p.url} checked={ticked(p)} onChange={(e) => setTicks((t) => ({ ...t, [p.url]: e.target.checked }))} />
-              <span>
-                {p.title}
-                {p.excluded ? <span className="orch-prs__note"> (project {p.project} is left out by default)</span> : null}
-              </span>
-            </label>
-          </li>
-        ))}
-      </ul>
-      {text ? <SlackMessage text={text} name={name} data-post-text="" /> : <p className="orch-prs__note">No PR ticked.</p>}
-      <div className="orch-prs__actions">
-        <Btn tone="primary" data-post-confirm="" disabled={!text} onClick={() => void confirm()}>
-          {view.channel ? `Copy and open ${view.channel.name}` : "Copy"}
-        </Btn>
-        <Btn tone="ghost" onClick={onClose}>
-          Cancel
-        </Btn>
-        {done ? (
-          <p className="orch-prs__said" role="status">
-            {done}
-          </p>
-        ) : null}
-      </div>
-      <p className="orch-prs__note">{MENTION_NOTE}</p>
-    </section>
-  );
-}
-
-const COLS: { key: PrSort | null; label: string; width: string }[] = [
-  { key: null, label: "Pull request", width: "auto" },
-  { key: "project", label: "Project", width: "13%" },
-  { key: "review", label: "Review", width: "17%" },
-  { key: "ci", label: "CI", width: "10%" },
-  { key: null, label: "Merge", width: "12%" },
-  { key: "updated", label: "Updated", width: "8%" },
-];
-
-/** The wide tab: one row per PR with its state, checks, review, age and project in columns; a header click sorts. */
-function Table({ prs }: { prs: OpenPr[] }) {
-  const [sort, setSort] = useState<{ key: PrSort; desc: boolean }>({ key: "updated", desc: true });
-  const rows = useMemo(() => sortPrs(prs, sort.key, sort.desc), [prs, sort]);
-  const chip = (pr: OpenPr, ...keys: string[]) =>
-    prChips(pr)
-      .filter((c) => keys.includes(c.key))
-      .map((c) => (
-        <span key={c.key} className="orch-prs__chip" data-chip={c.key} data-tone={c.tone} title={c.text}>
-          {c.text}
-        </span>
-      ));
-  return (
-    <table className="orch-prs__table" data-prs-table="">
-      <colgroup>
-        {COLS.map((c) => (
-          <col key={c.label} style={{ width: c.width }} />
-        ))}
-      </colgroup>
-      <thead>
-        <tr>
-          {COLS.map((c) => (
-            <th key={c.label} scope="col" aria-sort={c.key && sort.key === c.key ? (sort.desc ? "descending" : "ascending") : undefined}>
-              {c.key ? (
-                <button type="button" data-sort={c.key} onClick={() => setSort((s) => ({ key: c.key!, desc: s.key === c.key ? !s.desc : c.key === "updated" }))}>
-                  {c.label}
-                  {sort.key === c.key ? (sort.desc ? " ↓" : " ↑") : ""}
-                </button>
+    <Dialog open onOpenChange={(open) => (open || held ? null : onClose())}>
+      <DialogContent className="flex max-h-[calc(100dvh-2rem)] flex-col gap-3 sm:max-w-2xl" data-post="" data-posted={posted ? "" : undefined}>
+        {posted ? (
+          <>
+            <DialogHeader>
+              <DialogTitle className="text-base">Posted to {posted.channel}</DialogTitle>
+              <DialogDescription role="status">
+                {posted.permalink ? (
+                  <ProofLink open={{ url: posted.permalink }} className="underline underline-offset-2" style={LINK} data-permalink={posted.permalink}>
+                    Open the message in Slack
+                  </ProofLink>
+                ) : (
+                  "Slack took it, but didn't give its link."
+                )}
+              </DialogDescription>
+            </DialogHeader>
+            <div>
+              <Btn tone="ghost" onClick={onClose}>
+                Close
+              </Btn>
+            </div>
+          </>
+        ) : (
+          <>
+            <DialogHeader>
+              <DialogTitle className="text-base">Post to code reviews</DialogTitle>
+              <DialogDescription className="text-xs">
+                {view.canPost
+                  ? `Untick a PR to leave it out. Nothing is sent until you confirm, in the next step, to post it to ${channel ?? "reviewChannel (not set)"}.`
+                  : `Untick a PR to leave it out. Confirm copies this text and opens ${channel ?? "nothing (no reviewChannel set)"}; it never posts by itself.`}
+              </DialogDescription>
+            </DialogHeader>
+            <ul className="m-0 grid max-h-[24vh] shrink-0 list-none gap-0.5 overflow-y-auto p-0" data-ticks="">
+              {prs.map((p) => (
+                <li key={p.url}>
+                  <label className="flex min-h-6 cursor-pointer items-start gap-2 py-0.5 text-sm">
+                    <Checkbox className="mt-0.5" data-tick={p.url} checked={ticked(p)} disabled={held} onCheckedChange={(c) => setTicks((t) => ({ ...t, [p.url]: c === true }))} />
+                    <span className="min-w-0">
+                      <span className="line-clamp-1 [overflow-wrap:anywhere]" title={p.title}>
+                        {p.title}
+                      </span>
+                      {p.excluded ? <span className="text-xs text-muted-foreground">Project {p.project} is left out by default</span> : null}
+                    </span>
+                  </label>
+                </li>
+              ))}
+            </ul>
+            {since !== null && found ? <SinceLastCopy at={since} changes={found} on={withSince} onChange={setWithSince} /> : null}
+            <div className="min-h-24 flex-1 overflow-y-auto" data-post-preview="">
+              {text ? <SlackMessage text={text} name={name} data-post-text="" /> : <p className={NOTE}>No PR ticked.</p>}
+            </div>
+            {text ? (
+              <p className="m-0 text-sm" data-pings-draft="">
+                {pings.length ? `Pings: ${pings.map((h) => `@${h}`).join(", ")}` : "Pings no one."}
+                <span className="text-xs text-muted-foreground">{view.canPost ? " (checked against Slack before it posts)" : ` (${MENTION_NOTE})`}</span>
+              </p>
+            ) : null}
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+              {view.canPost ? (
+                <Btn tone="primary" data-post-prepare="" disabled={!text || busy || !channel} onClick={() => void prepare()}>
+                  {busy ? "Getting it ready…" : `Post to ${channel ?? "Slack"}…`}
+                </Btn>
               ) : (
-                c.label
+                <Btn tone="primary" data-post-confirm="" disabled={!text} onClick={() => void copyAndOpen()}>
+                  {view.channel ? `Copy and open ${view.channel.name}` : "Copy"}
+                </Btn>
               )}
-            </th>
-          ))}
-        </tr>
-      </thead>
-      <tbody>
-        {rows.map((pr) => (
-          <tr key={pr.url} data-pr={pr.url} data-needs={pr.needsReview ? "true" : "false"}>
-            <td>
-              <ProofLink open={{ url: pr.url }} className="orch-prs__title" title={pr.title}>
-                {pr.title}
-              </ProofLink>
-              <div className="orch-prs__sum" title={pr.summary}>
-                <ProofLink open={{ url: pr.url }} className="orch-prs__link" data-pr-link={pr.url} title={pr.url}>
-                  {prRef(pr)}
-                </ProofLink>{" "}
-                {pr.summary}
-              </div>
-            </td>
-            <td>
-              <div>{pr.project ?? "No project"}</div>
-              <div className="orch-prs__sub">{pr.project ? (pr.lead ?? "no lead") : ""}</div>
-            </td>
-            <td>
-              <div className="orch-prs__cell">{chip(pr, "review")}</div>
-            </td>
-            <td>
-              <div className="orch-prs__cell">{chip(pr, "ci")}</div>
-            </td>
-            <td>
-              <div className="orch-prs__cell">{chip(pr, "draft", "merge")}</div>
-            </td>
-            <td className="orch-prs__sub" title={pr.updatedAt}>
-              {age(Date.parse(pr.updatedAt), Date.now())} ago
-            </td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
+              {text && (view.canPost || view.channel) ? (
+                <Btn tone="ghost" data-copy-post="" disabled={held} onClick={() => void doCopy()}>
+                  Copy
+                </Btn>
+              ) : null}
+              <Btn tone="ghost" disabled={held} onClick={onClose}>
+                Cancel
+              </Btn>
+              {done ? (
+                <p className="m-0 text-sm font-medium" role="status">
+                  {done}
+                </p>
+              ) : null}
+            </div>
+            {err && !ready ? (
+              <p role="alert" className="m-0 text-sm text-(--destructive-text)" data-post-error="">
+                {err}
+              </p>
+            ) : null}
+          </>
+        )}
+        {ready ? <PostConfirm ready={ready} name={name} err={err} onYes={() => void send()} onCancel={() => (setReady(null), setErr(null))} /> : null}
+      </DialogContent>
+    </Dialog>
   );
 }
 
 /**
- * The tab, laid out on the pane's own width (a ResizeObserver, as Projects and Deliverables do, so it follows a split
- * pane live): a sortable table when wide, the compact column of rows when narrow.
+ * The confirm: the message drawn exactly as Slack will show it (the server's `shown`, the posted text before Slack's
+ * escaping), and one Post that names the channel. Its Post takes clicks only ARM_MS after it opens, so the second click
+ * of a double-click on "Post to #channel…" can't land on it, and it is disabled while the write runs.
+ */
+function PostConfirm({ ready, name, err, onYes, onCancel }: { ready: OpenPrsPrepared; name: string; err: string | null; onYes: () => void; onCancel: () => void }) {
+  const [armed, setArmed] = useState(false);
+  useGate(); // redraws when the write gate changes
+  const running = !!gate.lock && !gate.lock.done;
+  // who the post notifies: the mentions left in the confirmed text (a handle no one in Slack has lost its "@")
+  const pings = mentionHandles(ready.shown);
+  useEffect(() => {
+    const t = setTimeout(() => setArmed(true), ARM_MS);
+    return () => clearTimeout(t);
+  }, []);
+  return (
+    <AlertDialog open onOpenChange={(open) => (open || running ? null : onCancel())}>
+      <AlertDialogContent className="sm:max-w-2xl" data-post-dialog="">
+        <AlertDialogHeader>
+          <AlertDialogTitle className="text-base">Post this to {ready.channel}?</AlertDialogTitle>
+          <AlertDialogDescription>It shows in the channel exactly like this, under the token's name.</AlertDialogDescription>
+        </AlertDialogHeader>
+        <div className="max-h-[50vh] overflow-auto">
+          <SlackMessage text={ready.shown} name={name} data-post-shown="" />
+        </div>
+        <p className="m-0 text-sm" data-pings="">
+          {pings.length ? `Pings: ${pings.map((h) => `@${h}`).join(", ")}` : "Pings no one."}
+        </p>
+        {ready.notes.map((n) => (
+          <p key={n} className={NOTE}>
+            {n}
+          </p>
+        ))}
+        {err ? (
+          <p role="alert" className="m-0 text-sm text-(--destructive-text)" data-post-error="">
+            {err}
+          </p>
+        ) : null}
+        <AlertDialogFooter>
+          <AlertDialogCancel size="sm" disabled={running}>
+            Cancel
+          </AlertDialogCancel>
+          <Button size="sm" disabled={!armed || running} data-armed={armed ? "true" : "false"} data-post-send="" onClick={onYes}>
+            {running ? "Posting…" : `Post to ${ready.channel}`}
+          </Button>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  );
+}
+
+/** In Post: what changed in this filter's PRs since its last successful copy or post, and whether the text says so. */
+function SinceLastCopy({ at, changes, on, onChange }: { at: number; changes: CopyChange[]; on: boolean; onChange: (on: boolean) => void }) {
+  const ago = (
+    <span className="text-xs font-normal text-muted-foreground" title={when(at)}>
+      <Ago at={at} /> ago
+    </span>
+  );
+  if (!changes.length)
+    return (
+      <p className="m-0 text-sm" data-since="">
+        No changes since your last copy {ago}
+      </p>
+    );
+  return (
+    <section className="grid shrink-0 gap-1" data-since="">
+      <h3 className="m-0 text-sm font-semibold">Since your last copy {ago}</h3>
+      <ul className="m-0 grid max-h-[16vh] list-none gap-0.5 overflow-y-auto p-0 text-sm">
+        {changes.map((c) => (
+          <li key={c.url} data-change={c.url} className="[overflow-wrap:anywhere]">
+            <ProofLink open={{ url: c.url }} className="inline-flex min-h-6 items-center font-medium underline underline-offset-2" style={LINK}>
+              {prRef(c)}
+            </ProofLink>{" "}
+            {c.reasons.join(", ")}
+          </li>
+        ))}
+      </ul>
+      <label className="flex min-h-6 cursor-pointer items-center gap-2 text-sm">
+        <Checkbox data-since-include="" checked={on} onCheckedChange={(c) => onChange(c === true)} />
+        Put these changes above the copied text
+      </label>
+    </section>
+  );
+}
+
+/** No read has ever landed: the cards' shape, pulsing, and what is happening. */
+function CardsSkeleton({ note }: { note?: string }) {
+  return (
+    <div role="status" className="grid gap-2" data-prs-skeleton="">
+      <span className={note ? NOTE : "sr-only"}>{note ?? "Loading…"}</span>
+      {[0, 1, 2].map((i) => (
+        <Card key={i} className="gap-2 rounded-lg px-3 py-3 shadow-none">
+          <Skeleton className="h-4 w-2/3" />
+          <div className="flex gap-1.5">
+            <Skeleton className="h-5 w-20" />
+            <Skeleton className="h-5 w-28" />
+            <Skeleton className="h-5 w-20" />
+          </div>
+        </Card>
+      ))}
+    </div>
+  );
+}
+
+/** From this width the PRs are table rows (a full or stacked pane); below it, cards (a side-by-side pane, a phone). */
+const WIDE = 880;
+
+/**
+ * The tab. It measures its own width (a pane's, not the window's), so a split pane gets the layout that fits it; it
+ * draws nothing until the first measure, so the list never flips from one layout to the other on open.
  */
 export function OpenPrsView() {
-  const [width, measure] = useElementWidth();
-  const wide = isWide(width);
+  const ref = useRef<HTMLDivElement>(null);
+  const width = useWidth(ref);
   return (
-    <div ref={measure} data-prs-width={width}>
-      <div data-layout={wide ? "table" : "column"} style={wide ? undefined : { maxWidth: 768, marginInline: "auto" }}>
-        <OpenPrsBody wide={wide} />
-      </div>
+    <div ref={ref} className="mx-auto max-w-5xl" data-layout={width === 0 ? "measuring" : width >= WIDE ? "rows" : "cards"}>
+      {width > 0 ? <OpenPrsBody wide={width >= WIDE} /> : null}
     </div>
   );
 }
@@ -365,7 +716,7 @@ function OpenPrsBody({ wide }: { wide: boolean }) {
   const [filter, setFilter] = useState<Filter>("needs");
   const [posting, setPosting] = useState(false);
   const v = q.data;
-  if (!v) return <ReadState q={q} what="your open PRs" />;
+  if (!v) return q.error ? <ReadState q={q} what="your open PRs" /> : <CardsSkeleton />;
   if (v.state === "unset")
     return (
       <EmptyState
@@ -374,56 +725,48 @@ function OpenPrsBody({ wide }: { wide: boolean }) {
         icon={null}
       />
     );
-  if (v.state === "loading") return <Muted>Reading your open PRs from GitHub…</Muted>;
+  if (v.state === "loading") return <CardsSkeleton note="Reading your open PRs from GitHub for the first time…" />;
   if (v.state === "error") return <EmptyState title="Can't read your open PRs" text={v.error ?? "GitHub didn't answer."} icon={null} action={<Btn onClick={() => void q.refetch()}>Try again</Btn>} />;
-  const needs = v.prs.filter((p) => p.needsReview);
-  const shown = filter === "needs" ? needs : v.prs;
+  const shown = v.prs.filter((p) => inFilter(p, filter));
+  const f = FILTERS.find((x) => x.value === filter)!;
+  const section = sectionOf(filter);
+  const baseline = section ? v.copied[section] : undefined;
+  const changes = section && baseline ? changesSince(baseline, shown.map(copiedRow), v.prs.map(copiedRow), v.departed) : null;
+  const asked = section && shown.length > 0 ? section : null;
   return (
-    <div className="orch-prs" data-open-prs="">
-      <style href={styleHref("orch-prs", CSS)} precedence="default">
-        {CSS}
-      </style>
-      <div className="grid gap-2">
-        <div className="orch-prs__bar">
-          <div className="orch-prs__filters" role="group" aria-label="Filter">
-            <button type="button" data-filter="needs" aria-pressed={filter === "needs"} onClick={() => setFilter("needs")}>
-              Needs review {needs.length}
-            </button>
-            <button type="button" data-filter="all" aria-pressed={filter === "all"} onClick={() => setFilter("all")}>
-              All {v.prs.length}
-            </button>
-          </div>
-          {needs.length > 0 && !posting ? (
+    <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-4" data-open-prs="">
+      {/* the five filters scroll sideways on a phone instead of widening the column (2026-11-18) */}
+      <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-2">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+          {/* one filter is always on: a click on the pressed one keeps it (Radix sends "" for that) */}
+          <ToggleGroup type="single" variant="outline" size="sm" aria-label="Filter" className="max-w-full overflow-x-auto" value={filter} onValueChange={(f) => f && setFilter(f as Filter)}>
+            {FILTERS.map((x) => (
+              <ToggleGroupItem key={x.value} value={x.value} data-filter={x.value}>
+                {x.label} {v.prs.filter((p) => inFilter(p, x.value)).length}
+              </ToggleGroupItem>
+            ))}
+          </ToggleGroup>
+          {asked ? (
             <Btn data-post-open="" onClick={() => setPosting(true)}>
-              Post to code reviews
+              Post to code reviews…
             </Btn>
           ) : null}
         </div>
-        <p className="orch-prs__note">
-          {v.login}'s open PRs, checked {when(v.fetchedAt)}
-          {v.pollMinutes > 0 ? `, again after ${v.pollMinutes} min` : ""}. Needs review: ready, not fully approved, CI not failing.
+        <p className={NOTE}>
+          {v.login}'s open PRs, checked {v.fetchedAt === null ? "never" : <span title={when(v.fetchedAt)} data-checked-ago=""><Ago at={v.fetchedAt} /> ago</span>}
+          {v.checking ? <span data-checking="">, checking GitHub now</span> : v.pollMinutes > 0 ? `, again after ${v.pollMinutes} min` : ""}. {f.means}
           {v.more ? " More open PRs than one read lists; the oldest are left out." : ""}
         </p>
-        {v.error ? <p className="orch-prs__note">Last check failed, showing the one before: {v.error}</p> : null}
+        {v.error ? <p className={NOTE}>Last check failed, showing the one before: {v.error}</p> : null}
         {v.notes.map((n) => (
-          <p key={n} className="orch-prs__note">
+          <p key={n} className={NOTE}>
             {n}
           </p>
         ))}
       </div>
-      {posting && needs.length > 0 ? <Post prs={needs} view={v} name={name} onClose={() => setPosting(false)} /> : null}
-      {shown.length === 0 ? (
-        <Muted>{filter === "needs" ? "Nothing needs review." : "No open PRs."}</Muted>
-      ) : wide ? (
-        <Table prs={shown} />
-      ) : (
-        <ul className="orch-prs__list">
-          {shown.map((p) => (
-            <Row key={p.url} pr={p} />
-          ))}
-        </ul>
-      )}
-      {needs.length > 0 ? <Ask prs={needs} name={name} /> : null}
+      {shown.length === 0 ? <Muted>{f.none}</Muted> : <PrList prs={shown} wide={wide} />}
+      {/* Post is a Dialog over the list (2026-11-18): opening it never moves the list */}
+      {posting && asked ? <Post key={asked} prs={shown} view={v} name={name} section={asked} found={changes} since={baseline?.at ?? null} onClose={() => setPosting(false)} /> : null}
     </div>
   );
 }

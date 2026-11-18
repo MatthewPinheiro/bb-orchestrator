@@ -1,15 +1,17 @@
 // The lead's status (2026-11-16, core/status.ts), drawn two ways: the step bar at the top of a project's page (numbered
 // steps with the current one lit, "Step 3 of 5: <title>", what it waits on, linked where it can be, its blockers and
 // when it was published) and one line on the Projects list ("step 3/5 · waiting on PR 1301"). Both say "stale" once
-// the lead hasn't published for 2 h; a minute timer keeps that true on a page left open.
+// the lead hasn't published for 2 h; a minute timer keeps that true on a page left open. 2026-11-17: a shadcn Card,
+// its chips the shared Kind badges, its links ghost Buttons.
 import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
 import { useBbNavigate } from "@get-bb/plugin-sdk/app";
 import type { Projects } from "../contract.ts";
 import { isStale, position, statusLine, stepHeadline, waitTarget } from "../core/status.ts";
-import { Badge } from "./affect/badge-clean.tsx";
-import { KIND_TONES, css, tint, type Tone } from "./palette.ts";
+import { Button } from "./ui/button.tsx";
+import { Card } from "./ui/card.tsx";
+import { KIND_TONES, css, tint } from "./palette.ts";
 import { age, type Lane } from "./lanes.ts";
-import { cx } from "./ui.tsx";
+import { Kind, cx } from "./ui.tsx";
 import type { OpenCard } from "./projects.tsx";
 
 type Status = NonNullable<Projects[number]["status"]>;
@@ -28,19 +30,17 @@ const DONE = KIND_TONES.done;
 const CURRENT = KIND_TONES.merge;
 const STALE = KIND_TONES.deferred;
 const BLOCKER = KIND_TONES.alarm;
-const WAIT = KIND_TONES.asked;
-const chip = (t: Tone): CSSProperties => ({ "--bg": tint(t), "--fg": css(t) }) as CSSProperties;
 
 function Updated({ s, now }: { s: Status; now: number }) {
   const stale = isStale(s, now);
   const ago = age(s.updatedAt, now);
   const at = new Date(s.updatedAt).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
   return stale ? (
-    <Badge data-status-stale="true" style={chip(STALE)}>
+    <Kind of="deferred" group="deferred" data-status-stale="true">
       <span className="whitespace-nowrap" title={`Published ${at}`}>
         stale · {ago} ago
       </span>
-    </Badge>
+    </Kind>
   ) : (
     <span data-status-stale="false" className="orch-muted whitespace-nowrap text-xs" title={`Published ${at}`}>
       updated {ago} ago
@@ -83,6 +83,9 @@ function Step({ n, step, last }: { n: number; step: Status["steps"][number]; las
   );
 }
 
+/** A badge that opens what it names: a 24 px ghost button around it. */
+const LINKED = "h-6 px-1 font-normal";
+
 /** What it waits on, linked: a PR or URL opens it, a thread address opens the thread, the owner's card opens on Needs you. */
 function Waiting({ s, ownerName, lanes, openCard }: { s: Status; ownerName: string; lanes: Lane[] | undefined; openCard: OpenCard }) {
   const navigate = useBbNavigate();
@@ -91,11 +94,11 @@ function Waiting({ s, ownerName, lanes, openCard }: { s: Status; ownerName: stri
   if (!target) return null;
   const label = w.label && w.label !== target ? w.label : null;
   const body = (
-    <Badge style={chip(WAIT)}>
+    <Kind of="asked" group="asked">
       <span className="whitespace-nowrap">
         waiting on <span className="font-semibold">{target}</span>
       </span>
-    </Badge>
+    </Kind>
   );
   const url = w.ref && /^https?:\/\//.test(w.ref) ? w.ref : null;
   const thread = w.kind === "thread" && w.ref ? (lanes?.find((l) => l.agent.address === w.ref)?.agent.threadId ?? (w.ref.startsWith("thr_") ? w.ref : null)) : null;
@@ -105,13 +108,13 @@ function Waiting({ s, ownerName, lanes, openCard }: { s: Status; ownerName: stri
       {body} ↗
     </a>
   ) : thread ? (
-    <button type="button" data-status-wait-link="thread" title={`Open ${w.ref}`} onClick={() => navigate.toThread(thread)} className="cursor-pointer border-0 bg-transparent p-0 text-inherit">
+    <Button variant="ghost" size="xs" data-status-wait-link="thread" title={`Open ${w.ref}`} onClick={() => navigate.toThread(thread)} className={LINKED}>
       {body} ↗
-    </button>
+    </Button>
   ) : card ? (
-    <button type="button" data-status-wait-link="card" title="Open the card" onClick={() => openCard(`[data-card="${card}"]`)} className="cursor-pointer border-0 bg-transparent p-0 text-inherit">
+    <Button variant="ghost" size="xs" data-status-wait-link="card" title="Open the card" onClick={() => openCard(`[data-card="${card}"]`)} className={LINKED}>
       {body} ↗
-    </button>
+    </Button>
   ) : (
     body
   );
@@ -137,12 +140,13 @@ export function StatusBar({ status, ownerName, lanes, openCard }: { status: Stat
   const headline = stepHeadline(status) || status.goal;
   const stale = isStale(status, now);
   return (
-    <section
+    <Card
+      role="region"
       data-status-bar=""
       data-status-step={p.kind === "none" ? "" : `${p.at}/${p.total}`}
       aria-label="Lead status"
-      className="orch-wash flex min-w-0 flex-col gap-2 px-3 py-3"
-      style={stale ? { outline: `1px dashed color-mix(in srgb, ${css(STALE)} 60%, transparent)` } : undefined}
+      className={cx("min-w-0 gap-2 px-4 py-3 shadow-none", stale && "border-dashed")}
+      style={stale ? { borderColor: `color-mix(in srgb, ${css(STALE)} 60%, transparent)` } : undefined}
     >
       <div className="flex min-w-0 flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
         <h2 data-status-headline="" className="m-0 min-w-0 text-base font-semibold [overflow-wrap:anywhere]" style={p.kind === "current" ? { color: css(CURRENT) } : undefined}>
@@ -176,7 +180,7 @@ export function StatusBar({ status, ownerName, lanes, openCard }: { status: Stat
           ))}
         </ul>
       ) : null}
-    </section>
+    </Card>
   );
 }
 
@@ -196,9 +200,9 @@ export function StatusLine({ status, ownerName }: { status: Status | null; owner
         </span>
       ) : null}
       {stale ? (
-        <Badge style={chip(STALE)}>
+        <Kind of="deferred" group="deferred">
           <span className="whitespace-nowrap">stale · {age(status.updatedAt, now)} ago</span>
-        </Badge>
+        </Kind>
       ) : null}
     </div>
   );

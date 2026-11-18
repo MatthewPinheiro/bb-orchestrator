@@ -1,13 +1,17 @@
-// Small shared pieces, built on the vendored affectUI items (app/affect): buttons, badges for kinds, avatars for roles,
-// card sections and time formatting. Colours for roles and kinds come from palette.ts, fed into affectUI's own CSS
-// variables, so the look is affectUI's and the colour code stays ours.
+// Small shared pieces, built on shadcn/ui (app/ui, since 2026-11-17): buttons, badges for kinds, avatars for roles,
+// card sections, empty, error and loading states, and time formatting. Their props are unchanged, so no call site moved.
+// Colours for roles and kinds come from palette.ts; everything else is bb's own tokens.
 import { styleHref } from "./style-href.ts";
-import type { ButtonHTMLAttributes, CSSProperties, ReactNode } from "react";
-import { Avatar } from "./affect/avatar-clean.tsx";
-import { Badge } from "./affect/badge-clean.tsx";
-import { Button } from "./affect/button-clean.tsx";
-import { Card, CardContent, CardHeader } from "./affect/card-clean.tsx";
-import { EmptyState } from "./affect/empty-state-clean.tsx";
+import type { ButtonHTMLAttributes, ComponentProps, CSSProperties, ReactNode } from "react";
+import { FileText } from "lucide-react";
+import { Alert, AlertDescription } from "./ui/alert.tsx";
+import { Avatar, AvatarFallback } from "./ui/avatar.tsx";
+import { Badge } from "./ui/badge.tsx";
+import { Button } from "./ui/button.tsx";
+import { Card, CardAction, CardContent, CardHeader, CardTitle } from "./ui/card.tsx";
+import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "./ui/empty.tsx";
+import { Skeleton } from "./ui/skeleton.tsx";
+import { cn } from "./ui/utils.ts";
 import { gate } from "./store.ts";
 import { KIND_TONES, ROLE_TONES, css, kindOf, roleOf, tint, type KindKey } from "./palette.ts";
 import { ownerOnScreen } from "../core/owner.ts";
@@ -16,37 +20,25 @@ import { useIdentity } from "./identity.ts";
 export const cx = (...c: (string | false | null | undefined)[]) => c.filter(Boolean).join(" ");
 
 /**
- * The page's own CSS, unlayered so it holds against affectUI's injected styles, and scoped by [data-orch] (the panel).
- * - affectUI's text colours for what sits outside its components, in both themes (bb sets color-scheme on html.dark).
- * - The double-tap guard: no press scale on buttons and no entry animation on the defer menu, so nothing under the
- *   pointer shrinks or moves between a press and its release.
- * - Our rows inside the decision inbox: full width, options with a second line, disabled options.
+ * The page's own CSS, unlayered, scoped by [data-orch] (the panel).
+ * - 2026-11-17: the page's ink, muted text, hairline and danger are bb's tokens, in both themes; its wash is 5% of bb's ink
+ *   (bb's own hover wash, 13.8% in dark, would take tinted words on a hovered row under 4.5:1).
  */
 const LOOK = `
 [data-orch] {
-  --orch-ink: light-dark(rgba(0, 0, 0, 0.88), rgba(255, 255, 255, 0.9));
-  --orch-muted: light-dark(rgba(0, 0, 0, 0.61), rgba(255, 255, 255, 0.62));
-  --orch-line: light-dark(rgba(0, 0, 0, 0.06), rgba(255, 255, 255, 0.08));
-  --orch-wash: light-dark(rgba(0, 0, 0, 0.03), rgba(255, 255, 255, 0.04));
-  --orch-danger: light-dark(#c4320a, #ff8a7a);
-  font-family: var(--aui-font, "Inter", "InterVariable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
+  --orch-ink: var(--foreground);
+  --orch-muted: var(--muted-foreground);
+  --orch-line: var(--border);
+  --orch-wash: color-mix(in srgb, var(--foreground) 5%, transparent);
+  --orch-danger: var(--destructive-text, var(--destructive));
+  font-family: "Inter", "InterVariable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   font-size: 13px;
   line-height: 20px;
   color: var(--orch-ink);
   -webkit-font-smoothing: antialiased;
 }
-[data-orch] .ui-buttonc:active, [data-orch] .ui-dic__btn:active { transform: none !important; }
-[data-orch] .ui-dmc__panel { animation: none !important; }
-[data-orch] .ui-dic { max-width: none; }
-[data-orch] .ui-dic__btn { gap: 6px; text-align: start; }
-[data-orch] .ui-dic__btn:disabled { opacity: 0.5; cursor: default; }
-[data-orch] .orch-opt-note { font-weight: 400; opacity: 0.7; }
-/* Requested 2026-11-13: "Recommended" stays one word on one line however long the option is */
-[data-orch] .orch-opt-rec { white-space: nowrap; flex-shrink: 0; }
 [data-orch] .orch-muted { color: var(--orch-muted); }
 [data-orch] .orch-danger { color: var(--orch-danger); }
-[data-orch] .orch-rows > * + * { border-top: 0.5px solid var(--orch-line); }
-[data-orch] .orch-wash { background: var(--orch-wash); border-radius: 6px; }
 [data-orch] .orch-mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
 `;
 export function Look() {
@@ -57,81 +49,130 @@ export function Look() {
   );
 }
 
-const VARIANT = { primary: "primary", outline: "secondary", ghost: "ghost", danger: "destructive" } as const;
-/** affectUI's button. Disabled stays a real `disabled`: a click on it stops there, not on what's below. */
-export function Btn({ tone = "outline", ...p }: ButtonHTMLAttributes<HTMLButtonElement> & { tone?: keyof typeof VARIANT; size?: "sm" | "md" | "lg"; icon?: ReactNode; [data: `data-${string}`]: string | undefined }) {
-  return <Button variant={VARIANT[tone]} {...p} />;
+const VARIANT = { primary: "default", outline: "outline", ghost: "ghost", danger: "destructive" } as const;
+const SIZE = { sm: "sm", md: "default", lg: "lg" } as const;
+const ICON_SIZE = { sm: "icon-sm", md: "icon", lg: "icon-lg" } as const;
+/**
+ * shadcn's Button. Disabled stays a real `disabled` that still takes the pointer (shadcn's pointer-events-none would let
+ * a click on it fall through to the card or row below it). An icon with no words is a square icon button.
+ */
+export function Btn({ tone = "outline", size = "md", icon, children, className, type = "button", ...p }: ButtonHTMLAttributes<HTMLButtonElement> & { tone?: keyof typeof VARIANT; size?: "sm" | "md" | "lg"; icon?: ReactNode; ref?: ComponentProps<"button">["ref"]; [data: `data-${string}`]: string | undefined }) {
+  const iconOnly = icon != null && (children == null || children === false || children === "");
+  return (
+    <Button type={type} variant={VARIANT[tone]} size={iconOnly ? ICON_SIZE[size] : SIZE[size]} className={cn("disabled:pointer-events-auto disabled:cursor-default", className)} {...p}>
+      {icon}
+      {children}
+    </Button>
+  );
 }
 
-/** A plain label (no colour group): affectUI's neutral badge. */
+/** A plain label (no colour group): shadcn's secondary badge. */
 export function Tag({ children, ...p }: { children: ReactNode; [data: `data-${string}`]: string | undefined }) {
-  return <Badge {...p}>{children}</Badge>;
+  return (
+    <Badge variant="secondary" {...p}>
+      {children}
+    </Badge>
+  );
 }
 
 /**
- * A kind or state (a raw string from the server) as an affectUI badge in its kind's colour, with a dot. Unknown kinds
- * stay neutral. `group` picks the colour group directly (a PR chip's colour is worked out from several fields).
+ * A kind or state (a raw string from the server) as a badge in its kind's colour (its tint behind its word), with a dot.
+ * Unknown kinds stay neutral. `group` picks the colour group directly (a PR chip's colour is worked out from several fields).
  */
 export function Kind({ of, group, children, ...p }: { of: string; group?: KindKey; children?: ReactNode; [data: `data-${string}`]: string | undefined }) {
   const kind = group ?? kindOf(of);
   const tone = kind ? KIND_TONES[kind] : null;
-  const style = tone ? ({ "--bg": tint(tone), "--fg": css(tone), "--dot": css(tone) } as CSSProperties) : undefined;
+  const style = tone ? ({ background: tint(tone), color: css(tone) } as CSSProperties) : undefined;
   return (
-    <Badge dot={tone !== null} style={style} {...p}>
+    <Badge variant="secondary" style={style} {...p}>
+      {tone ? <span aria-hidden className="size-1.5 shrink-0 rounded-full bg-current" /> : null}
       {children ?? of}
     </Badge>
   );
 }
 
-/** An address (or role or level) in its role's colour: an affectUI avatar (an agent's pixel mark in the role colour, the owner's initial) and the words. */
+/** An address (or role or level) in its role's colour: an avatar (the role's initial, the owner's) and the words. */
 export function Who({ address, children, nowrap }: { address: string | null | undefined; children?: ReactNode; nowrap?: boolean }) {
   const role = roleOf(address);
-  const color = role ? css(ROLE_TONES[role]) : undefined;
+  const tone = role ? ROLE_TONES[role] : null;
+  const color = tone ? css(tone) : undefined;
   const { ownerName } = useIdentity();
+  const initial = role === "person" ? ownerOnScreen(ownerName).Name.slice(0, 1) : tone ? tone.label.slice(0, 1).toUpperCase() : "";
   return (
     <span className={cx("orch-mono inline-flex min-w-0 items-center gap-1.5", nowrap ? "whitespace-nowrap" : "[overflow-wrap:anywhere]")} style={{ color }}>
-      {role === "person" ? (
-        // affectUI's initial on its soft colour, turned to the person hue; the words beside it name the person
-        <Avatar name={ownerOnScreen(ownerName).Name} size={20} aria-label="" style={{ "--h": "330" } as CSSProperties} />
-      ) : role ? (
-        <Avatar kind="agent" seed={address ?? role} color={color} size={20} />
+      {tone ? (
+        <Avatar size="20" aria-hidden>
+          <AvatarFallback className="font-medium" style={{ background: tint(tone), color }}>
+            {initial}
+          </AvatarFallback>
+        </Avatar>
       ) : null}
       {children ?? address ?? "—"}
     </span>
   );
 }
 
-/** A section: an affectUI card with a title, its count, and the content. */
+/** A section: a shadcn card with a title, its count, and the content. */
 export function Section({ title, count, children, ...p }: { title: string; count?: number; children: ReactNode; [data: `data-${string}`]: string | undefined }) {
   return (
-    <Card as="section" {...p}>
-      <CardHeader title={title} titleAs="h3" action={count !== undefined ? <Tag>{count}</Tag> : undefined} />
+    <Card {...p}>
+      <CardHeader>
+        <CardTitle role="heading" aria-level={3}>
+          {title}
+        </CardTitle>
+        {count !== undefined ? (
+          <CardAction>
+            <Tag>{count}</Tag>
+          </CardAction>
+        ) : null}
+      </CardHeader>
       <CardContent>{children}</CardContent>
     </Card>
+  );
+}
+
+/**
+ * The empty state (2026-11-17: shadcn's Empty, behind affectUI's props). `icon` defaults to a file and null shows no
+ * tile; `bare` drops the frame; `tall` fills the parent's height.
+ */
+export function EmptyState({ title, text, action, icon = <FileText />, bare, tall, className, ...p }: Omit<ComponentProps<"div">, "title"> & { title: ReactNode; text?: ReactNode; action?: ReactNode; icon?: ReactNode; bare?: boolean; tall?: boolean; [data: `data-${string}`]: string | undefined }) {
+  return (
+    <Empty className={cn("flex-none gap-4 p-6 md:p-6", !bare && "border", tall && "h-full flex-1", className)} {...p}>
+      <EmptyHeader>
+        {icon != null && icon !== false ? <EmptyMedia variant="icon">{icon}</EmptyMedia> : null}
+        <EmptyTitle className="text-base">{title}</EmptyTitle>
+        {text ? <EmptyDescription>{text}</EmptyDescription> : null}
+      </EmptyHeader>
+      {action ? <EmptyContent>{action}</EmptyContent> : null}
+    </Empty>
   );
 }
 
 /** The last failed write's message, where it belongs ("board", "rules", "projects"). Callers re-render on useGate(). */
 export function PageError({ where }: { where: string }) {
   return gate.error?.where === where ? (
-    <p role="alert" className="orch-danger m-0 mt-2 text-xs">
-      {gate.error.message}
-    </p>
+    <Alert variant="destructive" className="mt-2">
+      <AlertDescription>{gate.error.message}</AlertDescription>
+    </Alert>
   ) : null;
 }
 
 /** A read's state above its view: loading, failed (with Retry), or stale data kept while a refresh failed. */
 export function ReadState({ q, what }: { q: { data: unknown; error: { message: string } | null; refetch: () => Promise<void> }; what: string }) {
-  if (q.data !== undefined) return q.error ? <p className="orch-danger m-0 text-xs">Stale: {q.error.message}</p> : null;
+  if (q.data !== undefined) return q.error ? <p className="m-0 text-xs text-(--orch-danger)">Stale: {q.error.message}</p> : null;
   return q.error ? (
     <EmptyState title={`Can't read ${what}`} text={q.error.message} icon={null} action={<Btn onClick={() => void q.refetch()}>Retry</Btn>} />
   ) : (
-    <Muted>Loading…</Muted>
+    <div role="status" className="flex flex-col gap-2">
+      <span className="sr-only">Loading…</span>
+      <Skeleton className="h-4 w-48" />
+      <Skeleton className="h-4 w-72 max-w-full" />
+    </div>
   );
 }
 
 export function Muted({ children }: { children: ReactNode }) {
-  return <p className="orch-muted m-0">{children}</p>;
+  return <p className="m-0 text-sm text-muted-foreground">{children}</p>;
 }
 
 /** A time from an ISO string or epoch ms, short and local. */

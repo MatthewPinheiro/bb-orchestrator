@@ -38,7 +38,7 @@ const SEARCH = [
 ];
 const run = (conclusion: string, status = "COMPLETED") => ({ __typename: "CheckRun", name: "ci", status, conclusion, workflowName: "CI" });
 const ctx = (state: string) => ({ __typename: "StatusContext", context: "deploy", state, targetUrl: "https://ci.example/1" });
-const review = (login: string, state: string) => ({ id: "", author: { login }, authorAssociation: "MEMBER", body: "", state, submittedAt: "2026-01-01T00:00:00Z" });
+const review = (login: string, state: string, oid = "aaaa") => ({ id: "", author: { login }, authorAssociation: "MEMBER", body: "", state, submittedAt: "2026-01-01T00:00:00Z", commit: { oid } });
 const VIEW = {
   url: PR,
   body: "## TL;DR\nSpins the widget.",
@@ -57,7 +57,10 @@ const VIEW = {
     review("rev-b", "CHANGES_REQUESTED"), // a later change request does
     review("lint-helper[bot]", "APPROVED"),
     review("copilot-pull-request-reviewer", "APPROVED"),
+    review("coderabbitai", "APPROVED"), // gh prints CodeRabbit under its bare login
   ],
+  author: { id: "U_1", is_bot: false, login: "dev-one", name: "" },
+  reviewRequests: [{ __typename: "User", login: "rev-c" }, { __typename: "Team", name: "Reviewers", slug: "reviewers" }],
 };
 const RULES = [{ type: "deletion" }, { type: "pull_request", parameters: { required_approving_review_count: 2, dismiss_stale_reviews_on_push: true } }];
 const wait = (p: Partial<{ state: string; isDraft: boolean; reviewDecision: string; checks: unknown[]; mergeable: string; mergeStateStatus: string }>, url = ELSEWHERE) => ({
@@ -75,7 +78,7 @@ const wait = (p: Partial<{ state: string; isDraft: boolean; reviewDecision: stri
 
 test("every gh call is a fixed, read-only argument list: only search, pr view, pr list and two REST GETs", () => {
   assert.deepEqual(ghArgs.openPrs("dev-one"), ["search", "prs", "--author", "dev-one", "--state", "open", "--archived=false", "--sort", "updated", "--order", "desc", "--limit", "251", "--json", "url,number,title,repository,updatedAt,isDraft"]);
-  assert.deepEqual(ghArgs.view(PR), ["pr", "view", PR, "--json", "url,body,isDraft,headRefName,headRefOid,baseRefName,reviewDecision,mergeable,mergeStateStatus,statusCheckRollup,reviews"]);
+  assert.deepEqual(ghArgs.view(PR), ["pr", "view", PR, "--json", "url,body,isDraft,headRefName,headRefOid,baseRefName,reviewDecision,mergeable,mergeStateStatus,statusCheckRollup,reviews,author,reviewRequests"]);
   assert.deepEqual(ghArgs.files(PR), ["pr", "view", PR, "--json", "headRefOid,files"]);
   assert.deepEqual(ghArgs.merged("acme-co/widgets"), ["pr", "list", "--repo", "acme-co/widgets", "--state", "merged", "--search", "sort:updated-desc", "--limit", "40", "--json", "files,reviews"]);
   assert.deepEqual(ghArgs.wait(ELSEWHERE), ["pr", "view", ELSEWHERE, "--json", "url,number,state,isDraft,reviewDecision,statusCheckRollup,mergeable,mergeStateStatus"]);
@@ -143,6 +146,15 @@ test("a search hit and its view make the RawPr the page has always read; bots' a
     url: PR, number: 7, title: "Make the widget spin", repo: "acme-co/widgets", updatedAt: "2026-01-02T03:04:05Z",
     body: "## TL;DR\nSpins the widget.", draft: false, branch: "dev-one/spin", sha: "aaaa",
     reviewDecision: "REVIEW_REQUIRED", mergeable: "MERGEABLE", mergeState: "BLOCKED", checks: "SUCCESS", approvedBy: ["rev-a"], required: 2,
+    author: "dev-one",
+    // people's reviews with the commit each was on: bots (CodeRabbit's bare login too) left out; teams never asked
+    reviews: [
+      { login: "rev-a", state: "APPROVED", sha: "aaaa" },
+      { login: "rev-a", state: "COMMENTED", sha: "aaaa" },
+      { login: "rev-b", state: "APPROVED", sha: "aaaa" },
+      { login: "rev-b", state: "CHANGES_REQUESTED", sha: "aaaa" },
+    ],
+    requested: ["rev-c"],
   });
   assert.equal(needsReview(pr), true, "1 of 2 approvals, CI passing: still needs review");
   assert.equal(needsReview(rawPr(hits[0]!, parsePrView({ ...VIEW, statusCheckRollup: [run("FAILURE")] }), 2)), false, "failing CI leaves Needs review");

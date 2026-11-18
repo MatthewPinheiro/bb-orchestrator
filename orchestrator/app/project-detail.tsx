@@ -5,18 +5,20 @@
 // - Flow: the lead, the threads it started, each one's providers in order (handoffs) and its PRs;
 // - Dependencies: what waits on what, blockers first.
 // The history comes from the events log (core/history.ts); the lanes (live state, model, branch, context) from the
-// Projects tab's own reads.
+// Projects tab's own reads. 2026-11-17 (the shadcn pass): the switches are ToggleGroups, the chips Badges in the
+// palette's tones; the diagrams keep their own geometry.
 import { useCallback, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { experimental_useRpcQuery, useBbNavigate, useRealtime } from "@get-bb/plugin-sdk/app";
 import { CHANGED_CHANNEL, rpcContract, type ProjectHistory, type Projects } from "../contract.ts";
-import { EmptyState } from "./affect/empty-state-clean.tsx";
-import { SegmentedControl } from "./affect/segmented-control-clean.tsx";
+import { Badge } from "./ui/badge.tsx";
+import { Button } from "./ui/button.tsx";
+import { ToggleGroup, ToggleGroupItem } from "./ui/toggle-group.tsx";
 import { MonSprite } from "./mon.tsx";
 import { KIND_TONES, ROLE_TONES, css, roleOf, tint, type Tone } from "./palette.ts";
 import { ACCENT, accentTone, accentVars } from "./accent.ts";
 import { useWidth } from "./panes.tsx";
 import { ProofLink } from "./proof-link.tsx";
-import { Btn, Kind, ReadState } from "./ui.tsx";
+import { Btn, EmptyState, Kind, ReadState } from "./ui.tsx";
 import { age, type Lane } from "./lanes.ts";
 import { DEP_ROW, NARROW, placeDeps, rowName, rowsIn, scale, span, ticks, type Range, type Scale } from "./timeline.ts";
 import { providerWord } from "../core/history.ts";
@@ -70,17 +72,11 @@ function Timeline({ h, width, lanes }: { h: Hist; width: number; lanes: Map<stri
     <div data-timeline="" className="flex flex-col gap-2">
       {long ? (
         <div className="flex">
-          <SegmentedControl<Range>
-            size="sm"
-            aria-label="Range"
-            value={range}
-            onChange={setRange}
-            options={[
-              { value: "all", label: "All" },
-              { value: "week", label: "7 days" },
-              { value: "day", label: "24 h" },
-            ]}
-          />
+          <ToggleGroup type="single" variant="outline" size="sm" aria-label="Range" value={range} onValueChange={(v) => v && setRange(v as Range)}>
+            <ToggleGroupItem value="all">All</ToggleGroupItem>
+            <ToggleGroupItem value="week">7 days</ToggleGroupItem>
+            <ToggleGroupItem value="day">24 h</ToggleGroupItem>
+          </ToggleGroup>
         </div>
       ) : null}
       <svg width={width} height={height} role="img" aria-label={`Timeline of ${h.slug}`} className="block" style={{ overflow: "hidden" }}>
@@ -263,16 +259,12 @@ function Legend() {
 
 const prTone = (state: string): Tone => (state === "closed" ? KIND_TONES.inactive : PR);
 
+/** A flow chip: shadcn's Badge in a palette tone (its tint behind its word), solid for a merged PR. */
 function Chip({ tone, children, title, solid, ...p }: { tone: Tone; children: ReactNode; title?: string; solid?: boolean; [data: `data-${string}`]: string | undefined }) {
   return (
-    <span
-      {...p}
-      title={title}
-      className="inline-flex items-center gap-1 whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-medium"
-      style={solid ? { background: css(tone), color: "Canvas" } : { background: tint(tone), color: css(tone), boxShadow: `inset 0 0 0 1px color-mix(in srgb, ${css(tone)} 35%, transparent)` }}
-    >
+    <Badge variant="secondary" {...p} title={title} style={solid ? { background: css(tone), color: "Canvas" } : { background: tint(tone), color: css(tone) }}>
       {children}
-    </span>
+    </Badge>
   );
 }
 
@@ -292,12 +284,12 @@ function FlowNode({ r, lane, depth }: { r: Row; lane: Lane | undefined; depth: n
     <li data-flow={r.address} data-live={r.live ? "true" : "false"} className={r.live ? "" : "opacity-60"} style={{ position: "relative", paddingLeft: depth ? 18 : 0, paddingTop: 4, paddingBottom: 4 }}>
       {depth ? <span aria-hidden style={{ position: "absolute", left: 0, top: 15, width: 12, borderTop: "1.5px solid var(--orch-line)" }} /> : null}
       <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-        <button type="button" onClick={() => navigate.toThread(last.threadId)} title={`Open ${r.address}`} className="flex cursor-pointer items-center gap-1.5 border-0 bg-transparent p-0">
+        <Button variant="ghost" size="xs" onClick={() => navigate.toThread(last.threadId)} title={`Open ${r.address}`} className="h-7 gap-1.5 px-1">
           {lane ? <MonSprite mon={lane.agent.form ?? lane.agent.mon} address={r.address} size={24} /> : null}
           <span className="orch-mono font-medium" style={{ color: css(tone) }}>
             {rowName(r.address)}
           </span>
-        </button>
+        </Button>
         {r.holders.map((hd, i) => (
           <span key={hd.threadId} className="inline-flex items-center gap-1.5">
             {i > 0 ? (
@@ -515,7 +507,8 @@ export function ProjectDetail({ project, lanes, onBack, openCard, ownerName }: {
   const lead = project.lead;
   return (
     <div data-project-detail={project.slug} data-accent={project.monType ?? undefined} className="flex min-w-0 flex-col gap-3 pb-8" style={accentVars(project.monType)}>
-      <div className="flex min-w-0 flex-wrap items-center gap-2" style={accentTone(project.monType) ? { borderBottom: `2px solid ${ACCENT}`, paddingBottom: 6 } : undefined}>
+      {/* 2026-11-17: no accent bar under the head (the kept rule); the project's colour stays on its name */}
+      <div className="flex min-w-0 flex-wrap items-center gap-2">
         <Btn tone="ghost" data-detail-back="" onClick={onBack} aria-label="Back to Projects">
           ← Projects
         </Btn>
@@ -528,17 +521,14 @@ export function ProjectDetail({ project, lanes, onBack, openCard, ownerName }: {
       <StatusBar status={project.status} ownerName={ownerName} lanes={lanes} openCard={openCard} />
       <AllWaits waits={project.summary?.waits ?? []} now={now} cos={cosTitle} />
       <div className="flex">
-        <SegmentedControl<View>
-          size="sm"
-          aria-label="View"
-          value={view}
-          onChange={setView}
-          options={[
-            { value: "timeline", label: "Timeline" },
-            { value: "flow", label: "Flow" },
-            { value: "deps", label: "Dependencies", count: blocking || undefined },
-          ]}
-        />
+        <ToggleGroup type="single" variant="outline" size="sm" aria-label="View" value={view} onValueChange={(v) => v && setView(v as View)}>
+          <ToggleGroupItem value="timeline">Timeline</ToggleGroupItem>
+          <ToggleGroupItem value="flow">Flow</ToggleGroupItem>
+          <ToggleGroupItem value="deps">
+            Dependencies
+            {blocking ? <Badge variant="secondary" className="h-5 min-w-5 rounded-full px-1.5 tabular-nums">{blocking}</Badge> : null}
+          </ToggleGroupItem>
+        </ToggleGroup>
       </div>
       <div ref={box} data-detail-view={view} className="min-w-0">
         {!h ? (

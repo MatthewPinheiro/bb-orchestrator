@@ -46,8 +46,8 @@ export function Level({ a }: { a: Agent }) {
   return (
     <span data-level={a.level} className="inline-flex items-center gap-1 whitespace-nowrap text-xs" title={`${fmt(a.xp)} tokens · next level at ${fmt(a.xpNext)}`}>
       <span className="font-semibold">Lv {a.level}</span>
-      <span className="inline-block h-1.5 w-8 overflow-hidden rounded-full" style={{ background: "var(--orch-wash, rgba(127,127,127,.18))" }}>
-        <span className="block h-full rounded-full" style={{ width: `${pct}%`, background: "light-dark(#2563eb, #60a5fa)" }} />
+      <span className="inline-block h-1.5 w-8 overflow-hidden rounded-full" style={{ background: "var(--orch-line)" }}>
+        <span className="block h-full rounded-full" style={{ width: `${pct}%`, background: "var(--primary)" }} />
       </span>
     </span>
   );

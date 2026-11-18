@@ -23,18 +23,18 @@ import { ProjectsView } from "./app/projects.tsx";
 import type { SharedRefs } from "./app/ref-text.tsx";
 import { DeliverablesView, inReview, inScope } from "./app/deliverables.tsx";
 import { OpenPrsView } from "./app/open-prs.tsx";
+import { ReviewQueueView } from "./app/review-queue.tsx";
 import { ScopeView } from "./app/scope.tsx";
 import { scopeEntryOf } from "./app/kit.ts";
 import { pointerPressed } from "./app/store.ts";
-import { EmptyState } from "./app/affect/empty-state-clean.tsx";
 import { RENAMED_VIEWS, close, detailOf, findPane, panes, parse, pathFor, resize, setView, single, split, type Layout } from "./app/layout.ts";
 import { PaneLayout, paneCss, useWidth } from "./app/panes.tsx";
-import { Btn, Look, Muted, ReadState } from "./app/ui.tsx";
-import { AffectFit } from "./app/affect-fit.tsx";
+import { Btn, EmptyState, Look, Muted, ReadState } from "./app/ui.tsx";
 import { RowMeta, useRowData } from "./app/row-meta.tsx";
 import { decide, where, type TargetLike } from "./app/keys.ts";
 import { emitKeys, handlerFor, keyState } from "./app/key-state.ts";
 import { ShortcutUi } from "./app/shortcut-help.tsx";
+import { TooltipProvider } from "./app/ui/tooltip.tsx";
 import { PANEL_PATH } from "./app/open-proof.ts";
 import { shownTabs } from "./app/hidden-tabs.ts";
 
@@ -50,6 +50,9 @@ const VIEWS = [
   { id: "scope", subPath: "scope", label: "Scope" },
   // Requested 2026-11-16: the owner's open PRs, which need review, and the review ask to paste in Slack
   { id: "open-prs", subPath: "open-prs", label: "Open PRs" },
+  // 2026-11-18 (the owner's choice): the CodeRabbit review queue, from a contributor's public PR, as a tab of its own.
+  // Hideable like the others (hiddenTabs: "coderabbit").
+  { id: "coderabbit", subPath: "coderabbit", label: "CodeRabbit" },
   // Requested 2026-11-13: Cloud Switch moved in as a tab. Always listed (2026-11-16): without a cloud config it says what to
   // set up, instead of vanishing with no reason.
   { id: "cloud", subPath: "cloud", label: "Cloud" },
@@ -222,7 +225,8 @@ function OrchestratorPanel({ subPath }: PluginNavPanelProps) {
       const el = root.current;
       if (!el || !el.isConnected || el.getClientRects().length === 0) return;
       const active = document.activeElement;
-      if (active && active !== document.body && !el.contains(active)) return; // focus is elsewhere in bb
+      // focus is elsewhere in bb (the cheat sheet is a dialog drawn outside the panel: its keys are still ours)
+      if (active && active !== document.body && !el.contains(active) && !active.closest("[data-key-help]")) return;
       const a = decide(e, targetOf(e.target), keyState.help);
       if (!a) return;
       const ctx = keyCtx.current;
@@ -328,6 +332,8 @@ function OrchestratorPanel({ subPath }: PluginNavPanelProps) {
         return <ScopeView q={scope} projects={projects.data} deliverables={deliverables.data} refetchAll={refetchAll} mons={mons} accents={accents} focus={scopeFocus} />;
       case "open-prs":
         return <OpenPrsView />;
+      case "coderabbit":
+        return <ReviewQueueView />;
       case "board":
         return <BoardView q={board} refetchAll={refetchAll} />;
       case "rules":
@@ -353,9 +359,10 @@ function OrchestratorPanel({ subPath }: PluginNavPanelProps) {
 
   return (
     <IdentityContext.Provider value={config.data ?? DEFAULT_IDENTITY}>
+    {/* one provider for every shadcn Tooltip on the page (2026-11-17) */}
+    <TooltipProvider>
     <div ref={root} data-orch="" data-view={findPane(layout, layout.focus)?.view} onPointerDownCapture={pointerPressed} className="flex h-full min-h-0 flex-1 flex-col">
       <Look />
-      <AffectFit />
       <style href={styleHref("orch-panes", paneCss)} precedence="default">
         {paneCss}
       </style>
@@ -373,7 +380,7 @@ function OrchestratorPanel({ subPath }: PluginNavPanelProps) {
           compact={compact}
           render={render}
           fill={(v) => v === "chat" || v === "cloud" || v === "gameboy"}
-          wide={(v) => v === "projects" || v === "deliverables" || v === "open-prs" || v === "scope"}
+          wide={(v) => v === "projects" || v === "deliverables" || v === "open-prs" || v === "coderabbit" || v === "scope"}
           onView={(id, v) => {
             setLayout((l) => setView(l, id, v));
             follow(v);
@@ -394,6 +401,7 @@ function OrchestratorPanel({ subPath }: PluginNavPanelProps) {
         />
       </div>
     </div>
+    </TooltipProvider>
     </IdentityContext.Provider>
   );
 }

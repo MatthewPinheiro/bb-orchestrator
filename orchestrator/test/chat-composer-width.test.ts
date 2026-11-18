@@ -32,5 +32,5 @@ test("the Chat pane is where the Chief of Staff's ThreadChat is drawn, with its 
   assert.match(app, /case "chat":\s*return <CosChat /);
   assert.match(app, /<ThreadChat threadId=\{cos\.threadId\} variant=\{width >= 720 \? "full" : "compact"\}/);
   // no other source reaches into bb's composer
-  for (const f of ["app.tsx", "app/direct-line.tsx", "app/scope.tsx", "app/projects.tsx", "app/affect-fit.tsx"]) assert.deepEqual(composerRules(src(f)), [], f);
+  for (const f of ["app.tsx", "app/direct-line.tsx", "app/scope.tsx", "app/projects.tsx"]) assert.deepEqual(composerRules(src(f)), [], f);
 });

@@ -1,0 +1,4 @@
+{
+  "app/palette.ts": {"colour": 100},
+  "gameboy/core/page.ts": {"button": 2, "colour": 9}
+}

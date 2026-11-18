@@ -12,6 +12,7 @@ colleague).
 - [Deliverables: reviewing finished work](#deliverables-reviewing-finished-work)
 - [Projects: the command center](#projects-the-command-center)
 - [Open PRs](#open-prs)
+- [CodeRabbit review queue](#coderabbit-review-queue)
 - [Chat, Cloud and Game Boy](#chat-cloud-and-game-boy)
 - [Rules: standing answers](#rules-standing-answers)
 - [Activity](#activity)
@@ -229,25 +230,71 @@ has no live lead. The new lead publishes its status, and files a plan card befor
 ![Open PRs needing review](usage-images/open-prs.png)
 
 Open PRs lists the open PRs that your GitHub login (`githubLogin`) authored, read through the machine's own `gh` login.
-PRs in archived repos are left out, and a read lists at most 250, most recently updated first. It only reads: it never comments, reviews, labels or posts. Each row shows:
+PRs in archived repos are left out, and a read lists at most 250, most recently updated first. It only reads: it never comments, reviews, labels or posts.
+In a wide pane each PR is one row: its title, the PR link, its review state, CI, reviewers and age. In a narrow pane
+(side by side, or a phone) each PR is a card with the same facts under a title of up to two lines. Expanding a row or a
+card shows the rest:
 
-- the project and lead, when an orchestrator thread made the PR;
-- the review state, CI and mergeability;
-- a short summary taken from the PR's description (its TL;DR, else its first paragraph).
+- a short summary taken from the PR's description (its TL;DR, else its first paragraph);
+- the review with its approvals, and mergeability;
+- the project and lead, when an orchestrator thread made the PR.
 
 **Needs review** shows the PRs that are ready (not drafts), not fully approved, and not failing CI. **All** shows every
-PR in the list. Under the list, **Review ask** previews one message for every PR that needs review, with suggested
-reviewers, and **Copy** copies it.
+PR in the list.
+
+**First review**, **Re-review** and **Approved on head** split the PRs by who has reviewed them. Only people count:
+bots (CodeRabbit included) and the PR's author never do, and a comment after an approval doesn't take it back.
+- First review: no person has reviewed it yet. Its ask names the requested reviewers, else up to three suggested ones.
+- Re-review: someone's latest review is on an older commit. Its ask names those reviewers under "Reviewers to re-ask".
+- Approved on head: a person approved the current commit.
+
+On Needs review, First review and Re-review, the review ask and Post use that filter's PRs. After a copy or a post
+succeeds, **Since your last copy** lists what changed in that filter's PRs: new ones, new commits, review, CI or title
+changes, and PRs merged or closed (only when GitHub says so). The ticked box puts that list above the copied text,
+and nothing is added when nothing changed. A failed copy or post never resets it. Post's confirm says who gets pinged.
 
 ![The Post to code reviews preview](usage-images/open-prs-post.png)
 
-**Post to code reviews** shows the exact text with a tick per PR. PRs from `reviewExcludedProjects` start unticked.
-The button copies the text and opens your review channel (`reviewChannel`) in Slack. **Post never sends anything by
-itself**: you paste and send the message yourself. The plugin has no Slack token.
+**Post to code reviews…** opens a dialog over the list, so the list never moves. It holds the selected filter's PRs with
+a tick each, Since your last copy, the message as Slack shows it, who it pings, and **Copy**. PRs from
+`reviewExcludedProjects` start unticked, and Copy copies only the ticked PRs.
+Without a Slack token (`slackToken` empty, the default), Post copies the text and opens your review channel
+(`reviewChannel`) in Slack, and you paste and send it yourself. With a token, Post asks you to confirm, then sends the
+previewed message to `reviewChannel` once, with its mentions checked against Slack first. **Nothing is sent before you
+confirm.** The token stays on the server and never reaches the page.
 
 Suggested reviewers come from the code owners of the changed files, then from people who reviewed the same folders
 recently. A reviewer is tagged `@handle` only when `slackHandleMap` maps their GitHub login to it. Everyone else is
 shown by their GitHub login, never guessed.
+
+## CodeRabbit review queue
+
+The **CodeRabbit** tab asks CodeRabbit for one review at a time, by posting `@coderabbitai review` on the next PR in
+line. It reads GitHub through a connected machine's own `gh` login. Hide the tab with `hiddenTabs: coderabbit`.
+
+- **Queue:** add a PR by its URL. Reorder by dragging a row or with the ↑ ↓ buttons. **Pin next** makes a PR go first.
+  Each row shows its required checks, unresolved threads, approvals on the current head, the head against CodeRabbit's
+  last review, and why the PR is or isn't next. Removing a PR keeps its request history.
+- **Order:** a pinned PR, then one human approval on the head, then a ready PR with no approvals, then the rest. Queue
+  order breaks ties.
+- **Model picker (optional, off by default):** under **Queue settings**, choose a picker provider, a model and the bb
+  project its thread belongs to, then **Save picker**. When two or more PRs are eligible and none is pinned, a short bb
+  thread ranks them from numbers only (approvals, CI, open threads), never their titles or links. It runs in a personal
+  folder on the GitHub machine, not a worktree, and is archived once it answers. bb has no read-only permission mode,
+  so it is told not to use its tools. If it fails, times out, or picks a PR that is no longer eligible, the order above
+  is used. Scheduled runs and dry runs use the model; a live **Run now** posts the PR its confirm names, which is picked
+  by the order above.
+  **Picked by** in the status says which it was.
+- **Never twice:** a PR whose head CodeRabbit already reviewed, a draft, a closed PR or one asked in the last 3 hours is
+  skipped. Requests are at least 60 minutes apart, and a request with no clear answer holds its PR for 3 hours.
+- **Schedule** (off by default) runs the queue every 65 minutes, or the interval you choose. **Auto** (off by default)
+  adds your own PRs with passing required checks when nothing queued is eligible.
+- **Dry-run is on by default** (`reviewQueueDryRun`): the queue checks and picks a PR, shows what it would have posted,
+  and posts nothing. Turning it off is your own decision, made in the plugin settings, not on the page; keep it on while
+  another CodeRabbit scheduler runs. With dry-run off, **Run now** first shows the PR and the exact comment, and posts
+  only when you confirm.
+
+Agents can read the queue but can't change it: every change is yours, from the page.
 
 ## Chat, Cloud and Game Boy
 

@@ -3,15 +3,20 @@
 // target inside bb (openInBb): a file in bb's file preview pane, a URL through bb's link handling, a deliverable on the
 // Deliverables tab. The pin's ⋯: Open, Copy path, Unpin. "+" (or "Pin a document…" in the project's ⋯) opens a paste
 // field. The plugin never serves a pinned page itself.
+// 2026-11-17 (the shadcn pass): each pin an outline box with a ghost Button that opens it and app/ui's DropdownMenu; the
+// paste field an Input; the rest Buttons.
 import { useState, type FormEvent } from "react";
 import type { z } from "zod";
 import { useBbNavigate } from "@get-bb/plugin-sdk/app";
 import { WRITES, type ProjectBook, type pinBody, type unpinBody } from "../contract.ts";
-import { DropdownMenu } from "./affect/dropdown-menu-clean.tsx";
+import { Copy, Ellipsis, PanelRight, PinOff, Plus } from "lucide-react";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "./ui/dropdown-menu.tsx";
+import { Button } from "./ui/button.tsx";
+import { Input } from "./ui/input.tsx";
 import { openInBb, type Openable } from "./open-proof.ts";
 import { panel } from "./refs.ts";
 import { write } from "./store.ts";
-import { PageError } from "./ui.tsx";
+import { Btn, PageError } from "./ui.tsx";
 import { Icon } from "./kit-ui.tsx";
 import { PINS_SHOWN, pinWhen } from "./kit.ts";
 
@@ -20,21 +25,12 @@ export type PinView = NonNullable<ProjectBook["pins"]>[number];
 export const pinsCss = /* css */ `
 [data-orch] .k-pins { display: flex; align-items: stretch; gap: 8px; min-width: 0; }
 [data-orch] .k-pins-h { display: inline-flex; align-items: center; gap: 4px; flex: none; width: 64px; font-size: 12px; line-height: 16px; font-weight: 600; color: var(--orch-muted); }
-[data-orch] .k-pin { display: grid; grid-template-columns: minmax(0, 1fr) 24px; align-items: center; flex: 0 1 232px; min-width: 0; height: 48px; padding: 0 4px 0 0; border: 1px solid var(--k-border); border-radius: 8px; }
-[data-orch] .k-pin:hover { background: var(--k-wash); }
-[data-orch] .k-pin .k-pin-open { display: grid; grid-template-columns: 16px minmax(0, 1fr); column-gap: 8px; align-items: center; height: 100%; padding: 0 0 0 12px; min-width: 0; text-align: start; cursor: pointer; }
-[data-orch] .k-pin .k-pk { color: var(--orch-muted); display: inline-flex; }
+[data-orch] .k-pin { display: grid; grid-template-columns: minmax(0, 1fr) 32px; align-items: center; flex: 0 1 232px; min-width: 0; height: 48px; padding: 0 4px 0 0; }
 [data-orch] .k-pin .k-pt { min-width: 0; display: flex; flex-direction: column; }
-[data-orch] .k-pin .k-pt b { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-[data-orch] .k-pin .k-pt span { font-size: 12px; line-height: 16px; color: var(--orch-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-[data-orch] .k-pin[data-missing="true"] .k-pt span { color: var(--k-warn); }
+[data-orch] .k-pin[data-missing="true"] .k-pt span { color: var(--warning-text); }
 [data-orch] .k-pins .k-rest { display: inline-flex; align-items: center; gap: 4px; flex: none; }
 [data-orch] .k-pins.all { flex-wrap: wrap; }
 [data-orch] .k-pins.all .k-pin { flex-basis: 232px; }
-[data-orch] .k-pinform { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 12px; border: 1px solid var(--k-border); border-radius: 8px; }
-[data-orch] .k-pinform input { flex: 1 1 320px; min-width: 0; height: 32px; padding: 0 8px; border: 1px solid var(--k-border); border-radius: 4px; background: transparent; color: var(--orch-ink); font: inherit; }
-[data-orch] .k-pinform input:focus { outline: 2px solid var(--orch-ink); outline-offset: 0; }
-[data-orch] .k-pinform .k-note { flex-basis: 100%; font-size: 12px; line-height: 16px; color: var(--orch-muted); }
 /* under 1400 px the detail column is narrow (about 736 px at 1280): two cards per row, never four squeezed ones */
 @container orchcc (max-width: 1399.98px) {
   [data-orch] .k-pins { display: grid; grid-template-columns: 64px minmax(0, 1fr) minmax(0, 1fr); align-items: stretch; }
@@ -69,30 +65,35 @@ function PinCard({ p, slug, now, refetch, busy }: { p: PinView; slug: string; no
   };
   const where = p.path ?? p.url ?? p.deliverable ?? "";
   return (
-    <div className="k-pin" data-pin={p.id} data-pin-kind={p.kind} data-missing={p.missing ? "true" : "false"}>
-      <button type="button" className="k-pin-open" data-open-in-bb="" data-pin-open={p.id} title={where} onClick={open}>
-        <span className="k-pk">
+    <div className="k-pin rounded-lg border bg-card hover:bg-accent/50" data-pin={p.id} data-pin-kind={p.kind} data-missing={p.missing ? "true" : "false"}>
+      <Button variant="ghost" className="h-full min-w-0 justify-start gap-2 rounded-lg py-0 pr-0 pl-3 text-left font-normal hover:bg-transparent" data-open-in-bb="" data-pin-open={p.id} title={where} onClick={open}>
+        <span className="inline-flex shrink-0 text-muted-foreground">
           <Icon name={p.icon} label={KIND_WORD[p.icon]} />
         </span>
         <span className="k-pt">
-          <b>{p.title}</b>
-          <span>{failed ? "couldn't open it here" : pinWhen(p, now)}</span>
+          <span className="truncate text-sm font-semibold">{p.title}</span>
+          <span className="truncate text-xs text-muted-foreground">{failed ? "couldn't open it here" : pinWhen(p, now)}</span>
         </span>
-      </button>
-      <DropdownMenu
-        align="end"
-        title={p.title}
-        items={[
-          { label: "Open", icon: <Icon name="open" />, data: { "data-pin-menu-open": p.id }, onSelect: open },
-          { label: p.kind === "link" ? "Copy link" : p.kind === "deliverable" ? "Copy id" : "Copy path", icon: <Icon name="copy" />, data: { "data-pin-copy": p.id }, onSelect: () => void navigator.clipboard?.writeText(where).catch(() => {}) },
-          { label: `Unpin from ${slug}`, icon: <Icon name="unpin" />, disabled: busy, data: { "data-unpin": p.id }, onSelect: unpin },
-        ]}
-        trigger={({ triggerProps }) => (
-          <button type="button" className="k-btn icon" data-pin-more={p.id} aria-label={`More for ${p.title}`} {...triggerProps}>
-            <Icon name="more" />
-          </button>
-        )}
-      />
+      </Button>
+      <DropdownMenu modal={false}>
+        <DropdownMenuTrigger asChild>
+          <Btn tone="ghost" size="sm" icon={<Ellipsis aria-hidden />} data-pin-more={p.id} aria-label={`More for ${p.title}`} />
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" aria-label={p.title}>
+          <DropdownMenuItem data-pin-menu-open={p.id} onSelect={open}>
+            <PanelRight aria-hidden />
+            Open
+          </DropdownMenuItem>
+          <DropdownMenuItem data-pin-copy={p.id} onSelect={() => void navigator.clipboard?.writeText(where).catch(() => {})}>
+            <Copy aria-hidden />
+            {p.kind === "link" ? "Copy link" : p.kind === "deliverable" ? "Copy id" : "Copy path"}
+          </DropdownMenuItem>
+          <DropdownMenuItem disabled={busy} data-unpin={p.id} onSelect={unpin}>
+            <PinOff aria-hidden />
+            {`Unpin from ${slug}`}
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
     </div>
   );
 }
@@ -112,8 +113,9 @@ export function PinForm({ slug, refetch, onClose, busy }: { slug: string; refetc
     }
   };
   return (
-    <form className="k-pinform" data-pin-form={slug} onSubmit={(e) => void submit(e)}>
-      <input
+    <form className="flex flex-wrap items-center gap-2 rounded-lg border px-3 py-2" data-pin-form={slug} onSubmit={(e) => void submit(e)}>
+      <Input
+        className="min-w-0 flex-[1_1_320px]"
         autoFocus
         value={target}
         onChange={(e) => setTarget(e.target.value)}
@@ -122,14 +124,14 @@ export function PinForm({ slug, refetch, onClose, busy }: { slug: string; refetc
         aria-label={`Pin a document to ${slug}`}
         data-pin-input={slug}
       />
-      <button type="submit" className="k-btn solid" data-pin-submit={slug} disabled={busy || !target.trim()}>
+      <Btn type="submit" tone="primary" data-pin-submit={slug} disabled={busy || !target.trim()}>
         <Icon name="pin" />
         Pin
-      </button>
-      <button type="button" className="k-btn" onClick={onClose}>
+      </Btn>
+      <Btn tone="ghost" onClick={onClose}>
         Cancel
-      </button>
-      <span className="k-note">A file in the project's folders, a link, or a deliverable.</span>
+      </Btn>
+      <span className="basis-full text-xs text-muted-foreground">A file in the project's folders, a link, or a deliverable.</span>
     </form>
   );
 }
@@ -152,17 +154,15 @@ export function PinStrip({ slug, pins, now, refetch, busy, adding, setAdding }: 
           ))}
           <span className="k-rest">
             {rest > 0 ? (
-              <button type="button" className="k-more" data-pins-more={rest} onClick={() => setAll(true)}>
+              <Btn tone="ghost" size="sm" className="text-muted-foreground" data-pins-more={rest} onClick={() => setAll(true)}>
                 +{rest} more
-              </button>
+              </Btn>
             ) : all && pins.length > PINS_SHOWN ? (
-              <button type="button" className="k-more" onClick={() => setAll(false)}>
+              <Btn tone="ghost" size="sm" className="text-muted-foreground" onClick={() => setAll(false)}>
                 fewer
-              </button>
+              </Btn>
             ) : null}
-            <button type="button" className="k-btn icon" data-pin-add={slug} aria-label="Pin a document" title="Pin a document" onClick={() => setAdding(true)}>
-              <Icon name="plus" />
-            </button>
+            <Btn tone="ghost" size="sm" icon={<Plus aria-hidden />} data-pin-add={slug} aria-label="Pin a document" title="Pin a document" onClick={() => setAdding(true)} />
           </span>
         </div>
       ) : null}

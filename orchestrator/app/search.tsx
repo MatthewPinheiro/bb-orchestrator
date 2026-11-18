@@ -1,11 +1,16 @@
 // Layout B's search (2026-11-16): one box beside the filters. It narrows the list to the projects with a hit and lists
 // the hits; three letters or more also ask the plugin for older answered cards. (The strip of Needs you, Blocked and
 // Changed since you looked that sat under it went on 2026-11-17, the owner: "just remove that row and just rely on the
-// filters at the top": the list already says what needs the owner and what is blocked.)
+// filters at the top": the list already says what needs the owner and what is blocked.) 2026-11-17: shadcn's Input and
+// Card; a hit's project name is a link Button.
 import { useEffect, useState, type ReactNode } from "react";
 import { experimental_useRpcQuery } from "@get-bb/plugin-sdk/app";
 import { rpcContract, type Projects } from "../contract.ts";
-import { ProjectRefs, RefText } from "./ref-text.tsx";
+import { Search } from "lucide-react";
+import { INLINE_LINK, ProjectRefs, RefText } from "./ref-text.tsx";
+import { Button } from "./ui/button.tsx";
+import { Card } from "./ui/card.tsx";
+import { Input } from "./ui/input.tsx";
 import { age } from "./lanes.ts";
 import { hitWord, type Hit } from "./source.ts";
 
@@ -14,10 +19,7 @@ type Project = Projects[number];
 export const searchCss = /* css */ `
 [data-orch] .orch-cc .top { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px 16px; margin-bottom: 16px; }
 [data-orch] .orch-cc .top .filters { margin: 0; }
-[data-orch] .orch-cc .search { flex: 0 1 480px; min-width: 0; display: flex; align-items: center; gap: 8px; padding: 4px 12px; border-radius: 8px; background: var(--orch-wash); }
-[data-orch] .orch-cc .search input { flex: 1 1 auto; min-width: 0; font: inherit; color: inherit; background: none; border: 0; outline: none; padding: 0; }
-[data-orch] .orch-cc .search input::placeholder { color: var(--orch-muted); }
-[data-orch] .orch-cc .hits { background: var(--orch-wash); border-radius: 8px; padding: 12px 16px; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+[data-orch] .orch-cc .search { flex: 0 1 480px; min-width: 0; }
 [data-orch] .orch-cc .hits { margin-bottom: 16px; }
 [data-orch] .orch-cc .hits-h { margin: 0 0 4px; font-size: 12px; line-height: 16px; font-weight: 600; color: var(--orch-muted); }
 [data-orch] .orch-cc .hits .empty { color: var(--orch-muted); padding-left: 16px; }
@@ -32,9 +34,9 @@ function Line({ p, onOpen, children, tail, data, title }: { p: Project | undefin
     <ProjectRefs.Provider value={{ project: p.slug, prs: p.prs ?? [] }}>
       <div className="ln" data-hit-line={data} data-hit-project={p.slug}>
         <span className="tx fit" title={`${p.slug}: ${title}`}>
-          <button type="button" className="slug" data-open-project-row={p.slug} onClick={() => onOpen(p.slug)}>
+          <Button variant="link" className={`slug ${INLINE_LINK}`} data-open-project-row={p.slug} onClick={() => onOpen(p.slug)}>
             {p.slug}
-          </button>
+          </Button>
           <span className="rest">{children}</span>
         </span>
         <span className="tail">{tail}</span>
@@ -47,11 +49,9 @@ function Line({ p, onOpen, children, tail, data, title }: { p: Project | undefin
  * it with the words kept, as every text box on the page does (keys.ts); the box's own × clears it. */
 export function SearchBox({ value, onChange }: { value: string; onChange: (q: string) => void }) {
   return (
-    <label className="search" data-search="">
-      <span aria-hidden className="muted">
-        ⌕
-      </span>
-      <input type="search" value={value} placeholder="PR number, ticket id or words" aria-label="Search the projects" data-search-input="" onChange={(e) => onChange(e.target.value)} />
+    <label className="search relative block" data-search="">
+      <Search aria-hidden className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
+      <Input type="search" className="pl-9" value={value} placeholder="PR number, ticket id or words" aria-label="Search the projects" data-search-input="" onChange={(e) => onChange(e.target.value)} />
     </label>
   );
 }
@@ -74,7 +74,7 @@ export function SearchHits({ q, hits, projects, now, onOpen }: { q: string; hits
   const by = new Map(projects.map((p) => [p.slug, p] as const));
   const cards = settled.length >= OLDER_MIN ? (older.data ?? []) : [];
   return (
-    <div className="hits" data-search-hits={hits.length} data-search-older={cards.length}>
+    <Card className="hits min-w-0 gap-1 px-4 py-3 shadow-none" data-search-hits={hits.length} data-search-older={cards.length}>
       <h3 className="hits-h">
         {hits.length} {hits.length === 1 ? "match" : "matches"} on the projects
         {settled.length >= OLDER_MIN ? ` · ${older.data ? older.data.length : "…"} older answered ${older.data?.length === 1 ? "card" : "cards"}` : ""}
@@ -94,6 +94,6 @@ export function SearchHits({ q, hits, projects, now, onOpen }: { q: string; hits
         </div>
       ))}
       {!hits.length && !cards.length ? <div className="empty">Nothing matches “{q.trim()}”{settled.length >= OLDER_MIN ? " (the newest 2000 answers searched)" : ""}</div> : null}
-    </div>
+    </Card>
   );
 }

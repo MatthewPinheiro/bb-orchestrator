@@ -1,18 +1,24 @@
 // The thread card (2026-11-17, proposal 3): one lead or thread, one unit, two lines. The title first (what it works on);
 // then its state chip (a wait on the owner is a chip that opens the card), its PR and its PR's chips, and one context
 // meter. Idle threads with nothing to merge recede; five show, then "all N". The order is kit.ts threadCards.
-// 1.16.0: the threads are rows in their section's card, split by the kit's hairline (a card in a card drew two edges);
-// the ⋯ is affectUI's icon button, and the picker its text field and buttons, with the same steps as before.
+// 1.16.0: the threads are rows in their section's card, split by a hairline (a card in a card drew two edges); the ⋯
+// and the picker keep the same steps.
+// 2026-11-17 (the shadcn pass): the ⋯ is app/ui's DropdownMenu, the picker a RadioGroup with an Input, the face and the
+// title ghost Buttons.
 import { useState, type MouseEvent } from "react";
 import type { z } from "zod";
 import { useBbNavigate } from "@get-bb/plugin-sdk/app";
 import { WRITES, type Projects, type projectModeBody, type scopeThreadBody, type unscopeThreadBody } from "../contract.ts";
-import { DropdownMenu } from "./affect/dropdown-menu-clean.tsx";
+import { Ellipsis } from "lucide-react";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "./ui/dropdown-menu.tsx";
+import { Button } from "./ui/button.tsx";
+import { Input } from "./ui/input.tsx";
+import { Label } from "./ui/label.tsx";
+import { RadioGroup, RadioGroupItem } from "./ui/radio-group.tsx";
 import { MonSprite } from "./mon.tsx";
 import { openInBb, plainClick } from "./open-proof.ts";
 import { pickableTasks, prChips, scopeActions, STATE_CHIP, taskNameFor, TASK_NAME_MAX, threadCards, ticketOf, titleOf, THREADS_SHOWN, type ScopeAction, type ThreadSpec } from "./kit.ts";
-import { Chip, ChipButton, CtxMeter, Icon } from "./kit-ui.tsx";
-import { TextField } from "./affect/text-field-clean.tsx";
+import { Chip, ChipButton, CtxMeter } from "./kit-ui.tsx";
 import type { Lane } from "./lanes.ts";
 import type { OpenCard } from "./projects.tsx";
 import { gate, write } from "./store.ts";
@@ -23,15 +29,14 @@ export const threadCss = /* css */ `
 [data-orch] .k-thread { display: grid; grid-template-columns: 28px minmax(0, 1fr); column-gap: 12px; row-gap: 4px; align-items: center; padding: 8px; min-width: 0; }
 [data-orch] .k-thread + .k-thread { border-top: 0.5px solid var(--orch-line); }
 [data-orch] .k-thread .k-face { grid-row: 1 / span 2; display: flex; align-items: center; justify-content: center; width: 28px; height: 28px; }
-[data-orch] .k-thread .k-face button { border: 0; background: none; padding: 0; display: flex; cursor: pointer; }
 [data-orch] .k-thread .k-l1 { display: flex; align-items: center; gap: 8px; min-width: 0; }
-[data-orch] .k-thread .k-title { flex: 1 1 auto; min-width: 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: start; cursor: pointer; min-height: 24px; }
+[data-orch] .k-thread .k-title { flex: 1 1 auto; justify-content: flex-start; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: start; }
 [data-orch] .k-thread .k-l2 { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 12px; line-height: 16px; color: var(--orch-muted); }
 [data-orch] .k-thread .k-who { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 [data-orch] .k-thread[data-rest="true"] .k-title { font-weight: 400; }
 [data-orch] .k-thread[data-rest="true"] .k-face { opacity: 0.6; }
 [data-orch] .k-prlink { display: inline-flex; align-items: center; gap: 4px; flex: none; text-decoration: none; color: inherit; }
-[data-orch] .k-prlink .k-n { font-size: 12px; line-height: 16px; font-weight: 600; color: var(--orch-ink); font-variant-numeric: tabular-nums; text-decoration: underline; text-decoration-color: var(--k-border); text-underline-offset: 4px; }
+[data-orch] .k-prlink .k-n { font-size: 12px; line-height: 16px; font-weight: 600; color: var(--orch-ink); font-variant-numeric: tabular-nums; text-decoration: underline; text-decoration-color: var(--border); text-underline-offset: 4px; }
 @container orchcc (max-width: 640px) {
   [data-orch] .k-thread .k-l1, [data-orch] .k-thread .k-l2 { flex-wrap: wrap; }
   [data-orch] .k-thread .k-who { flex-basis: 100%; }
@@ -41,9 +46,7 @@ export const threadCss = /* css */ `
    an open one), then Cancel and the kit's primary button */
 [data-orch] .k-pick { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 8px; padding: 8px 0 4px; }
 [data-orch] .k-pick .k-pick-h { color: var(--orch-muted); font-size: 12px; line-height: 16px; }
-[data-orch] .k-pick .k-pick-row { display: flex; align-items: center; gap: 8px; min-width: 0; min-height: 28px; cursor: pointer; }
-[data-orch] .k-pick .k-pick-row input[type="radio"] { flex: none; width: 16px; height: 16px; margin: 0; accent-color: var(--orch-ink); cursor: pointer; }
-[data-orch] .k-pick .k-pick-row .ui-tfc { flex: 1 1 auto; min-width: 0; }
+[data-orch] .k-pick .k-pick-row { display: flex; align-items: center; gap: 8px; min-width: 0; min-height: 32px; }
 [data-orch] .k-pick .k-pick-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 [data-orch] .k-pick .k-pick-by { flex: none; color: var(--orch-muted); font-size: 12px; line-height: 16px; }
 [data-orch] .k-pick .k-pick-acts { display: flex; justify-content: flex-end; gap: 8px; }
@@ -70,20 +73,24 @@ function ScopePicker({ a, title, ctl, onDone }: { a: Agent; title: string; ctl: 
   return (
     <div className="k-pick" role="dialog" aria-label={`Scope ${title}`} data-scope-picker={a.threadId} onKeyDown={(e) => (e.key === "Escape" ? onDone() : undefined)}>
       <div className="k-pick-h">Read-only from then on. Its questions go to the Scope tab, under the task.</div>
-      <label className="k-pick-row">
-        <input type="radio" name={group} checked={choice === "new"} onChange={() => setChoice("new")} data-scope-new="" />
-        <span>New task</span>
-        <TextField size="sm" value={name} maxLength={TASK_NAME_MAX} autoFocus aria-label="The new task's name" data-scope-name="" onChange={(e) => (setName(e.target.value), setChoice("new"))} />
-      </label>
-      {tasks.map((t) => (
-        <label key={t.id} className="k-pick-row">
-          <input type="radio" name={group} checked={choice === t.id} onChange={() => setChoice(t.id)} data-scope-task={t.id} />
-          <span className="k-pick-name" title={t.name}>
-            {t.name}
-          </span>
-          <span className="k-pick-by">{t.planner ? `planned by ${t.planner}` : "planned by the lead"}</span>
-        </label>
-      ))}
+      <RadioGroup value={choice} onValueChange={setChoice} aria-label="Which task" className="gap-1">
+        <div className="k-pick-row">
+          <RadioGroupItem value="new" id={`${group}-new`} data-scope-new="" />
+          <Label htmlFor={`${group}-new`} className="shrink-0 font-normal">
+            New task
+          </Label>
+          <Input className="h-8 min-w-0 flex-1" value={name} maxLength={TASK_NAME_MAX} autoFocus aria-label="The new task's name" data-scope-name="" onChange={(e) => (setName(e.target.value), setChoice("new"))} />
+        </div>
+        {tasks.map((t) => (
+          <div key={t.id} className="k-pick-row">
+            <RadioGroupItem value={t.id} id={`${group}-${t.id}`} data-scope-task={t.id} />
+            <Label htmlFor={`${group}-${t.id}`} className="k-pick-name block font-normal" title={t.name}>
+              {t.name}
+            </Label>
+            <span className="k-pick-by">{t.planner ? `planned by ${t.planner}` : "planned by the lead"}</span>
+          </div>
+        ))}
+      </RadioGroup>
       <div className="k-pick-acts">
         <Btn tone="ghost" data-scope-cancel="" onClick={onDone}>
           Cancel
@@ -111,14 +118,25 @@ function ScopeMenu({ a, title, ctl, onPick }: { a: Agent; title: string; ctl: Sc
     void write(WRITES.unscopeThread, body, { kind: "other", where, after: ctl.refetchAll });
   };
   return (
-    <DropdownMenu
-      align="end"
-      title={title}
-      items={acts.map((x) => ({ label: x.label, description: x.kind === "stop" ? `task ${JSON.stringify(x.task.name)} stays open` : undefined, disabled: ctl.busy, data: { "data-scope-action": x.kind }, onSelect: () => run(x) }))}
-      trigger={({ triggerProps }) => (
-        <Btn tone="ghost" size="sm" icon={<Icon name="more" />} data-thread-more={a.address} aria-label={`More for ${a.address}`} title="Scoping" disabled={ctl.busy} {...triggerProps} />
-      )}
-    />
+    <DropdownMenu modal={false}>
+      <DropdownMenuTrigger asChild>
+        <Btn tone="ghost" size="sm" icon={<Ellipsis aria-hidden />} data-thread-more={a.address} aria-label={`More for ${a.address}`} title="Scoping" disabled={ctl.busy} />
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" aria-label={title}>
+        {acts.map((x) => (
+          <DropdownMenuItem key={x.kind} disabled={ctl.busy} data-scope-action={x.kind} onSelect={() => run(x)}>
+            {x.kind === "stop" ? (
+              <span className="flex flex-col">
+                <span>{x.label}</span>
+                <span className="text-xs text-muted-foreground">task {JSON.stringify(x.task.name)} stays open</span>
+              </span>
+            ) : (
+              x.label
+            )}
+          </DropdownMenuItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 
@@ -170,14 +188,14 @@ function ThreadCard({ t, openCard, ctl }: { t: ThreadSpec; openCard: OpenCard; c
   return (
     <li className="k-thread" data-lane={a.address} data-lane-state={l.state} data-lane-wait={w?.on ?? ""} data-rest={rest ? "true" : "false"}>
       <span className="k-face">
-        <button type="button" data-open-thread={a.threadId} title={`Open ${a.address}`} onClick={open}>
+        <Button variant="ghost" size="icon-sm" className="size-8" data-open-thread={a.threadId} title={`Open ${a.address}`} onClick={open}>
           <MonSprite mon={mon} address={a.address} size={28} boost={false} />
-        </button>
+        </Button>
       </span>
       <div className="k-l1">
-        <button type="button" className="k-title" title={l.activity ?? a.address} onClick={open}>
+        <Button variant="ghost" size="xs" className="k-title h-6 px-1 text-sm font-semibold" title={l.activity ?? a.address} onClick={open}>
           {title}
-        </button>
+        </Button>
         {a.unread ? <i className="unread" role="img" aria-label="something new" data-lane-unread="" title="something new since you last looked" /> : null}
         {a.flags.includes("unplanned") ? <Chip spec={{ tone: "warn", icon: "wait", word: "unplanned" }} data-unplanned="" title="started outside the plan" /> : null}
         {w?.on === "owner" ? (

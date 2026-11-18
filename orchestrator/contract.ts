@@ -4,6 +4,8 @@ import { defineRpcContract } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { blockSchema, pointSchema } from "./blocks.ts";
 import { LIST_WAIT_KINDS, STEP_STATES, WAIT_KINDS } from "./core/status.ts";
+import { IMAGE_TYPES, MAX_IMAGE_BYTES, MAX_IMAGES } from "./core/direct-images.ts";
+export { IMAGE_TYPES, MAX_IMAGE_BYTES, MAX_IMAGES };
 
 export const PLUGIN_ID = "orchestrator";
 /** The owner's writes: POST JSON to `${WRITE_BASE}/<path>`. */
@@ -166,6 +168,7 @@ export const directMessageSchema = z.object({
   note: z.string().nullable(),
   answeredAt: z.number().nullable(),
   unread: z.boolean().optional(), // the lead's answer came after the owner last opened the thread
+  images: z.array(z.object({ name: z.string() })).optional(), // 2026-11-17: the screenshots it carried (text is without their line)
 });
 export const directLineSchema = z.object({ messages: z.array(directMessageSchema), unread: z.boolean() });
 export type DirectLine = z.infer<typeof directLineSchema>;
@@ -201,6 +204,17 @@ export type ProjectBook = z.infer<typeof projectBookSchema>;
 export const cardHitsSchema = z.array(z.object({ id: z.string(), project: z.string().nullable(), title: z.string(), answer: z.string(), at: z.number() }));
 export type CardHits = z.infer<typeof cardHitsSchema>;
 
+// The personas hook (personas.ts, 2026-11-18): an agent's persona, with the pokemon setting on and a pack loaded.
+export const personaSchema = z.object({
+  name: z.string(),
+  title: z.string(),
+  image: z.string(), // https, safe in a CSS url()
+  credit: z.string().nullable(),
+  team: z.array(z.string()), // names for a profile card only
+  partner: z.string().nullable(), // the CoS's and the Steward's own Pokémon (its form now); null for a lead
+});
+export type AgentPersona = z.infer<typeof personaSchema>;
+
 export const projectsSchema = z.array(
   z.object({
     slug: z.string(),
@@ -209,7 +223,7 @@ export const projectsSchema = z.array(
     archivedAt: z.number().nullable(),
     // scoping (1.11.0): the owner settles its scope with the lead in the Scope tab; optional for an older plugin process
     mode: z.enum(["scoping", "active"]).optional(),
-    lead: z.object({ address: z.string(), threadId: z.string(), status: z.string(), mon: z.string().nullable() }).nullable(),
+    lead: z.object({ address: z.string(), threadId: z.string(), status: z.string(), mon: z.string().nullable(), persona: personaSchema.nullish() }).nullable(),
     threads: z.number(),
     openPlans: z.number(), // plan cards not yet decided
     status: leadStatusSchema.nullable(), // the lead's latest orch_status (core/status.ts)
@@ -244,6 +258,8 @@ export const agentsSchema = z.array(
     provider: z.string().nullable(), // bb's provider id, when there is no model yet
     mon: z.string().nullable(), // the base Pokémon (what was picked)
     form: z.string().nullable(), // what it is now, after any evolution
+    formDex: z.number().nullish(), // its National Dex number (a pack's lines are unknown to the browser's mons.ts)
+    persona: personaSchema.nullish(), // a person instead of a Pokémon: the CoS, the Steward, a lead (personas.ts)
     level: z.number(), // from XP, uncapped
     xp: z.number(), // tokens processed by this address's turns
     xpThis: z.number(), // XP where this level started
@@ -315,12 +331,14 @@ export const outputsSchema = z.array(
     project: z.string().nullable(),
     author: z.string(), // the recording agent's address
     at: z.number(),
+    gone: z.boolean(), // a file output whose file no longer exists (2026-11-18: the Files view says "Missing")
   }),
 );
 export type Outputs = z.infer<typeof outputsSchema>;
 
 // Deliverables (docs/deliverables-plan.md): a lead's finished work with proof, for the owner to approve or send back. A proof
-// file is shown through the proof route (GET `${WRITE_BASE}${PROOF_ROUTE}?id=<proof id>`), or opened in bb's preview.
+// file is shown through the proof route (GET `${WRITE_BASE}${PROOF_ROUTE}?id=<proof id>`, or `?output=<output id>` for a
+// recorded output's file), or opened in bb's preview.
 export const PROOF_ROUTE = "/proof";
 export const proofSchema = z.object({
   id: z.string(),
@@ -330,6 +348,10 @@ export const proofSchema = z.object({
   url: z.string().nullable(),
   hostId: z.string().nullable(),
   pr: prSchema.nullable(), // a PR proof's live state, when pr-watch saw the same URL
+  // 2026-11-17: a file copied into its deliverable's folder: `path` is the copy, `source` the original
+  source: z.string().nullable().optional(),
+  stored: z.enum(["copied", "too_big", "missing", "failed"]).optional(),
+  bytes: z.number().optional(),
 });
 export const deliverablesSchema = z.array(
   z.object({
@@ -353,9 +375,20 @@ export const deliverablesSchema = z.array(
     // delivered while its project was scoping: reviewed in the Scope tab, not on Deliverables (1.11.0)
     scope: z.boolean().optional(),
     scopeTask: z.string().optional(), // the scoping task it is reviewed under (1.12.0)
+    folder: z.string().optional(), // its own folder of files and README.md (2026-11-17)
   }),
 );
 export type Deliverables = z.infer<typeof deliverablesSchema>;
+
+// Each deliverable's own folder (2026-11-17), listed for the Deliverables tab: its files by kind, proof copies and the
+// rest (a thread's notes and outputs), and its README. `hostId`: the bb host the folders are on, for bb's preview.
+export const folderFileSchema = z.object({ path: z.string(), name: z.string(), kind: z.enum(["images", "videos", "artifacts"]), bytes: z.number(), at: z.number(), dir: z.boolean() });
+export const deliverableFoldersSchema = z.object({
+  hostId: z.string().nullable(),
+  folders: z.record(z.string(), z.object({ folder: z.string(), readme: z.string().nullable(), files: z.array(folderFileSchema) })),
+});
+export type DeliverableFolders = z.infer<typeof deliverableFoldersSchema>;
+export type FolderFile = z.infer<typeof folderFileSchema>;
 
 // The Scope tab (1.11.0): each scoping project and the cards waiting on the owner there; badge: those cards. Its
 // deliverables come from the deliverables read (scope: true).
@@ -367,8 +400,22 @@ export const scopeSchema = z.object({
       slug: z.string(),
       cards: z.array(cardSchema),
       whole: z.boolean().optional(),
-      // planner (1.13.0): the task's live scoping thread (bb's title, the engine's status), none while the lead plans it
-      tasks: z.array(z.object({ id: z.string(), name: z.string(), openedAt: z.number(), planner: z.object({ address: z.string(), threadId: z.string(), title: z.string().nullable(), status: z.string() }).nullable().optional() })).optional(),
+      // planner (1.13.0): the task's live scoping thread (bb's title, the engine's status), none while the lead plans it.
+      // idleAt and report (2026-11-17): since when it is idle, and the title and time of its last orch_report, for the
+      // status card the entry shows while nothing waits; optional for an older plugin process
+      tasks: z
+        .array(
+          z.object({
+            id: z.string(),
+            name: z.string(),
+            openedAt: z.number(),
+            planner: z
+              .object({ address: z.string(), threadId: z.string(), title: z.string().nullable(), status: z.string(), idleAt: z.number().nullable().optional(), report: z.object({ text: z.string(), at: z.number() }).nullable().optional() })
+              .nullable()
+              .optional(),
+          }),
+        )
+        .optional(),
     }),
   ),
   badge: z.number(),
@@ -395,6 +442,7 @@ export const rpcContract = defineRpcContract({
   projectBook: { input: z.object({ slug: z.string().min(1).max(40), dayStart: z.number().optional() }).strict(), output: projectBookSchema },
   searchCards: { input: z.object({ q: z.string().max(80) }).strict(), output: cardHitsSchema },
   outputs: { input: z.null(), output: outputsSchema },
+  deliverableFolders: { input: z.null(), output: deliverableFoldersSchema },
   deliverables: { input: z.null(), output: deliverablesSchema },
   scope: { input: z.null(), output: scopeSchema },
   projectOrder: { input: z.null(), output: projectOrderSchema },
@@ -412,8 +460,17 @@ export const ruleRevokeBody = z.object({ id: z.string() }).strict();
 export const resendBody = z.object({ id: z.string() }).strict();
 export const priorityBody = z.object({ slug: z.string(), priority: z.enum(["urgent", "high", "normal", "low"]) }).strict();
 export const holdBody = z.object({ slug: z.string(), held: z.boolean() }).strict();
-// the owner's direct message to a project's lead (PLAN 3); followUp names an earlier one to the same lead
-export const directMessageBody = z.object({ slug: z.string(), text: z.string().min(1).max(4000), followUp: z.string().nullable().optional() }).strict();
+// the owner's direct message to a project's lead (PLAN 3); followUp names an earlier one to the same lead.
+// 2026-11-17: `images` are ids the image write returned for this lead (never paths: a page can't attach a file of its
+// choosing), at most MAX_IMAGES; a message with images may have no words.
+export const directMessageBody = z
+  .object({ slug: z.string(), text: z.string().max(4000), followUp: z.string().nullable().optional(), images: z.array(z.string().min(1).max(40)).max(MAX_IMAGES).optional() })
+  .strict()
+  .refine((b) => b.text.trim().length > 0 || (b.images?.length ?? 0) > 0, { message: "a message needs words or an image" });
+// one image per write, as base64 (bb's local routes take JSON only); the length cap is checked before anything decodes
+export const directImageBody = z
+  .object({ slug: z.string().min(1).max(40), name: z.string().min(1).max(200), mime: z.enum(IMAGE_TYPES), data: z.string().min(1).max(Math.ceil(MAX_IMAGE_BYTES / 3) * 4) })
+  .strict();
 // upTo: the newest answer the row showed; the seen cursor never passes it
 export const directSeenBody = z.object({ slug: z.string(), upTo: z.number() }).strict();
 export const archiveBody = z.object({ threadId: z.string() }).strict();
@@ -423,7 +480,13 @@ export const outputRemoveBody = z.object({ id: z.string() }).strict();
 export const pinBody = z.object({ slug: z.string().min(1).max(40), target: z.string().trim().min(1).max(4000), title: z.string().max(120).nullable().optional() }).strict();
 export const unpinBody = z.object({ id: z.string().min(1).max(40) }).strict();
 export const startLeadBody = z.object({ slug: z.string().min(1).max(40) }).strict();
-export const cosMessageBody = z.object({ text: z.string().trim().min(1).max(8000) }).strict();
+// 2026-11-17: with images the bar staged (cosImage), by id; then the words may be empty
+export const cosMessageBody = z
+  .object({ text: z.string().trim().max(8000), images: z.array(z.string().min(1).max(40)).max(MAX_IMAGES).optional() })
+  .strict()
+  .refine((b) => b.text.length > 0 || (b.images?.length ?? 0) > 0, { message: "a message needs words or an image" });
+// one image for the CoS bar's next send, as directImageBody without the project
+export const cosImageBody = directImageBody.omit({ slug: true });
 export const interactionAnswerBody = z
   .object({
     threadId: z.string(),
@@ -458,6 +521,8 @@ export const WRITES = {
   priority: "/projects/priority",
   hold: "/projects/hold",
   directMessage: "/projects/message",
+  directImage: "/projects/message/image",
+  cosImage: "/cos/message/image",
   directSeen: "/projects/message-seen",
   archive: "/archive",
   archiveProject: "/projects/archive",

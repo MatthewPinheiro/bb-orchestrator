@@ -244,6 +244,11 @@ export interface Proof {
   path: string | null;
   url: string | null;
   hostId: string | null;
+  /** 2026-11-17: a file copied into the deliverable's folder has the copy as `path` and its original here (provenance). */
+  source?: string | null;
+  /** What filing did with the file: copied, too big to copy (over COPY_MAX), already missing, or a failed copy (retried on start). */
+  stored?: "copied" | "too_big" | "missing" | "failed";
+  bytes?: number;
 }
 
 export type DeliverableState = "review" | "approved" | "changes" | "withdrawn";
@@ -267,6 +272,8 @@ export interface Deliverable {
   scope?: boolean;
   /** The scoping task it was delivered into (1.12.0). */
   scope_task?: string;
+  /** Its own folder of files (core/deliverable-files.ts, 2026-11-17): images/, videos/, artifacts/ and README.md. */
+  folder?: string;
 }
 
 /** A next action as it stands: the lead's item, open until they close it with an outcome and a note. */

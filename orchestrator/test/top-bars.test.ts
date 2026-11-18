@@ -43,9 +43,15 @@ test("every tab that can show a count keeps its slot, two digits wide", () => {
   const withCount = [...expr.matchAll(/v\.id === "([^"]+)"/g)].map((m) => m[1]);
   assert.ok(withCount.length >= 3, "the count expression is found");
   for (const id of withCount) assert.ok(counted.has(id), `${id} shows a count but is not in COUNTED: its count coming or going moves the tabs after it`);
-  // "2" → "10" keeps the width: the strip's counts are at least two digits wide
-  assert.match(src("app/panes.tsx"), /\[data-pane\] > header \.ui-segc \.ui-segc__count \{ min-width: calc\(2ch \+ 6px\); \}/);
+  // "2" → "10" keeps the width: the strip's count badge is at least two digits wide (shadcn's Badge since 2026-11-17)
+  const panes = src("app/panes.tsx");
+  assert.match(panes, TWO_DIGITS);
+  assert.doesNotMatch('<Badge variant="secondary" className="orch-tab-count h-4 px-1 tabular-nums" data-empty={text === "" || undefined}>', TWO_DIGITS, "a badge as wide as its digits");
+  // and a counted tab draws its slot even with no count
+  assert.match(panes, /\{v\.counted \|\| v\.count !== undefined \? <CountedLabel label=\{v\.label\} count=\{v\.count\} \/> : v\.label\}/);
 });
+/** The count's badge with a two-digit minimum width */
+const TWO_DIGITS = /<Badge\b[^>]*className="[^"]*\borch-tab-count\b[^"]*\bmin-w-\[calc\(2ch\+\d+px\)\]/;
 
 // 2026-11-17, the owner: "the tab name should be text centered". 1.11.0 kept the empty slot after the label, so a counted
 // tab with no count drew its label at the left of its box beside a blank gap. The box stays as wide (the slot's room is
@@ -67,20 +73,19 @@ test("a counted tab with no count centres its label in a box as wide as with one
 // stretched across the row would make every tab as wide as a tenth of a wide pane.
 test("every tab in the strip has one width, the widest tab's, and the strip keeps its natural width", () => {
   const panes = src("app/panes.tsx");
-  const strip = /<SegmentedControl\b[\s\S]*?\/>/;
+  // 2026-11-17: shadcn's Tabs. The list is a grid of equal columns (auto-cols-fr) at its own max-content width (w-max): a
+  // grid sized to max-content gives every 1fr column the widest tab's max-content width, so all tabs are as wide as the
+  // widest, with no measuring script. The Tabs root around it is the strip's sideways scroller.
+  const strip = /<Tabs\b[\s\S]*?<TabsList\b[^>]*>/;
   const control = panes.match(strip)?.[0] ?? "";
-  assert.ok(control, "the strip's control is found");
-  assert.match(control, /\bfullWidth\b/, "the control's equal mode");
-  // the line that drew a ragged strip
-  assert.doesNotMatch('<SegmentedControl\n            kind="tabs"\n            variant="tray"\n            size="sm"\n            value={pane.view}\n          />'.match(strip)![0], /\bfullWidth\b/);
-  // the equal mode: columns of minmax(the widest tab, 1fr) in a max-content track, so each is the widest tab's width
-  const seg = src("app/affect/segmented-control-clean.tsx");
-  assert.match(seg, /\.ui-segc\[data-full\] \.ui-segc__track \{ display: grid; grid-auto-flow: column; grid-auto-columns: minmax\(var\(--ui-segc-min\), 1fr\); \}/);
-  assert.match(seg, /setProperty\("--ui-segc-min", `\$\{Math\.max\(\.\.\.widths\)\}px`\)/);
-  assert.match(seg, /\.ui-segc__track \{[^}]*width: max-content;/);
-  // its own "display: flex; width: 100%" would stretch the strip and every tab across the row: the pane keeps it natural
-  assert.match(seg, /\.ui-segc\[data-full\] \{ display: flex; width: 100%; \}/);
-  assert.match(panes, /\[data-orch\] \[data-pane\] > header \.ui-segc\[data-full\] \{ display: inline-flex; width: auto; \}/);
+  assert.ok(control, "the strip's Tabs is found");
+  assert.match(control, EQUAL, "the list's equal columns at its natural width");
+  assert.match(control, /^<Tabs\b[^\n]*\bclassName="[^"]*\boverflow-x-auto\b/, "too narrow for every tab, the strip scrolls sideways (none cut short)");
+  // the lines that drew a ragged strip (shadcn's own list: each tab its own width) and a stretched one (a tenth of a wide pane each)
+  assert.doesNotMatch("<TabsList>", EQUAL);
+  assert.doesNotMatch('<TabsList className="grid w-full auto-cols-fr grid-flow-col">', EQUAL);
   // labels centred in the wider box
-  assert.match(seg, /\.ui-segc__opt \{[^}]*justify-content: center;/);
+  assert.match(src("app/ui/tabs.tsx"), /function TabsTrigger[\s\S]*?"relative inline-flex [^"]*\bjustify-center\b/);
 });
+/** A grid of equal columns, flowing sideways, at its natural width */
+const EQUAL = /<TabsList className="(?=[^"]*\bgrid\b)(?=[^"]*\bw-max\b)(?=[^"]*\bauto-cols-fr\b)(?=[^"]*\bgrid-flow-col\b)[^"]*">/;

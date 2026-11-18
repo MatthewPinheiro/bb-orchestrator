@@ -1,14 +1,24 @@
-// The answer parts of a Needs you card, in affectUI's clean style (2026-11-13: "make this look more affectui
-// like"; "other should just be an open text box and command enter should send it"). Short answers are the decision
-// inbox's chips, the recommended one the dark chip. Answers that explain themselves are affectUI Card tiles: the
-// answer, a quiet line under it, a Recommended badge. Context waits behind a quiet "More", instead of a box with its own
-// scrollbar. "Other" is a text box that is always open; ⌘/Ctrl+Enter in it sends.
+// The answer parts of a Needs you card, on shadcn/ui (app/ui, 2026-11-17; before that affectUI's decision inbox).
+// Short answers are buttons in a row, the recommended one the primary button. Answers that explain themselves are tiles:
+// one outline button per answer, its words, a quiet line under them and a Recommended badge. Context waits behind a
+// quiet "More". "Other" is a text box that is always open; ⌘/Ctrl+Enter in it sends (2026-11-13).
+//
+// The double-tap guard (2026-11-17): every answer is the shared Btn, whose disabled state still takes the pointer, and no
+// state changes an answer's size. A primary and an outline button both carry a 1px border, a tile keeps its badge row
+// while any answer is recommended, its Picked badge always laid out, and the Other box is a fixed height, so pressing, arming or picking moves nothing.
 import { useState, type ReactNode } from "react";
+import { ChevronRight } from "lucide-react";
 import { Markdown } from "@get-bb/plugin-sdk/app";
-import { Badge } from "./affect/badge-clean.tsx";
-import { Card, CardHeader } from "./affect/card-clean.tsx";
-import { TextArea } from "./affect/text-area-clean.tsx";
-import { cx } from "./ui.tsx";
+import { Badge } from "./ui/badge.tsx";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "./ui/collapsible.tsx";
+import { Textarea } from "./ui/textarea.tsx";
+import { cn } from "./ui/utils.ts";
+import { Btn } from "./ui.tsx";
+import { pickedClass, reservesBadgeRow } from "./option-tiles.ts";
+
+/** A card's quiet line under its title, and the fixed slot on its right where the time and the mark take turns. */
+export const META = "m-0 mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xs text-muted-foreground [overflow-wrap:anywhere]";
+export const WHEN = "w-28 flex-none text-right text-xs leading-5 whitespace-nowrap text-muted-foreground";
 
 export type Opt = {
   key: string;
@@ -22,51 +32,53 @@ export type Opt = {
   onPick: () => void;
 };
 
-/** Tiles when any answer explains itself or is long; chips otherwise. Recommended first. */
+/** Tiles when any answer explains itself or is long; buttons otherwise. Recommended first. */
 export function Options({ options, disabled, label = "Options" }: { options: Opt[]; disabled: boolean; label?: string }) {
   const sorted = [...options].sort((a, b) => Number(Boolean(b.recommended)) - Number(Boolean(a.recommended)));
   const tiles = sorted.some((o) => (o.detail && o.detail.trim() !== "") || o.label.length > 32);
   if (!tiles) {
     return (
-      <div role="group" aria-label={label} className="ui-dic__actions">
-        {sorted.map((o) => (
-          <button
-            key={o.key}
-            type="button"
-            className={cx("ui-dic__btn", (o.pressed ?? o.recommended) && "ui-dic__btn--primary")}
-            aria-pressed={o.pressed}
-            disabled={disabled}
-            onClick={o.onPick}
-            {...o.data}
-          >
-            {o.label}
-          </button>
-        ))}
+      <div role="group" aria-label={label} className="mt-3 flex flex-wrap gap-2">
+        {sorted.map((o) => {
+          const primary = o.pressed ?? o.recommended;
+          return (
+            <Btn key={o.key} tone={primary ? "primary" : "outline"} className={cn("border", primary && "border-transparent")} aria-pressed={o.pressed} disabled={disabled} onClick={o.onPick} {...o.data}>
+              {o.label}
+            </Btn>
+          );
+        })}
       </div>
     );
   }
+  // Recommended has a row under the words, kept on every tile while any tile has it, so tiles stay equal; none when no tile has one
+  const badges = reservesBadgeRow(sorted);
   return (
-    <div role="group" aria-label={label} className="orch-tiles" data-tiles="">
+    <div role="group" aria-label={label} className="mt-3 grid grid-cols-[repeat(auto-fill,minmax(min(100%,220px),1fr))] gap-2" data-tiles="">
       {sorted.map((o) => (
-        <Card key={o.key} interactive={!disabled} selected={o.pressed} className="orch-tile" data-disabled={disabled || undefined}>
-          <CardHeader
-            titleAs="p"
-            title={
-              <button type="button" aria-pressed={o.pressed} disabled={disabled} onClick={o.onPick} {...o.data}>
-                {o.label}
-              </button>
-            }
-            description={o.detail || undefined}
-          >
-            {/* under the text, so a narrow tile never squeezes its title beside the badge */}
-            {o.recommended || o.pressed ? (
-              <span className="orch-tile__badges">
-                {o.recommended ? <Badge tone="info">Recommended</Badge> : null}
-                {o.pressed ? <Badge tone="neutral">Picked</Badge> : null}
-              </span>
+        <Btn
+          key={o.key}
+          tone="outline"
+          className={cn("h-auto w-full flex-col items-start justify-start gap-1 p-3 text-start whitespace-normal", o.pressed && "border-primary bg-accent [&:is(.dark_*)]:border-primary [&:is(.dark_*)]:bg-accent")}
+          aria-pressed={o.pressed}
+          disabled={disabled}
+          onClick={o.onPick}
+          {...o.data}
+        >
+          {/* Picked is in the title row, always laid out and only shown by a pick, so a pick moves nothing */}
+          <span className="flex w-full items-start justify-between gap-2" data-tile-title="">
+            <span className="text-sm font-medium [overflow-wrap:anywhere]">{o.label}</span>
+            {o.pressed !== undefined ? (
+              <Badge variant="outline" className={pickedClass(o.pressed)}>
+                Picked
+              </Badge>
             ) : null}
-          </CardHeader>
-        </Card>
+          </span>
+          {o.detail ? <span className="text-xs font-normal text-muted-foreground [overflow-wrap:anywhere]">{o.detail}</span> : null}
+          {badges ? (
+            // under the words, so a narrow tile never squeezes its title beside the badge
+            <span className="mt-1 flex h-5 gap-1.5">{o.recommended ? <Badge variant="secondary">Recommended</Badge> : null}</span>
+          ) : null}
+        </Btn>
       ))}
     </div>
   );
@@ -76,15 +88,13 @@ export function Options({ options, disabled, label = "Options" }: { options: Opt
 export function Details({ markdown, children }: { markdown: string; children?: ReactNode }) {
   const [open, setOpen] = useState(false);
   return (
-    <div className="orch-details" data-context="" data-open={open ? "" : undefined}>
-      <button type="button" className="orch-details__toggle" data-more="" aria-expanded={open} onClick={() => setOpen((o) => !o)}>
-        <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true" data-open={open || undefined}>
-          <path d="m6 4 4 4-4 4" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-        </svg>
+    <div className="mt-2" data-context="" data-open={open ? "" : undefined}>
+      <Btn tone="ghost" size="sm" className="-ml-2 h-7 gap-1 px-2 text-xs text-muted-foreground" data-more="" aria-expanded={open} onClick={() => setOpen((o) => !o)}>
+        <ChevronRight className={cn("size-3.5 transition-transform", open && "rotate-90")} aria-hidden />
         {open ? "Less" : "More"}
-      </button>
+      </Btn>
       {open ? (
-        <div className="orch-md">
+        <div className="orch-md mt-1 text-sm text-foreground [overflow-wrap:anywhere]">
           {markdown ? <Markdown content={markdown} /> : null}
           {children}
         </div>
@@ -93,11 +103,32 @@ export function Details({ markdown, children }: { markdown: string; children?: R
   );
 }
 
+/**
+ * A closed fold (shadcn's Collapsible) for a deliverable's Details, History and outputs. Its content stays in the page
+ * while closed, only hidden, so its order is the same open or closed (the less-text rules read it there).
+ */
+export function Fold({ label, className, children, ...data }: { label: ReactNode; className?: string; children: ReactNode; [data: `data-${string}`]: string | undefined }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <Collapsible open={open} onOpenChange={setOpen} className={className} {...data}>
+      <CollapsibleTrigger asChild>
+        <Btn tone="ghost" size="sm" className="-ml-2 h-7 gap-1 px-2 text-xs font-normal text-muted-foreground" data-fold-toggle="">
+          <ChevronRight className={cn("size-3.5 transition-transform", open && "rotate-90")} aria-hidden />
+          {label}
+        </Btn>
+      </CollapsibleTrigger>
+      <CollapsibleContent forceMount className="data-[state=closed]:hidden">
+        {children}
+      </CollapsibleContent>
+    </Collapsible>
+  );
+}
+
 /** "Other": always open. ⌘/Ctrl+Enter sends from inside it; the Send button is for phones. */
 export function OtherBox({ value, onChange, onSend, disabled, placeholder, sendLabel = "Send" }: { value: string; onChange: (v: string) => void; onSend: () => void; disabled: boolean; placeholder: string; sendLabel?: string }) {
   return (
-    <div className="orch-other">
-      <TextArea
+    <div className="relative mt-3">
+      <Textarea
         data-note=""
         aria-label="Your own answer"
         value={value}
@@ -108,43 +139,28 @@ export function OtherBox({ value, onChange, onSend, disabled, placeholder, sendL
             if (!disabled && value.trim() !== "") onSend();
           }
         }}
-        // a fixed height (minRows = maxRows): typing never grows the card and moves the ones below
-        minRows={2}
-        maxRows={2}
+        // a fixed height: typing never grows the card and moves the ones below
+        className="field-sizing-fixed h-16 min-h-16 resize-none pr-20"
+        rows={2}
         maxLength={4000}
         placeholder={placeholder}
       />
-      <button type="button" className="ui-dic__btn orch-other__send" data-note-send="" disabled={disabled || value.trim() === ""} onClick={onSend}>
+      <Btn size="sm" className="absolute right-2 bottom-2 h-7" data-note-send="" disabled={disabled || value.trim() === ""} onClick={onSend}>
         {sendLabel}
-      </button>
+      </Btn>
     </div>
   );
 }
 
+/**
+ * Only what bb's host Markdown needs inside a card: its paragraphs, lists and headings at the card's own size. Scope
+ * injects it too (scope.tsx), so the name stays.
+ */
 export const answerCss = /* css */ `
-[data-orch] .orch-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; margin: 2px 0 0; font-size: 12px; line-height: 16px; color: var(--ui-dic-muted); overflow-wrap: anywhere; }
-[data-orch] .orch-when { flex: none; width: 7rem; text-align: right; white-space: nowrap; font-size: 12px; line-height: 20px; color: var(--ui-dic-muted); }
-[data-orch] .orch-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 220px), 1fr)); gap: 8px; margin-top: 12px; }
-[data-orch] .orch-tile { --ui-crdc-pad: 12px; --ui-crdc-surface: var(--ui-dic-card); }
-[data-orch] .orch-tile__badges { display: flex; gap: 6px; margin-top: 6px; }
-[data-orch] .orch-tile[data-disabled] { opacity: 0.6; }
-[data-orch] .orch-tile .ui-crdc__head { gap: 8px; }
-[data-orch] .orch-tile .ui-crdc__title button:disabled { cursor: default; }
-[data-orch] .orch-details { margin-top: 8px; }
-[data-orch] .orch-details__toggle { display: inline-flex; align-items: center; gap: 4px; height: 24px; padding: 0; border: 0; background: none; font: inherit; font-size: 12px; font-weight: 500; color: var(--ui-dic-muted); cursor: pointer; }
-[data-orch] .orch-details__toggle:hover { color: var(--ui-dic-ink); }
-[data-orch] .orch-details__toggle svg { transition: transform 160ms var(--ui-dic-ease); }
-[data-orch] .orch-details__toggle svg[data-open] { transform: rotate(90deg); }
-[data-orch] .orch-md { margin-top: 4px; padding-left: 12px; border-left: 0.5px solid var(--ui-dic-line); color: var(--ui-dic-text); font-size: 13px; line-height: 20px; overflow-wrap: anywhere; }
 [data-orch] .orch-md :where(p, li, td, th, blockquote) { font-size: 13px !important; line-height: 20px !important; }
 [data-orch] .orch-md :where(p) { margin: 0 0 6px !important; }
 [data-orch] .orch-md :where(ul, ol) { margin: 0 0 6px !important; padding-left: 18px !important; }
 [data-orch] .orch-md :where(li) { margin: 2px 0 !important; }
-[data-orch] .orch-md :where(h1, h2, h3, h4) { margin: 8px 0 4px !important; font-size: 13px !important; line-height: 20px !important; font-weight: 500; color: var(--ui-dic-ink); }
+[data-orch] .orch-md :where(h1, h2, h3, h4) { margin: 8px 0 4px !important; font-size: 13px !important; line-height: 20px !important; font-weight: 600; }
 [data-orch] .orch-md > :last-child, [data-orch] .orch-md > * > :last-child { margin-bottom: 0 !important; }
-[data-orch] .orch-q { border-top: 0.5px solid var(--ui-dic-line); }
-[data-orch] .orch-other { position: relative; margin-top: 12px; }
-[data-orch] .orch-other textarea { padding-right: 76px; }
-[data-orch] .orch-other__send { position: absolute; right: 6px; bottom: 6px; }
-[data-orch] .orch-other__send:disabled { opacity: 0.45; cursor: default; }
 `;

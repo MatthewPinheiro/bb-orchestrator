@@ -24,13 +24,13 @@ const grey = (l: number): Rgb => {
   return [c, c, c];
 };
 
-// Where the colours sit since the page is built from affectUI (app/affect): its card surface (card-clean #ffffff /
-// #1b1b1e, decision-inbox and the avatar tile #ffffff / #1c1c1e; the lighter dark one is the stricter), bb's canvas
-// around the cards (oklch 100% / 19.5%), and a card row under affectUI's wash (rgba(0,0,0,.03) / rgba(255,255,255,.04)),
-// e.g. a hovered "waiting on an agent" row. The avatar tile is the card surface, so an agent's mark is checked there too.
+// Where the colours sit (2026-11-17: on bb's own tokens, read from the running app in both themes): bb's card and canvas
+// (--card, --background: oklch 100% / 19.5%) and a row under the page's wash (ui.tsx --orch-wash: bb's ink at 5%).
+// (2026-11-18: affectUI's card surface is gone with the kit.) The avatar tile is the card surface, so an agent's mark is
+// checked there too.
 const THEMES = {
-  light: { card: hex("#ffffff"), canvas: grey(1), wash: { c: hex("#000000"), a: 0.03 } },
-  dark: { card: hex("#1c1c1e"), canvas: grey(0.195), wash: { c: hex("#ffffff"), a: 0.04 } },
+  light: { card: grey(1), canvas: grey(1), wash: { c: grey(0.3211), a: 0.05 } },
+  dark: { card: grey(0.195), canvas: grey(0.195), wash: { c: grey(0.81), a: 0.05 } },
 } as const;
 const surfaces = (t: (typeof THEMES)[keyof typeof THEMES]) => ({ card: t.card, canvas: t.canvas, "washed row": over(t.wash.c, t.wash.a, t.card) });
 /** A card row held by a write is drawn at opacity-80 (needs-you.tsx) over the inbox card: its mark, avatars and badges fade. */
@@ -53,7 +53,7 @@ for (const [theme, t] of Object.entries(THEMES)) {
       if (r < 4.5) failures.push(`role ${key} ${theme} on ${where}: text ${r.toFixed(2)} < 4.5`);
     }
     for (const [key, tone] of [...Object.entries(KIND_TONES), ...Object.entries(PRIORITY_TONES).map(([k, t]) => [`priority ${k}`, t] as const)]) {
-      // a kind (or a project's priority) is an affectUI badge filled with its colour at TINT: the word and its dot sit on that fill
+      // a kind (or a project's priority) is a badge filled with its colour at TINT: the word and its dot sit on that fill
       const c = hex(tone[theme as keyof typeof THEMES]);
       const fill = over(c, TINT, surface);
       const text = contrast(c, fill);
@@ -110,6 +110,40 @@ for (const [theme, t] of Object.entries(THEMES)) {
       }
     }
 }
+// The shadcn badges and chips (2026-11-17, app/ui on bb's tokens, kit-ui.tsx's Chip): a chip's words are bb's ink on the
+// surface (outline), its icon in bb's success or warning text colour (a mark, 3:1); "need" is bb's primary badge and
+// "blocked" bb's destructive one (white words on the red, at 60% over the card in dark, as shadcn draws it); a role's
+// initial sits on its own tint in the avatar. Error words (PageError's Alert, a destructive menu item, the stale line)
+// are bb's --destructive-text: its --destructive, shadcn's choice, is 3.6:1 on the dark card.
+const BB = {
+  light: { ink: grey(0.3211), primary: grey(0.27), primaryFg: grey(1), destructive: [165, 0, 15] as Rgb, destructiveText: [165, 0, 15] as Rgb, success: [0, 130, 70] as Rgb, warning: [176, 84, 14] as Rgb },
+  dark: { ink: grey(0.81), primary: grey(0.82), primaryFg: grey(0.2178), destructive: [204, 50, 61] as Rgb, destructiveText: [224, 96, 98] as Rgb, success: [75, 198, 128] as Rgb, warning: [252, 140, 69] as Rgb },
+} as const;
+for (const [theme, t] of Object.entries(THEMES)) {
+  const th = theme as keyof typeof THEMES;
+  const bb = BB[th];
+  for (const [where, surface] of Object.entries(surfaces(t))) {
+    const words = contrast(bb.ink, surface);
+    if (words < 4.5) failures.push(`chip words ${theme} on ${where}: ${words.toFixed(2)} < 4.5`);
+    for (const [key, c] of [["good", bb.success], ["warn", bb.warning]] as const) {
+      const mark = contrast(c, surface);
+      if (mark < 3) failures.push(`chip ${key} icon ${theme} on ${where}: mark ${mark.toFixed(2)} < 3`);
+    }
+    const red = th === "dark" ? over(bb.destructive, 0.6, surface) : bb.destructive;
+    const blocked = contrast(hex("#ffffff"), red);
+    if (blocked < 4.5) failures.push(`blocked badge ${theme} on ${where}: ${blocked.toFixed(2)} < 4.5`);
+    const error = contrast(bb.destructiveText, surface);
+    if (error < 4.5) failures.push(`error words ${theme} on ${where}: ${error.toFixed(2)} < 4.5`);
+    for (const [key, tone] of Object.entries(ROLE_TONES)) {
+      const c = hex(tone[th]);
+      const r = contrast(c, over(c, TINT, surface));
+      if (r < 4.5) failures.push(`role ${key} initial ${theme} on its tint over ${where}: ${r.toFixed(2)} < 4.5`);
+    }
+  }
+  const need = contrast(bb.primaryFg, bb.primary);
+  if (need < 4.5) failures.push(`need badge ${theme}: ${need.toFixed(2)} < 4.5`);
+}
+
 test("every role and kind colour is readable in both themes", () => {
   assert.deepEqual(failures, []);
 });

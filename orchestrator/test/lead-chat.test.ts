@@ -168,8 +168,9 @@ test("each Scope entry names its planner: the lead, until a live scoping thread 
 });
 
 // The entry header's next step: the owner should never have to work out the flow. The "Scoping done?" card, when it is
-// there, is the one thing to do; otherwise the cards; otherwise nothing waits, and the line says who is working.
-test("each Scope entry's header says what happens next: the Scoping done? card first, then the cards, then who is working", async () => {
+// there, is the one thing to do; otherwise the cards; otherwise nothing waits, and the line says what comes next (since
+// 2026-11-17 on the entry's status card, which names who is working beside it, so the line no longer repeats that).
+test("each Scope entry says what happens next: the Scoping done? card first, then the cards, then where questions will come", async () => {
   const { scopeNext } = await import("../app/kit.ts");
   const task = { key: "otter/st-1", slug: "otter", task: { id: "st-1", name: "Ranking signals" }, planner: null };
   const whole = { key: "kite", slug: "kite", task: null };
@@ -178,8 +179,34 @@ test("each Scope entry's header says what happens next: the Scoping done? card f
   assert.match(scopeNext(task, { cards: [q, done], delivered: 0, hasLead: true }), /^Next: answer "Ranking scoped\?"\. Yes closes this task/);
   assert.match(scopeNext(whole, { cards: [{ title: "Scoping done?", scopingDone: {} }], delivered: 0, hasLead: true }), /Yes makes kite active/);
   assert.match(scopeNext(task, { cards: [q], delivered: 0, hasLead: true }), /^Next: answer the cards; the lead files "Scoping done\?"/);
-  assert.match(scopeNext(task, { cards: [], delivered: 0, hasLead: true }), /^Nothing waits on you\. The lead brings its questions here/);
+  assert.equal(scopeNext(task, { cards: [], delivered: 0, hasLead: true }), `Questions appear here; the lead proposes "Scoping done?" when it's ready.`);
   const planned = { ...task, planner: { address: "thread:otter:1", threadId: "T-s", title: "Scout", status: "active" } };
-  assert.match(scopeNext(planned, { cards: [], delivered: 0, hasLead: true }), /Scout is investigating/);
+  assert.equal(scopeNext(planned, { cards: [], delivered: 0, hasLead: true }), scopeNext(task, { cards: [], delivered: 0, hasLead: true }), "who is investigating is on the status card, not in this line");
   assert.match(scopeNext(task, { cards: [q], delivered: 0, hasLead: false }), /^No lead is running for otter/);
+});
+
+// The Scope entry's status card (2026-11-17) says what a scoping thread is on from its own last report. The scope read must
+// carry it, and since when the thread is idle, or the card could only say "working" or "idle" with nothing behind it.
+test("the scope read carries each scoping thread's last report and since when it is idle, for the entry's status card", async () => {
+  const { scopeStatus } = await import("../app/kit.ts");
+  const h = await host();
+  await h.tool("orch_scope_task", { action: "open", name: "Ranking signals" }, "T-lead");
+  const t = h.pre.openTasks("otter")[0]!;
+  h.raw.prepare(`INSERT INTO spawns (thread_id, plan_id, via, lead, created_at, scope_task) VALUES ('T-scout', NULL, 'plan', 'lead:otter', ?, ?)`).run(Date.now(), t.id);
+  h.pre.register("T-scout", "thread", "otter", "T-lead");
+  h.pre.setStatus("T-scout", "active");
+  const read = async () => scopeEntries(((await h.rpc.scope!(null)) as { projects: Parameters<typeof scopeEntries>[0] }).projects).find((e) => e.task?.id === t.id)!;
+  const working = await read();
+  assert.deepEqual([working.planner?.report, working.planner?.idleAt], [null, null], "working, and no report yet");
+  assert.equal(scopeStatus(working, undefined).now, null, "the card says it has no report yet, not something else's line");
+
+  assert.match(await h.tool("orch_report", { title: "Five ranking signals logged; two usable", body: "Click-through and dwell time." }, "T-scout"), /On the board/);
+  h.pre.setStatus("T-scout", "idle");
+  const idle = await read();
+  assert.equal(idle.planner?.report?.text, "Five ranking signals logged; two usable");
+  assert.equal(typeof idle.planner?.report?.at, "number");
+  assert.equal(typeof idle.planner?.idleAt, "number", "since when it is idle: the card's last activity");
+  const s = scopeStatus(idle, undefined);
+  assert.deepEqual(s.now, { text: "Five ranking signals logged; two usable", from: "report", at: idle.planner!.report!.at });
+  assert.deepEqual([s.who.kind, s.who.working, s.who.state, s.who.idleSince], ["thread", false, "idle", idle.planner!.idleAt]);
 });

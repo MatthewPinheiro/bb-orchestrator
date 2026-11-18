@@ -171,14 +171,27 @@ Each row shows:
   and recomputed only when the PR's head commit changes.
 
 **Needs review** lists the PRs that are ready (not drafts), not yet fully approved, and not failing CI. **All** lists
-every open PR. Below the list, **Review ask** is one block of text for every PR that needs review: each PR's full URL
-on its own line with a summary bullet under it, then suggested reviewers. **Copy** copies it.
+every open PR. In a wide pane each PR is one row (title, PR link, review state, CI, reviewers, age); in a narrow pane, a
+card with the same facts. Expanding a row or a card shows the summary, the project and lead, and the rest.
+
+**First review**, **Re-review** and **Approved on head** split the PRs by who has reviewed them. Only people count:
+bots (CodeRabbit included) and the PR's author never do, and a comment after an approval doesn't take it back.
+- First review: no person has reviewed it yet. Its ask names the requested reviewers, else up to three suggested ones.
+- Re-review: someone's latest review is on an older commit. Its ask names those reviewers under "Reviewers to re-ask".
+- Approved on head: a person approved the current commit.
+
+On Needs review, First review and Re-review, the review ask and Post use that filter's PRs. After a copy or a post
+succeeds, **Since your last copy** lists what changed in that filter's PRs: new ones, new commits, review, CI or title
+changes, and PRs merged or closed (only when GitHub says so). The ticked box puts that list above the copied text,
+and nothing is added when nothing changed. A failed copy or post never resets it. Post's confirm says who gets pinged.
 
 Suggested reviewers are the CODEOWNERS of the changed files, then whoever reviewed the same folders in the repo's recent
 merged PRs. A login is tagged `@handle` only if `slackHandleMap` maps it. Anyone else is shown by plain name, never
 guessed.
 
-**Post to code reviews** shows the exact text with a tick per PR. PRs from `reviewExcludedProjects` start unticked.
+**Post to code reviews…** opens one dialog over the list with the review ask: each PR's full URL on its own line with a
+summary bullet under it, then the reviewers. It has a tick per PR, Since your last copy, who it pings, and **Copy**.
+PRs from `reviewExcludedProjects` start unticked, and Copy copies only the ticked PRs.
 Confirm copies the text and opens `reviewChannel` in Slack, then says "Copied. Paste it in #<channel>". You paste and
 send it yourself; the plugin has no Slack token and sends nothing.
 
@@ -198,6 +211,17 @@ bb plugin config orchestrator set reviewChannel <channel-name>
 bb plugin config orchestrator set slackHandleMap '{"<github-login>": "<slack-handle>"}'
 ```
 
+### The CodeRabbit review queue
+
+The **CodeRabbit** tab posts `@coderabbitai review` on one queued PR at a time, at most once an hour, through the `gh`
+login on a connected machine. You add, reorder and pin PRs; a pinned PR goes first, then one human approval on the head,
+then queue order. An optional model picker (off by default) can rank the eligible PRs from numbers only, in a short bb
+thread that is archived after it answers; any failure falls back to that order. Heads CodeRabbit already reviewed, drafts and PRs asked in the last 3 hours are
+skipped. **Schedule** (every 65 minutes) and **Auto** (adds your own PRs with passing required checks) start off.
+**`reviewQueueDryRun` starts on**: the queue picks a PR and shows what it would post, and posts nothing, until you
+turn it off in the plugin settings. With dry-run off, **Run now** shows the PR and the exact comment, and posts only
+when you confirm. Agents can read the queue but can't change it.
+
 ## Development
 
 ```sh
@@ -210,8 +234,8 @@ bb plugin install path:$PWD/orchestrator   # run your checkout in bb; bb plugin 
 
 - This repository is under the MIT License, see [LICENSE](LICENSE). Usage Meter carries its own MIT license with its
   original author's copyright, see [usage-meter/LICENSE](usage-meter/LICENSE).
-- **affectUI** components are vendored in `orchestrator/app/affect/` under the MIT License, see
-  [orchestrator/app/affect/LICENSE](orchestrator/app/affect/LICENSE).
+- **shadcn/ui** components are copied into `orchestrator/app/ui/` under the MIT License, see
+  [orchestrator/app/ui/LICENSE](orchestrator/app/ui/LICENSE).
 - **EmulatorJS** (GPL-3.0) and its **mGBA** core (MPL-2.0) are not part of this repository. The Game Boy tab loads them
   at runtime from the EmulatorJS CDN, and their licenses apply to that code. No game ROM is included: you supply your
   own, legally obtained.

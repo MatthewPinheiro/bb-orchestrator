@@ -56,3 +56,10 @@ test("the setting is empty by default and matched case-insensitively against ids
   assert.deepEqual(ids([], 0), ALL, "empty: every tab");
   assert.deepEqual(ids(["activity", "open prs"], 0), ["deliverables", "projects", "scope"], "lower-cased labels match");
 });
+
+test("the CodeRabbit tab (2026-11-18) is listed, shown by default, and hidden by hiddenTabs: coderabbit", () => {
+  assert.match(app, /\{ id: "coderabbit", subPath: "coderabbit", label: "CodeRabbit" \}/);
+  const views = [...VIEWS, { id: "coderabbit", label: "CodeRabbit" }];
+  assert.ok(!shownTabs(views, new Set(["coderabbit"]), 0, new Set(["deliverables"])).some((v) => v.id === "coderabbit"), "hidden");
+  assert.ok(shownTabs(views, new Set(), 0, new Set(["deliverables"])).some((v) => v.id === "coderabbit"), "shown by default");
+});

@@ -172,6 +172,13 @@ export class BatchInbox {
   dropped(id: string): void {
     this.db.prepare(`UPDATE inbox_entries SET acked_at=? WHERE item_id=? AND acked_at IS NULL`).run(DROPPED, id);
   }
+  /**
+   * All of an address's unread is dropped (2026-11-17): it is an address nothing reads, the engine's own, whose items its
+   * cards' acks close. Its wake goes once no unread is left under it (flush clears it).
+   */
+  droppedFor(address: string): void {
+    this.db.prepare(`UPDATE inbox_entries SET acked_at=? WHERE recipient=? AND acked_at IS NULL`).run(DROPPED, address);
+  }
   handoff(address: string): void {
     // A predecessor's queued wake cannot wake its successor; any late predecessor wake carries no mail.
     this.db.prepare(`DELETE FROM inbox_wakes WHERE recipient=?`).run(address);

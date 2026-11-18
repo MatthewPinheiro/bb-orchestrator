@@ -1,7 +1,7 @@
 // One project as a source of truth (2026-11-16, layout B; the detail layout of 2026-11-17, proposal 5). Under the message
 // box: the Pinned strip, then the goal with its step meter, then what needs the owner and what blocks, side by side, so
 // the answer is in the first row; then Now (thread cards) and what else it waits on, beside the PRs in flight and the
-// record (Done | Decided). Each section is one card (kit-ui.tsx SectionCard); empty ones collapse to their head. A PR
+// record (Done | Decided). Each section is one card (BookCard, shadcn's Card); empty ones collapse to their head. A PR
 // shows once: a wait on it folds into its row (kit.ts prRows). Every line keeps its age and its source.
 // Decided, Done, the merges, the blockers' start and the pins are read for this project only (core/book.ts, pins.ts),
 // refreshed on the same change signal as the list, so the two sides never disagree.
@@ -11,14 +11,22 @@ import { experimental_useRpcQuery, useBbNavigate, useRealtime } from "@get-bb/pl
 import { CHANGED_CHANNEL, WRITES, rpcContract, type NeedsYou, type ProjectBook as Book, type Projects, type pinBody } from "../contract.ts";
 import { position } from "../core/status.ts";
 import { outOfDateLine, statusStale, waitLine } from "./command-center.ts";
-import { RefText, RefsContext } from "./ref-text.tsx";
+import { INLINE_LINK, RefText, RefsContext } from "./ref-text.tsx";
 import { openInBb, plainClick, type Openable } from "./open-proof.ts";
 import { panel } from "./refs.ts";
 import { age, type Lane } from "./lanes.ts";
 import { write } from "./store.ts";
 import { blockerLines, dayStart, mergedTodayCount, needLines, type NeedLine } from "./source.ts";
-import { DETAIL_LAYOUT, ROWS_SHOWN, THREADS_SHOWN, ageSpec, prRows, type DetailSection } from "./kit.ts";
-import { Age, AllButton, Chip, Icon, SectionCard, Steps } from "./kit-ui.tsx";
+import { DETAIL_LAYOUT, ROWS_SHOWN, THREADS_SHOWN, ageSpec, prRows, type DetailSection, type IconName } from "./kit.ts";
+import { Age, Chip, Icon, Steps } from "./kit-ui.tsx";
+import { ChevronRight } from "lucide-react";
+import { Badge } from "./ui/badge.tsx";
+import { Button } from "./ui/button.tsx";
+import { Card, CardContent, CardHeader, CardTitle } from "./ui/card.tsx";
+import { Item } from "./ui/item.tsx";
+import { Tabs, TabsList, TabsTrigger } from "./ui/tabs.tsx";
+import { cn } from "./ui/utils.ts";
+import { Btn } from "./ui.tsx";
 import { ThreadCards } from "./thread-card.tsx";
 import { PinStrip } from "./pins.tsx";
 import type { OpenCard } from "./projects.tsx";
@@ -37,19 +45,13 @@ export const bookCss = /* css */ `
 [data-orch] .orch-cc .k-goal .k-side { display: flex; align-items: center; gap: 8px; flex: none; }
 [data-orch] .orch-cc .k-row a.k-ref, [data-orch] .orch-cc .k-row button.k-ref { flex: none; }
 [data-orch] .orch-cc .k-t > a.ref, [data-orch] .orch-cc .k-t > button.ref { font-weight: inherit; }
-[data-orch] .orch-cc .k-update { display: flex; flex-direction: column; gap: 12px; padding: 4px 8px; font-size: 14px; line-height: 20px; min-width: 0; }
-[data-orch] .orch-cc .k-update .k-sec { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-[data-orch] .orch-cc .k-update .k-lbl { margin: 0; font-size: 12px; line-height: 16px; font-weight: 600; color: var(--orch-muted); }
+[data-orch] .orch-cc .k-update { display: flex; flex-direction: column; gap: 8px; padding: 4px 0; font-size: 13px; line-height: 20px; min-width: 0; }
 [data-orch] .orch-cc .k-update ul { margin: 0; padding-left: 20px; list-style: disc outside; display: flex; flex-direction: column; gap: 4px; }
 [data-orch] .orch-cc .k-update li { display: list-item; margin: 0; list-style: disc outside; }
 [data-orch] .orch-cc .k-update li::marker { color: var(--orch-muted); }
 [data-orch] .orch-cc .k-update .k-clamp { overflow-wrap: anywhere; min-width: 0; }
 [data-orch] .orch-cc .k-update .k-clamp[data-clamped="true"] .k-txt { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: var(--k-lines, 2); overflow: hidden; }
-[data-orch] .orch-cc .k-update .k-clamp .k-more { margin-left: 0; font-size: 12px; line-height: 16px; }
-[data-orch] .orch-cc .k-update code { font-family: var(--font-mono, ui-monospace, monospace); font-size: 12px; padding: 0 4px; border-radius: 4px; background: var(--orch-subtle, rgba(127, 127, 127, 0.12)); }
-[data-orch] .orch-cc .k-update .k-needs { padding: 8px 12px; border-radius: 8px; background: color-mix(in srgb, var(--k-need) 8%, transparent); }
-[data-orch] .orch-cc .k-update .k-needs .k-lbl { color: var(--k-need); }
-[data-orch] .orch-cc .k-update [data-empty-needs] { font-size: 12px; line-height: 16px; color: var(--orch-muted); }
+[data-orch] .orch-cc .k-update code { font-family: var(--font-mono, ui-monospace, monospace); font-size: 12px; padding: 0 4px; border-radius: 4px; background: var(--muted); }
 @container orchcc (max-width: 760px) {
   [data-orch] .orch-cc .k-attn, [data-orch] .orch-cc .k-cols { grid-template-columns: minmax(0, 1fr); }
   [data-orch] .orch-cc .k-goal { flex-direction: column; gap: 8px; }
@@ -71,9 +73,50 @@ export function OpenRef({ open, children, title, data, className = "ref" }: { op
       {children}
     </a>
   ) : (
-    <button type="button" className={className} data-ref={data} data-open-in-bb="" title={title} onClick={click}>
-      {children}
-    </button>
+    // in a row beside a pill it gives way and ends in an ellipsis (2026-11-18: shadcn's Button never shrinks, so a long
+    // deliverable title pushed the pill out of the Scope tab's status card; the ellipsis needs a block, not the flex button)
+    <Button variant="link" className={cn(className, INLINE_LINK, "min-w-0 shrink justify-start")} data-ref={data} data-open-in-bb="" title={title} onClick={click}>
+      <span className="min-w-0 truncate">{children}</span>
+    </Button>
+  );
+}
+
+/**
+ * A section card (2026-11-17, the shadcn pass, in place of kit-ui's SectionCard): shadcn's Card, a head (icon, title,
+ * count, a quiet note, things on the right) over its rows. Needs and Blocked carry their count as a solid or
+ * destructive badge; nothing else takes a colour. An empty card is its head alone.
+ */
+function BookCard({ name, title, count, sub, tone, icon, right, empty, children }: { name: string; title: ReactNode; count?: number | null; sub?: string | null; tone?: "need" | "blocked"; icon?: IconName; right?: ReactNode; empty?: boolean; children?: ReactNode }) {
+  const n = count !== undefined && count !== null;
+  return (
+    <Card className="k-card min-w-0 gap-0 overflow-hidden py-0" data-card-section={name} data-book-section={name} data-tone={tone} data-empty={empty ? "true" : "false"}>
+      <CardHeader className={cn("flex min-h-10 items-center gap-2 px-4 py-1.5 [.border-b]:pb-1.5", !empty && "border-b")}>
+        <CardTitle role="heading" aria-level={4} className={cn("flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1 text-xs leading-4", empty && "font-normal text-muted-foreground")}>
+          {icon ? <Icon name={icon} /> : null}
+          <span>{title}</span>
+          {n && tone ? (
+            <Badge variant={tone === "blocked" ? "destructive" : "default"} className="h-5 min-w-5 rounded-full px-1.5 tabular-nums">
+              {count}
+            </Badge>
+          ) : n ? (
+            <span className="font-normal text-muted-foreground tabular-nums">{count}</span>
+          ) : null}
+          {sub ? <span className="font-normal text-muted-foreground">{sub}</span> : null}
+        </CardTitle>
+        {right ? <div className="flex shrink-0 items-center gap-2">{right}</div> : null}
+      </CardHeader>
+      {empty ? null : <CardContent className="flex min-w-0 flex-col px-2 pt-1 pb-2">{children}</CardContent>}
+    </Card>
+  );
+}
+
+/** "all 8 ›": the rest of a capped list. */
+function AllButton({ n, open, onClick, ...data }: { n: number; open: boolean; onClick: () => void; [d: `data-${string}`]: string | undefined }) {
+  return (
+    <Btn tone="ghost" size="sm" className="h-7 gap-1 px-2 text-xs font-normal text-muted-foreground" aria-expanded={open} onClick={onClick} {...data}>
+      {open ? "fewer" : `all ${n}`}
+      <ChevronRight aria-hidden className={cn("size-3", open && "rotate-90")} />
+    </Btn>
   );
 }
 
@@ -86,9 +129,9 @@ function Goal({ p, now, askStatus }: { p: Project; now: number; askStatus: (() =
   const out = outOfDateLine(p);
   const stale = statusStale(p, now) && p.heldAt === null;
   const ask = askStatus ? (
-    <button type="button" className="k-btn" data-ask-status={p.slug} onClick={askStatus}>
+    <Btn size="sm" data-ask-status={p.slug} onClick={askStatus}>
       Ask for status
-    </button>
+    </Btn>
   ) : null;
   if (!s)
     return (
@@ -186,9 +229,9 @@ function Clamped({ text, lines = 2, ...data }: { text: string; lines?: number; [
         <MdText text={text} />
       </span>
       {over || open ? (
-        <button type="button" className="k-more" aria-expanded={open} onClick={() => setOpen((o) => !o)}>
+        <Button variant="link" size="xs" className="h-6 px-0 text-xs text-muted-foreground" aria-expanded={open} onClick={() => setOpen((o) => !o)}>
           {open ? "less" : "more"}
-        </button>
+        </Button>
       ) : null}
     </div>
   );
@@ -198,16 +241,17 @@ function Clamped({ text, lines = 2, ...data }: { text: string; lines?: number; [
 const saysNothing = (s: string) => /^\s*(?:nothing|none|n\/a|-)?\s*[.!]?\s*$/i.test(s);
 
 /** The Lead status card: the lead's last update (what it worked on, where it is, what it needs). None until the first.
- *  Muted headings over the content: a bulleted "Working on", one line for "Where it's at", and Needs as a callout,
- *  or a quiet "Needs nothing" when it says nothing. */
+ *  2026-11-17 (the shadcn pass): one Card, each part an Item under a muted label: a bulleted "Working on", one line for
+ *  "Where it's at", and Needs as a muted Item led by a solid "Needs" badge, or a quiet "Needs nothing" badge. */
 function LeadUpdate({ p, now }: { p: Project; now: number }) {
   const u = p.status?.update;
   if (!u) return null;
+  const label = "m-0 text-xs font-semibold text-muted-foreground";
   return (
-    <SectionCard name="lead-update" title="Lead status" sub={`updated ${age(u.updateAt, now)} ago`}>
+    <BookCard name="lead-update" title="Lead status" sub={`updated ${age(u.updateAt, now)} ago`}>
       <div className="k-update" data-lead-update="">
-        <section className="k-sec" data-update-sec="working">
-          <h4 className="k-lbl">Working on</h4>
+        <Item size="sm" className="flex-col items-stretch gap-1 px-2 py-1" data-update-sec="working">
+          <h4 className={label}>Working on</h4>
           <ul>
             {u.workingOn.map((b, i) => (
               <li key={i}>
@@ -215,25 +259,27 @@ function LeadUpdate({ p, now }: { p: Project; now: number }) {
               </li>
             ))}
           </ul>
-        </section>
+        </Item>
         {u.at ? (
-          <section className="k-sec" data-update-sec="at">
-            <h4 className="k-lbl">Where it's at</h4>
+          <Item size="sm" className="flex-col items-stretch gap-1 px-2 py-1" data-update-sec="at">
+            <h4 className={label}>Where it's at</h4>
             <Clamped text={u.at} lines={1} data-update-at="" />
-          </section>
+          </Item>
         ) : null}
         {saysNothing(u.needs) ? (
-          <div data-update-needs="" data-empty-needs="">
-            Needs nothing
+          <div className="px-2" data-update-needs="" data-empty-needs="">
+            <Badge variant="outline" className="font-normal text-muted-foreground">
+              Needs nothing
+            </Badge>
           </div>
         ) : (
-          <section className="k-sec k-needs" data-update-sec="needs" role="note">
-            <h4 className="k-lbl">Needs</h4>
+          <Item variant="muted" size="sm" className="flex-col items-stretch gap-1.5 px-3 py-2" data-update-sec="needs" role="note">
+            <Badge>Needs</Badge>
             <Clamped text={u.needs} data-update-needs="" />
-          </section>
+          </Item>
         )}
       </div>
-    </SectionCard>
+    </BookCard>
   );
 }
 
@@ -241,27 +287,27 @@ function NeedRow({ l, now, cos, openCard }: { l: NeedLine; now: number; cos: str
   if (l.kind === "wait") {
     const w = waitLine(l.wait, now, cos);
     return (
-      <div className="k-row" data-need="wait" data-wait-source={l.wait.source}>
+      <Item size="sm" className="k-row flex-nowrap" data-need="wait" data-wait-source={l.wait.source}>
         <span className="k-t" title={w.text}>
           {/* the card's head already says whom it needs: "you: " would say it twice */}
           <RefText text={w.text.replace(/^you: /, "")} exact={l.wait.ref} />
         </span>
         {l.noCard ? <Chip spec={{ tone: "quiet", icon: "quiet", word: "no card" }} /> : null}
         <Age spec={ageSpec(l.wait.since, now, l.wait.source, Infinity)} />
-      </div>
+      </Item>
     );
   }
   const sel = l.kind === "card" ? `[data-card="${l.id}"]` : `[data-interaction="${l.threadId}"]`;
   return (
-    <div className="k-row" data-need={l.kind}>
+    <Item size="sm" className="k-row flex-nowrap" data-need={l.kind}>
       <span className="k-t" title={l.text}>
         {l.text}
       </span>
-      <button type="button" className="k-btn solid" data-open-card={l.kind === "card" ? l.id : ""} onClick={() => openCard(sel)}>
+      <Btn tone="primary" size="sm" className="h-7" data-open-card={l.kind === "card" ? l.id : ""} onClick={() => openCard(sel)}>
         {l.kind === "card" ? "Answer" : "Open"}
-      </button>
+      </Btn>
       <Age spec={ageSpec(l.since, now, "live", Infinity)} />
-    </div>
+    </Item>
   );
 }
 
@@ -317,7 +363,7 @@ export function ProjectBook({
   const todayCount = mergedTodayCount(book, now);
   const live = (lanes ?? []).filter((l) => l.state !== "released");
   const working = live.filter((l) => l.state === "working").length;
-  const loading = !book ? <div className="k-empty">{q.error ? `Couldn't read it: ${q.error.message}` : "Reading…"}</div> : null;
+  const loading = !book ? <div className="px-2 py-1 text-sm text-muted-foreground">{q.error ? `Couldn't read it: ${q.error.message}` : "Reading…"}</div> : null;
   const pinned = new Set(pins.map((x) => x.deliverable).filter(Boolean));
   const pinDeliverable = (id: string) => {
     const body: z.input<typeof pinBody> = { slug: p.slug, target: id };
@@ -325,16 +371,16 @@ export function ProjectBook({
   };
 
   const needCard = needs.length ? (
-    <SectionCard name="needs" title={`Needs ${ownerName}`} count={needs.length} tone="need" icon="you">
+    <BookCard name="needs" title={`Needs ${ownerName}`} count={needs.length} tone="need" icon="you">
       {needs.map((l, i) => (
         <NeedRow key={`${l.kind}|${i}`} l={l} now={now} cos={cos} openCard={openCard} />
       ))}
-    </SectionCard>
+    </BookCard>
   ) : null;
   const blockedCard = blockers.length ? (
-    <SectionCard name="blocked" title="Blocked by" count={blockers.length} tone="blocked" icon="blocked">
+    <BookCard name="blocked" title="Blocked by" count={blockers.length} tone="blocked" icon="blocked">
       {blockers.map((b, i) => (
-        <div key={`b${i}`} className="k-row" data-blocker="">
+        <Item size="sm" key={`b${i}`} className="k-row flex-nowrap" data-blocker="">
           <span className="k-t" title={`Blocked by ${b.text}`}>
             <RefText text={b.text} />
           </span>
@@ -343,15 +389,15 @@ export function ProjectBook({
               <Age spec={{ ...ageSpec(b.since, now, "lead", Infinity)!, text: `${b.bound ? ">" : ""}${age(b.since, now)}`, title: b.bound ? `for over ${age(b.since, now)} · lead said` : b.first ? `since ${age(b.since, now)} · lead said` : `lead said ${age(b.since, now)} ago` }} />
             </span>
           ) : null}
-        </div>
+        </Item>
       ))}
-    </SectionCard>
+    </BookCard>
   ) : null;
   // nothing for the owner and nothing blocking: one quiet head says both
-  const clear = !needCard && !blockedCard ? <SectionCard name="clear" title={`Nothing needs ${ownerName}`} sub="nothing blocks it" empty /> : null;
+  const clear = !needCard && !blockedCard ? <BookCard name="clear" title={`Nothing needs ${ownerName}`} sub="nothing blocks it" empty /> : null;
 
   const nowCard = (
-    <SectionCard
+    <BookCard
       name="now"
       title="Now"
       sub={live.length ? `${working} of ${live.length} working` : "no live lead or threads"}
@@ -359,14 +405,14 @@ export function ProjectBook({
       right={live.length > THREADS_SHOWN ? <AllButton n={live.length} open={allThreads} onClick={() => setAllThreads((x) => !x)} data-now-all={String(live.length)} /> : null}
     >
       <ThreadCards lanes={lanes} now={now} owner={ownerName} openCard={openCard} all={allThreads} ctl={refetchAll && p.archivedAt === null ? { slug: p.slug, mode: p.mode, tasks: p.tasks ?? [], busy, refetchAll } : undefined} />
-    </SectionCard>
+    </BookCard>
   );
   const waitsCard = loose.length ? (
-    <SectionCard name="waits" title="Waiting on" count={loose.length}>
+    <BookCard name="waits" title="Waiting on" count={loose.length}>
       {loose.map((w, i) => {
         const l = waitLine(w, now, cos);
         return (
-          <div key={`${w.kind}|${w.ref ?? i}`} className="k-row" data-wait-line={w.kind} data-wait-source={w.source}>
+          <Item size="sm" key={`${w.kind}|${w.ref ?? i}`} className="k-row flex-nowrap" data-wait-line={w.kind} data-wait-source={w.source}>
             <span className="k-lead">
               <Icon name="wait" />
             </span>
@@ -375,14 +421,14 @@ export function ProjectBook({
               {l.note ? <b className="warn"> ({l.note})</b> : null}
             </span>
             <Age spec={ageSpec(w.since, now, w.source)} />
-          </div>
+          </Item>
         );
       })}
-    </SectionCard>
+    </BookCard>
   ) : null;
   const prsShown = allPrs ? prs : prs.slice(0, ROWS_SHOWN);
   const prCard = (
-    <SectionCard
+    <BookCard
       name="prs"
       title="PRs in flight"
       count={prs.length || null}
@@ -391,7 +437,7 @@ export function ProjectBook({
       right={prs.length > ROWS_SHOWN ? <AllButton n={prs.length} open={allPrs} onClick={() => setAllPrs((x) => !x)} data-prs-all={String(prs.length)} /> : null}
     >
       {prsShown.map((r) => (
-        <div key={r.pr.url} className="k-row" data-pr-line={r.pr.number} data-pr-wait={r.waits.map((w) => w.kind).join(" ")}>
+        <Item size="sm" key={r.pr.url} className="k-row flex-nowrap" data-pr-line={r.pr.number} data-pr-wait={r.waits.map((w) => w.kind).join(" ")}>
           {/* what its waits say: the row's text when no thread names the PR, else on hover (the Blocked card often says it too) */}
           <span className="k-t" title={[`#${r.pr.number}${r.title ? ` ${r.title}` : ""}`, ...r.waits.map((w) => waitLine(w, now, cos).text)].join("\n")}>
             <OpenRef open={{ url: r.pr.url }} title={r.pr.url} data="pr" className="k-ref">
@@ -403,16 +449,16 @@ export function ProjectBook({
             <Chip key={c.word} spec={c} />
           ))}
           <Age spec={r.waits[0] ? ageSpec(r.waits[0].since, now, r.waits[0].source) : null} />
-        </div>
+        </Item>
       ))}
-    </SectionCard>
+    </BookCard>
   );
   // open PRs whose threads were resolved because someone else owns them now (orch_resolve handed_off); hidden when none
   const handed = p.handedOff ?? [];
   const handedCard = handed.length ? (
-    <SectionCard name="handed-off" title="Handed off" count={handed.length}>
+    <BookCard name="handed-off" title="Handed off" count={handed.length}>
       {handed.map((h) => (
-        <div key={`${h.pr}|${h.at}`} className="k-row" data-handed-off={h.pr}>
+        <Item size="sm" key={`${h.pr}|${h.at}`} className="k-row flex-nowrap" data-handed-off={h.pr}>
           <span className="k-t" title={[h.pr, `${h.owner} has it`, h.note ?? "", `from ${h.thread}`].filter(Boolean).join("\n")}>
             <OpenRef open={{ url: h.pr }} title={h.pr} data="pr" className="k-ref">
               #{h.pr.match(/\/pull\/(\d+)/)?.[1] ?? "PR"}
@@ -421,26 +467,28 @@ export function ProjectBook({
             {h.note ? <span className="q"> · {h.note}</span> : null}
           </span>
           <Age spec={ageSpec(h.at, now, "live", Infinity)} />
-        </div>
+        </Item>
       ))}
-    </SectionCard>
+    </BookCard>
   ) : null;
   const doneRows = book?.done ?? [];
   const decidedRows = book?.decided ?? [];
   const recordRows = record === "done" ? doneRows : decidedRows;
   const recordShown = allRecord ? recordRows : recordRows.slice(0, ROWS_SHOWN);
   const recordCard = (
-    <SectionCard
+    <BookCard
       name="record"
       title={
-        <span className="k-seg" role="tablist" aria-label="Record">
-          <button type="button" role="tab" aria-selected={record === "done"} data-record-tab="done" onClick={() => setRecord("done")}>
-            Done {doneRows.length}
-          </button>
-          <button type="button" role="tab" aria-selected={record === "decided"} data-record-tab="decided" onClick={() => setRecord("decided")}>
-            Decided {decidedRows.length}
-          </button>
-        </span>
+        <Tabs value={record} onValueChange={(v) => setRecord(v as "done" | "decided")}>
+          <TabsList aria-label="Record" className="h-8">
+            <TabsTrigger value="done" data-record-tab="done" className="text-xs">
+              Done {doneRows.length}
+            </TabsTrigger>
+            <TabsTrigger value="decided" data-record-tab="decided" className="text-xs">
+              Decided {decidedRows.length}
+            </TabsTrigger>
+          </TabsList>
+        </Tabs>
       }
       right={recordRows.length > ROWS_SHOWN ? <AllButton n={recordRows.length} open={allRecord} onClick={() => setAllRecord((x) => !x)} /> : null}
     >
@@ -450,7 +498,7 @@ export function ProjectBook({
             recordShown.map((d, i) => {
               const row = d as (typeof doneRows)[number];
               return (
-                <div key={`${row.kind}|${row.ref ?? i}`} className="k-row" data-done-line={row.kind}>
+                <Item size="sm" key={`${row.kind}|${row.ref ?? i}`} className="k-row flex-nowrap" data-done-line={row.kind}>
                   <span className="k-lead">
                     <Icon name={row.kind === "merged" ? "merged" : row.kind === "deliverable" ? "box" : "report"} />
                   </span>
@@ -469,23 +517,23 @@ export function ProjectBook({
                   </span>
                   {row.kind === "deliverable" && row.state === "review" ? <Chip spec={{ tone: "info", icon: "eye", word: "your review" }} /> : null}
                   {row.kind === "deliverable" && row.ref && !pinned.has(row.ref) ? (
-                    <button type="button" className="k-btn" data-pin-deliverable={row.ref} disabled={busy} title="Pin it under the message box" onClick={() => pinDeliverable(row.ref!)}>
+                    <Btn size="sm" className="h-7" data-pin-deliverable={row.ref} disabled={busy} title="Pin it under the message box" onClick={() => pinDeliverable(row.ref!)}>
                       <Icon name="pin" />
                       Pin
-                    </button>
+                    </Btn>
                   ) : null}
                   <Age spec={ageSpec(row.at, now, row.kind === "report" ? "thread" : "live", Infinity)} />
-                </div>
+                </Item>
               );
             })
           ) : (
-            <div className="k-empty">Nothing finished yet</div>
+            <div className="px-2 py-1 text-sm text-muted-foreground">Nothing finished yet</div>
           )
         ) : decidedRows.length ? (
           recordShown.map((d) => {
             const row = d as (typeof decidedRows)[number];
             return (
-              <div key={row.id} className="k-row" data-decided={row.id}>
+              <Item size="sm" key={row.id} className="k-row flex-nowrap" data-decided={row.id}>
                 <span className="k-t" title={`${row.title} → ${row.answer}`}>
                   {shared?.cards.has(row.id) ? (
                     <OpenRef open={panel("board", `[data-decision="${row.id}"]`)} title="Open the answered card in Activity" data="card">
@@ -499,13 +547,13 @@ export function ProjectBook({
                 <span className="k-when" title={stamp(row.at)}>
                   {shortDay(row.at)}
                 </span>
-              </div>
+              </Item>
             );
           })
         ) : (
-          <div className="k-empty">No answers on this project yet</div>
+          <div className="px-2 py-1 text-sm text-muted-foreground">No answers on this project yet</div>
         ))}
-    </SectionCard>
+    </BookCard>
   );
 
   const sections: Record<DetailSection, ReactNode> = { needs: needCard ?? clear, blocked: blockedCard, now: nowCard, waits: waitsCard, prs: (

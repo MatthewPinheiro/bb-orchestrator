@@ -193,7 +193,10 @@ export function chatPreview(d: Project["direct"]): { you: string; lead: string |
   const last = d?.messages.reduce<DirectMessage | null>((x, m) => (!x || m.at > x.at ? m : x), null);
   if (!d || !last) return null;
   const line = (s: string) => s.replace(/\s+/g, " ").trim();
-  return { you: line(last.text), lead: last.note ? line(last.note) : null, unread: d.unread };
+  // a message's screenshots (2026-11-17) count in the line; one that is only images says how many
+  const n = last.images?.length ?? 0;
+  const imgs = n ? `[${n === 1 ? "1 image" : `${n} images`}]` : "";
+  return { you: [line(last.text), imgs].filter(Boolean).join(" "), lead: last.note ? line(last.note) : null, unread: d.unread };
 }
 
 /** The newest answer the row shows unread: opening the thread marks answers up to it seen, and no further. */

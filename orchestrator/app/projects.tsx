@@ -8,6 +8,8 @@
 //
 // The Agents tab went on 2026-11-16: what only it showed (unread, level, context window) is on the thread cards now,
 // and a live thread's branch on its project's Flow view.
+// 2026-11-17 (the shadcn pass): the rows are Items, the filters a ToggleGroup (32 px), the ⋯ app/ui's DropdownMenu with a
+// priority submenu, Archive's confirm an AlertDialog, and every button a Button.
 import { styleHref } from "./style-href.ts";
 import { useElementWidth } from "./panes.tsx";
 import { useEffect, useState, type MouseEvent } from "react";
@@ -16,16 +18,21 @@ import { useBbNavigate } from "@get-bb/plugin-sdk/app";
 import { WRITES, type Agents, type Board, type NeedsYou, type Projects, type archiveProjectBody, type directMessageBody, type holdBody, type priorityBody, type projectModeBody, type roleStartBody, type startLeadBody } from "../contract.ts";
 import { ASK_STATUS_TEXT, FILTERS, FILTER_WORD, attentionOrder, isQuiet, leadHead, matches, statusStale, waitLine, type Filter } from "./command-center.ts";
 import { ccCss } from "./cc-lines.tsx";
-import { ProjectRefs, RefsContext, refCss, type SharedRefs } from "./ref-text.tsx";
+import { INLINE_LINK, ProjectRefs, RefsContext, refCss, type SharedRefs } from "./ref-text.tsx";
 import { ChatCard, ChatLog, Composer, directCss, markSeen } from "./direct-line.tsx";
 import { useMinute } from "./status-bar.tsx";
-import { DropdownMenu } from "./affect/dropdown-menu-clean.tsx";
-import { EmptyState } from "./affect/empty-state-clean.tsx";
+import { ChevronDown, ChevronRight, Crosshair, Ellipsis, Pin } from "lucide-react";
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "./ui/alert-dialog.tsx";
+import { Button } from "./ui/button.tsx";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubContent, DropdownMenuSubTrigger, DropdownMenuTrigger } from "./ui/dropdown-menu.tsx";
+import { Item } from "./ui/item.tsx";
+import { ToggleGroup, ToggleGroupItem } from "./ui/toggle-group.tsx";
+import { cn } from "./ui/utils.ts";
 import { MonSprite } from "./mon.tsx";
 import { PRIORITIES, PRIORITY_TONES, css, type Priority } from "./palette.ts";
 import { accentText, accentVars } from "./accent.ts";
 import { gate, useGate, write } from "./store.ts";
-import { Btn, PageError, ReadState, cx, when } from "./ui.tsx";
+import { Btn, EmptyState, PageError, ReadState, cx, when } from "./ui.tsx";
 import { useIdentity } from "./identity.ts";
 import { buildLanes, type Lane } from "./lanes.ts";
 import { ownerOnScreen } from "../core/owner.ts";
@@ -35,6 +42,7 @@ import { SearchBox, SearchHits, searchCss } from "./search.tsx";
 import { filterHides, isWide, searchLoaded, searchedProjects } from "./source.ts";
 import { listRow, needCount, projectScopeAction, projectState, STATE_CHIP, tasksScoping } from "./kit.ts";
 import { Chip, Icon, kitCss } from "./kit-ui.tsx";
+
 import { threadCss } from "./thread-card.tsx";
 import { pinsCss } from "./pins.tsx";
 
@@ -95,30 +103,58 @@ function MoreMenu({ project, busy, refetchAll, narrow, onArchive, askStatus, ask
     void write(WRITES.projectMode, body, { kind: "other", where: `lead:${project.slug}`, after: refetchAll });
   };
   return (
-    <DropdownMenu
-      align="end"
-      title={project.slug}
-      items={[
-        ...(onPin ? [{ label: "Pin a document…", icon: <Icon name="pin" />, disabled: busy, data: { "data-pin-document": project.slug }, onSelect: onPin }] : []),
-        { label: mode.label, icon: <Icon name="scope" />, disabled: busy, data: { "data-project-mode": mode.kind === "project" ? mode.mode : "" }, onSelect: setMode },
-        ...(narrow && !project.lead ? [{ label: "Start lead", disabled: busy || held, data: { "data-start-lead": project.slug }, onSelect: startLead }] : []),
-        ...((narrow || askInMenu) && askStatus ? [{ label: "Ask for status", disabled: busy, data: { "data-ask-status": project.slug }, onSelect: askStatus }] : []),
-        {
-          label: `Priority: ${project.priority}`,
-          data: { "data-priority": project.slug },
-          submenu: PRIORITIES.map((p) => ({ label: PRIORITY_TONES[p].label, icon: <PriorityDot p={p} />, checked: p === project.priority, disabled: busy, data: { "data-priority-pick": p }, onSelect: () => setPriority(p) })),
-        },
-        { label: held ? "Resume" : "Put on hold", disabled: busy, data: { "data-hold": project.slug }, onSelect: hold },
-        { label: "Archive…", danger: true, disabled: busy, data: { "data-archive-project": project.slug }, onSelect: onArchive },
-      ]}
-      trigger={({ triggerProps }) => (
-        <Btn tone="ghost" size="sm" icon={<Icon name="more" />} data-more={project.slug} title="More: priority, hold, archive" aria-label={`More for ${project.slug}`} disabled={busy} {...triggerProps} />
-      )}
-    />
+    <DropdownMenu modal={false}>
+      <DropdownMenuTrigger asChild>
+        <Btn tone="ghost" size="sm" icon={<Ellipsis aria-hidden />} data-more={project.slug} title="More: priority, hold, archive" aria-label={`More for ${project.slug}`} disabled={busy} />
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" aria-label={project.slug} className="min-w-48">
+        {onPin ? (
+          <DropdownMenuItem disabled={busy} data-pin-document={project.slug} onSelect={onPin}>
+            <Pin aria-hidden />
+            Pin a document…
+          </DropdownMenuItem>
+        ) : null}
+        <DropdownMenuItem disabled={busy} data-project-mode={mode.kind === "project" ? mode.mode : ""} onSelect={setMode}>
+          <Crosshair aria-hidden />
+          {mode.label}
+        </DropdownMenuItem>
+        {narrow && !project.lead ? (
+          <DropdownMenuItem disabled={busy || held} data-start-lead={project.slug} onSelect={startLead}>
+            Start lead
+          </DropdownMenuItem>
+        ) : null}
+        {(narrow || askInMenu) && askStatus ? (
+          <DropdownMenuItem disabled={busy} data-ask-status={project.slug} onSelect={askStatus}>
+            Ask for status
+          </DropdownMenuItem>
+        ) : null}
+        <DropdownMenuSub>
+          <DropdownMenuSubTrigger data-priority={project.slug}>Priority: {project.priority}</DropdownMenuSubTrigger>
+          <DropdownMenuSubContent>
+            <DropdownMenuRadioGroup value={project.priority} onValueChange={(v) => setPriority(v as Priority)}>
+              {PRIORITIES.map((p) => (
+                <DropdownMenuRadioItem key={p} value={p} disabled={busy} data-priority-pick={p}>
+                  <PriorityDot p={p} />
+                  {PRIORITY_TONES[p].label}
+                </DropdownMenuRadioItem>
+              ))}
+            </DropdownMenuRadioGroup>
+          </DropdownMenuSubContent>
+        </DropdownMenuSub>
+        <DropdownMenuItem disabled={busy} data-hold={project.slug} onSelect={hold}>
+          {held ? "Resume" : "Put on hold"}
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem variant="destructive" disabled={busy} data-archive-project={project.slug} onSelect={onArchive}>
+          Archive…
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 
-function ArchiveConfirm({ project, busy, refetchAll, onDone }: { project: Project; busy: boolean; refetchAll: () => void; onDone: () => void }) {
+/** Archive's confirm (2026-11-17: shadcn's AlertDialog): what goes and what stays, then Cancel or Archive project. */
+function ArchiveConfirm({ project, open, busy, refetchAll, onDone }: { project: Project; open: boolean; busy: boolean; refetchAll: () => void; onDone: () => void }) {
   const archive = () => {
     onDone();
     const body: z.input<typeof archiveProjectBody> = { slug: project.slug };
@@ -126,21 +162,25 @@ function ArchiveConfirm({ project, busy, refetchAll, onDone }: { project: Projec
   };
   const n = project.summary?.threads.total ?? project.threads;
   return (
-    <div role="group" aria-label={`Archive ${project.slug}`} data-archive-confirm={project.slug} className="confirm">
-      <span className="tx">
-        Archive <b>{project.slug}</b>? {project.lead ? `Its lead and ${n} ${n === 1 ? "thread" : "threads"} are archived` : "Its threads are archived"}, and their open cards withdrawn. Worktrees go after bb's grace period;
-        branches, deliverables and outputs stay. Start lead brings it back.
-      </span>
-      <button type="button" className="btn" data-archive-cancel="" onClick={onDone}>
-        Cancel
-      </button>
-      <button type="button" className="btn primary" data-archive-go={project.slug} disabled={busy} onClick={archive}>
-        Archive project
-      </button>
-    </div>
+    <AlertDialog open={open} onOpenChange={(o) => (o ? undefined : onDone())}>
+      <AlertDialogContent size="sm" aria-label={`Archive ${project.slug}`} data-archive-confirm={project.slug}>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Archive {project.slug}?</AlertDialogTitle>
+          <AlertDialogDescription>
+            {project.lead ? `Its lead and ${n} ${n === 1 ? "thread" : "threads"} are archived` : "Its threads are archived"}, and their open cards withdrawn. Worktrees go after bb's grace period;
+            branches, deliverables and outputs stay. Start lead brings it back.
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel data-archive-cancel="">Cancel</AlertDialogCancel>
+          <AlertDialogAction variant="destructive" data-archive-go={project.slug} disabled={busy} onClick={archive}>
+            Archive project
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   );
 }
-
 
 /** The lead's Pokémon (shiny, as in the sidebar), opening its thread; a neutral avatar with the setting off or no lead. */
 function Face({ project, size }: { project: Project; size: 24 | 32 }) {
@@ -150,9 +190,9 @@ function Face({ project, size }: { project: Project; size: 24 | 32 }) {
   return (
     <span className="face" data-face={h.mon ?? ""}>
       {lead ? (
-        <button type="button" data-open-thread={lead.threadId} title={`Open lead:${project.slug}`} onClick={() => navigate.toThread(lead.threadId)}>
+        <Button variant="ghost" className={cn("p-0", size === 32 ? "size-9" : "size-7")} data-open-thread={lead.threadId} title={`Open lead:${project.slug}`} onClick={() => navigate.toThread(lead.threadId)}>
           <MonSprite mon={h.mon} address={lead.address} size={size} boost={false} />
-        </button>
+        </Button>
       ) : (
         <MonSprite mon={null} address={`lead:${project.slug}`} size={size} boost={false} />
       )}
@@ -168,28 +208,30 @@ function ArchivedRow({ project, busy, refetchAll, onOpen }: { project: Project; 
     void write(WRITES.startLead, body, { kind: "other", where: `lead:${project.slug}`, after: refetchAll });
   };
   return (
+    <Item asChild>
     <li className="proj headed" data-project={project.slug} data-held={project.heldAt !== null ? "true" : "false"} data-archived="true" style={accentVars(project.monType)} onClick={(e) => (onSurface(e) ? onOpen(project.slug) : undefined)}>
       <Face project={project} size={24} />
       <div className="body">
         <div className="ln title">
           <span className="tx" title={`${project.slug}: archived ${when(project.archivedAt)}`}>
-            <button type="button" className="name" data-open-project={project.slug} onClick={() => onOpen(project.slug)}>
+            <Button variant="link" className={cn("name", INLINE_LINK, "no-underline hover:underline")} data-open-project={project.slug} onClick={() => onOpen(project.slug)}>
               {project.slug}
-            </button>
+            </Button>
             {head.mon ? <span className="who">{head.name}</span> : null}
             <span className="now">archived {when(project.archivedAt)}</span>
           </span>
           <span className="acts">
             {project.lead ? null : (
-              <button type="button" className="btn" data-start-lead={project.slug} disabled={busy || project.heldAt !== null} title={`Bring ${project.slug} back with a new lead`} onClick={startLead}>
+              <Btn size="sm" data-start-lead={project.slug} disabled={busy || project.heldAt !== null} title={`Bring ${project.slug} back with a new lead`} onClick={startLead}>
                 Start lead
-              </button>
+              </Btn>
             )}
           </span>
         </div>
         <PageError where={`lead:${project.slug}`} />
       </div>
     </li>
+    </Item>
   );
 }
 
@@ -223,9 +265,9 @@ function StandingAgents({ agents, full, busy, refetchAll }: { agents: Board["age
                   {f?.unread ? <i className="unread" title="something new since you last looked" /> : null}
                 </>
               ) : agents ? (
-                <button type="button" className="link" data-start-role={role} disabled={busy} onClick={start}>
+                <Button variant="link" size="xs" className="h-6 px-1 align-baseline text-xs text-foreground underline underline-offset-4" data-start-role={role} disabled={busy} onClick={start}>
                   Start
-                </button>
+                </Button>
               ) : (
                 "…"
               )}
@@ -249,13 +291,12 @@ const layoutCss = /* css */ `
 [data-orch] .orch-cc .b-body { display: grid; grid-template-columns: minmax(360px, 480px) minmax(0, 1fr); gap: 32px; align-items: start; }
 [data-orch] .orch-cc .k-plist { display: flex; flex-direction: column; gap: 4px; }
 [data-orch] .orch-cc .k-prow { display: grid; grid-template-columns: 32px minmax(0, 1fr) auto; column-gap: 12px; align-items: center; min-height: 56px; padding: 8px 12px; border-radius: 8px; cursor: pointer; }
-[data-orch] .orch-cc .k-prow:hover { background: var(--k-wash); }
-[data-orch] .orch-cc .k-prow[data-selected="true"] { background: color-mix(in srgb, var(--orch-ink) 8%, transparent); box-shadow: inset 0 0 0 1px var(--k-border); }
+[data-orch] .orch-cc .k-prow:hover { background: var(--accent); }
+[data-orch] .orch-cc .k-prow[data-selected="true"] { background: var(--accent); border-color: var(--border); }
 [data-orch] .orch-cc .k-prow .face { display: flex; width: 32px; height: 32px; align-items: center; justify-content: center; }
-[data-orch] .orch-cc .k-prow .face button { display: flex; }
 [data-orch] .orch-cc .k-prow .k-main { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
 [data-orch] .orch-cc .k-prow .k-name { display: flex; align-items: baseline; gap: 8px; min-width: 0; white-space: nowrap; }
-[data-orch] .orch-cc .k-prow .k-name .name { overflow: hidden; text-overflow: ellipsis; min-height: 24px; }
+[data-orch] .orch-cc .k-prow .k-name .name { overflow: hidden; text-overflow: ellipsis; min-height: 24px; font-weight: 600; }
 [data-orch] .orch-cc .k-prow .k-mon { font-size: 12px; line-height: 16px; color: var(--orch-muted); flex: none; }
 [data-orch] .orch-cc .k-prow .k-type { font-size: 12px; line-height: 16px; font-weight: 600; flex: none; }
 [data-orch] .orch-cc .k-prow .k-sub { display: flex; align-items: center; gap: 8px; font-size: 12px; line-height: 16px; color: var(--orch-muted); white-space: nowrap; overflow: hidden; }
@@ -270,6 +311,23 @@ const layoutCss = /* css */ `
 [data-orch] .orch-cc .k-dhead .k-mon { color: var(--orch-muted); }
 [data-orch] .orch-cc .k-dhead .k-type { font-weight: 600; }
 [data-orch] .orch-cc .k-dhead .acts { margin-left: auto; }
+[data-orch] .orch-cc .k-dfixed, [data-orch] .orch-cc .k-dcards { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+/* 2026-11-17, the owner: "the left navigation bar should stay in the same locations and also the header card should
+   only the cards should scroll". Wide, the tab takes the pane's height (panes.tsx [data-fits-pane]): the list scrolls on its own
+   when it is taller, the project's name row and chat card stay put, and only its section cards scroll, from the top
+   again for each project (the detail is keyed by project). One column keeps the one scroll of the pane */
+[data-orch] [data-fits-pane] > .orch-cc { display: flex; flex: 1 1 auto; flex-direction: column; min-height: 0; padding-bottom: 0; }
+[data-orch] [data-fits-pane] > .orch-cc .hits { flex: none; max-height: 35vh; overflow-y: auto; }
+[data-orch] [data-fits-pane] .b-body { flex: 1 1 0; min-height: 0; grid-template-rows: minmax(0, 1fr); align-items: stretch; }
+[data-orch] [data-fits-pane] .b-body > .k-listpane { min-height: 0; overflow-y: auto; scrollbar-gutter: stable; padding-bottom: 32px; }
+[data-orch] [data-fits-pane] .b-body > .detail { min-height: 0; }
+/* the fixed head takes at most half the detail's height, so the cards keep at least the other half (2026-11-17, the
+   lead): an open chat gives up the room, its transcript scrolling inside the card, while the name row and the message
+   box stay whole. Past that (a very short pane) the head scrolls inside itself. It keeps the cards' scrollbar room, so
+   its right edge lines up with theirs */
+[data-orch] [data-fits-pane] .b-body > .detail > .k-dfixed { flex: 0 1 auto; min-height: 0; max-height: 50%; overflow-y: auto; scrollbar-gutter: stable; margin: -2px; padding: 2px; }
+[data-orch] [data-fits-pane] .b-body > .detail > .k-dfixed > .k-chatcard, [data-orch] [data-fits-pane] .b-body > .detail > .k-dfixed .k-chat, [data-orch] [data-fits-pane] .b-body > .detail > .k-dfixed .k-chat > :is(.k-leadthread, .k-chat__log) { flex: 0 1 auto; min-height: 0; }
+[data-orch] [data-fits-pane] .b-body > .detail > .k-dcards { flex: 1 1 0; min-height: 0; overflow-y: auto; scrollbar-gutter: stable; padding-bottom: 32px; }
 `;
 
 /** A project in the list: its lead, name (and its Pokémon and type, when on); one state chip and how many work; the one number, and the status's age. */
@@ -277,6 +335,7 @@ function ListRow({ project, lanes, now, selected, quiet, onSelect }: { project: 
   const head = leadHead(project);
   const r = listRow(project, lanes, now, quiet);
   return (
+    <Item asChild>
     <li
       className="k-prow"
       data-selected={selected}
@@ -291,9 +350,9 @@ function ListRow({ project, lanes, now, selected, quiet, onSelect }: { project: 
       <div className="k-main">
         <div className="k-name">
           {/* a plain list: the name is the control that selects, and says which project the detail shows */}
-          <button type="button" className="name" data-select-project={project.slug} aria-current={selected ? "true" : undefined} aria-expanded={undefined} onClick={onSelect}>
+          <Button variant="link" className={cn("name", INLINE_LINK, "no-underline hover:underline")} data-select-project={project.slug} aria-current={selected ? "true" : undefined} onClick={onSelect}>
             {project.slug}
-          </button>
+          </Button>
           {project.direct?.unread ? <i className="unread" role="img" aria-label="a new note from the lead" data-list-unread={project.slug} title="a new note from the lead: select the project to read it" /> : null}
           {head.mon ? <span className="k-mon">{head.name}</span> : null}
           {head.mon && head.type ? (
@@ -318,6 +377,7 @@ function ListRow({ project, lanes, now, selected, quiet, onSelect }: { project: 
         </span>
       </div>
     </li>
+    </Item>
   );
 }
 
@@ -343,73 +403,79 @@ function DetailPanel({ project, lanes, busy, refetchAll, openCard, onOpen, onPic
   return (
     <div className="detail" data-project={project.slug} data-detail-panel={project.slug} data-held={held ? "true" : "false"} style={accentVars(project.monType)}>
       <ProjectRefs.Provider value={{ project: project.slug, prs: project.prs ?? [] }}>
-        <div className="k-dhead">
-          {inPlace ? null : (
-            <>
-              <Face project={project} size={32} />
-              <span className="name">{project.slug}</span>
-              {head.mon ? <span className="k-mon">{head.name}</span> : null}
-              {head.mon && head.type ? (
-                <span className="k-type" data-type={project.monType ?? ""} style={{ color: accentText(project.monType) }}>
-                  {head.type}
-                </span>
-              ) : null}
-            </>
-          )}
-          <Chip spec={STATE_CHIP[st]} data-detail-state={st} title={held ? `on hold since ${when(project.heldAt)}` : undefined} />
-          {tasksScoping(project) ? <Chip spec={{ ...STATE_CHIP.scoping, word: tasksScoping(project)! }} data-detail-scoping={project.slug} /> : null}
-          {forYou ? <Chip spec={{ tone: "need", icon: "you", word: `${forYou} for you` }} data-detail-for-you={String(forYou)} /> : null}
-          <span className="acts">
-            {project.lead ? null : (
-              <Btn size="sm" data-start-lead={project.slug} disabled={busy || held} onClick={startLead}>
-                Start lead
-              </Btn>
+        {/* the head: stays put above the cards in the wide layout (layoutCss) */}
+        <div className="k-dfixed" data-detail-head={project.slug}>
+          <div className="k-dhead">
+            {inPlace ? null : (
+              <>
+                <Face project={project} size={32} />
+                <span className="name">{project.slug}</span>
+                {head.mon ? <span className="k-mon">{head.name}</span> : null}
+                {head.mon && head.type ? (
+                  <span className="k-type" data-type={project.monType ?? ""} style={{ color: accentText(project.monType) }}>
+                    {head.type}
+                  </span>
+                ) : null}
+              </>
             )}
-            <Btn size="sm" data-open-project={project.slug} title="The timeline, the flow and the dependencies" onClick={() => onOpen(project.slug)}>
-              Timeline
-            </Btn>
-            <MoreMenu project={project} busy={busy} refetchAll={refetchAll} narrow={narrow} onArchive={() => setConfirming(true)} askStatus={askStatus} askInMenu onPin={() => setPinning(true)} />
-          </span>
+            <Chip spec={STATE_CHIP[st]} data-detail-state={st} title={held ? `on hold since ${when(project.heldAt)}` : undefined} />
+            {tasksScoping(project) ? <Chip spec={{ ...STATE_CHIP.scoping, word: tasksScoping(project)! }} data-detail-scoping={project.slug} /> : null}
+            {forYou ? <Chip spec={{ tone: "need", icon: "you", word: `${forYou} for you` }} data-detail-for-you={String(forYou)} /> : null}
+            <span className="acts">
+              {project.lead ? null : (
+                <Btn size="sm" data-start-lead={project.slug} disabled={busy || held} onClick={startLead}>
+                  Start lead
+                </Btn>
+              )}
+              <Btn size="sm" data-open-project={project.slug} title="The timeline, the flow and the dependencies" onClick={() => onOpen(project.slug)}>
+                Timeline
+              </Btn>
+              <MoreMenu project={project} busy={busy} refetchAll={refetchAll} narrow={narrow} onArchive={() => setConfirming(true)} askStatus={askStatus} askInMenu onPin={() => setPinning(true)} />
+            </span>
+          </div>
+          {project.lead ? (
+            <ChatCard slug={project.slug}>
+              <ChatLog project={project} now={now} cos={cosTitle} busy={busy} refetchAll={refetchAll} onPick={onPick} />
+              <Composer
+                compact
+                project={project}
+                now={now}
+                cos={cosTitle}
+                busy={busy}
+                refetchAll={refetchAll}
+                onFocus={() => {
+                  onPick();
+                  markSeen(project, refetchAll);
+                }}
+              />
+            </ChatCard>
+          ) : project.direct?.messages.length ? (
+            // no lead running (none started, or archived): the direct-message log so far, read-only until Start lead
+            <ChatCard slug={project.slug}>
+              <ChatLog project={project} now={now} cos={cosTitle} busy={busy} refetchAll={refetchAll} onPick={onPick} />
+            </ChatCard>
+          ) : null}
+          {held ? <div className="muted small">Mail to this lead is held until the project resumes.</div> : null}
+          <PageError where={`lead:${project.slug}`} />
+          <ArchiveConfirm project={project} open={confirming} busy={busy} refetchAll={refetchAll} onDone={() => setConfirming(false)} />
         </div>
-        {project.lead ? (
-          <ChatCard slug={project.slug}>
-            <ChatLog project={project} now={now} cos={cosTitle} busy={busy} refetchAll={refetchAll} onPick={onPick} />
-            <Composer
-              compact
-              project={project}
-              now={now}
-              cos={cosTitle}
-              busy={busy}
-              refetchAll={refetchAll}
-              onFocus={() => {
-                onPick();
-                markSeen(project, refetchAll);
-              }}
-            />
-          </ChatCard>
-        ) : project.direct?.messages.length ? (
-          // no lead running (none started, or archived): the direct-message log so far, read-only until Start lead
-          <ChatCard slug={project.slug}>
-            <ChatLog project={project} now={now} cos={cosTitle} busy={busy} refetchAll={refetchAll} onPick={onPick} />
-          </ChatCard>
-        ) : null}
-        {held ? <div className="muted small">Mail to this lead is held until the project resumes.</div> : null}
-        <PageError where={`lead:${project.slug}`} />
-        {confirming ? <ArchiveConfirm project={project} busy={busy} refetchAll={refetchAll} onDone={() => setConfirming(false)} /> : null}
-        <ProjectBook
-          project={project}
-          lanes={lanes}
-          now={now}
-          cards={needs?.cards ?? []}
-          cos={cosTitle}
-          ownerName={ownerOnScreen(ownerName).name}
-          openCard={openCard}
-          askStatus={askStatus}
-          pinning={pinning}
-          setPinning={setPinning}
-          busy={busy}
-          refetchAll={refetchAll}
-        />
+        {/* the section cards: the one region of the detail that scrolls in the wide layout */}
+        <div className="k-dcards" data-cards-scroll={project.slug}>
+          <ProjectBook
+            project={project}
+            lanes={lanes}
+            now={now}
+            cards={needs?.cards ?? []}
+            cos={cosTitle}
+            ownerName={ownerOnScreen(ownerName).name}
+            openCard={openCard}
+            askStatus={askStatus}
+            pinning={pinning}
+            setPinning={setPinning}
+            busy={busy}
+            refetchAll={refetchAll}
+          />
+        </div>
       </ProjectRefs.Provider>
     </div>
   );
@@ -492,13 +558,13 @@ export function ProjectsView({
   const selected = ordered.find((p) => p.slug === picked) ?? ordered[0];
   const top = (
     <div className="top">
-      <div className="bar filters" data-needs-me-filter={filter}>
+      <ToggleGroup type="single" variant="outline" size="sm" aria-label="Filter" className="filters" data-needs-me-filter={filter} value={filter} onValueChange={(f) => f && setFilter(f as Filter)}>
         {FILTERS.map((f) => (
-          <button key={f} type="button" aria-pressed={filter === f} data-filter={f} onClick={() => setFilter(f)}>
-            {FILTER_WORD[f]} {f === "all" ? live.length : count(f)}
-          </button>
+          <ToggleGroupItem key={f} value={f} data-filter={f}>
+            {FILTER_WORD[f]} <span className="text-muted-foreground tabular-nums">{f === "all" ? live.length : count(f)}</span>
+          </ToggleGroupItem>
         ))}
-      </div>
+      </ToggleGroup>
       <SearchBox value={query} onChange={setQuery} />
     </div>
   );
@@ -511,9 +577,10 @@ export function ProjectsView({
   const archivedGroup = archived.length ? (
     <div className="quiet" data-group="archived">
       <h3 className="group-h">
-        <button type="button" data-archived-toggle="" aria-expanded={showArchived} onClick={() => setShowArchived((x) => !x)}>
-          Archived · {archived.length} {showArchived ? "▾" : "▸"}
-        </button>
+        <Btn tone="ghost" size="sm" className="-ml-2 h-7 px-2 text-xs font-normal text-muted-foreground" data-archived-toggle="" aria-expanded={showArchived} onClick={() => setShowArchived((x) => !x)}>
+          Archived · {archived.length}
+          {showArchived ? <ChevronDown aria-hidden /> : <ChevronRight aria-hidden />}
+        </Btn>
       </h3>
       {showArchived ? (
         <ul>
@@ -536,7 +603,7 @@ export function ProjectsView({
       ),
     );
   const list = (
-    <div>
+    <div className={wide ? "k-listpane" : undefined} data-projects-list="">
       {main.length ? (
         <ul className="k-plist" role="list" aria-label="Projects" data-group="led">
           {rows(main, false)}
@@ -556,7 +623,7 @@ export function ProjectsView({
   return (
     <RefsContext.Provider value={refs}>
     {/* measured at the pane's full width; one column keeps the reading column's width (max-w-3xl less its padding) */}
-    <div ref={root} data-projects-width={width}>
+    <div ref={root} data-projects-width={width} data-fits-pane={wide || undefined}>
     <div className={cx("orch-cc tab pb-8", !wide && "narrow-book")} data-projects-tab="" data-layout={wide ? "list-detail" : "column"} style={wide ? undefined : { maxWidth: 1000, marginInline: "auto" }}>
       {/* a changed block gets a new href: React keeps a style by its href, so a window open across an update would keep the old rules */}
       <style href={styleHref("orch-cc", ccCss)} precedence="default">

@@ -2,18 +2,25 @@
 // approves one, or requests changes in their own words and the lead re-delivers. Decided and withdrawn ones move to the
 // past list below (past.ts, past-view.tsx), with the outputs that aren't any deliverable's proof under its Files filter. Writes go through the page's one write gate (store.ts): one at a time, every button off while one is in
 // flight, and each write carries the revision the owner is looking at (a newer one is refused, never approved blind).
+// On shadcn/ui since 2026-11-17: Card, Textarea, Collapsible folds and the picker rows as ghost buttons.
+// 2026-11-17, every deliverable keeps its own files: a past one shows as PastDeliverable, its files as full items (images
+// and videos inline at full width, the rest as rows) with Open folder; the Files filter lists every file (past-view.tsx).
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Markdown, experimental_useRpcQuery, useBbNavigate, useRealtime, useSdk } from "@get-bb/plugin-sdk/app";
 import { manualSectionOrder, sidebarOrder } from "../core/project-order.ts";
 import { z } from "zod";
 import { CHANGED_CHANNEL, PROOF_ROUTE, WRITE_BASE, WRITES, rpcContract, type Deliverables, type Outputs, type ProjectOrder, type approveBody, type requestChangesBody } from "../contract.ts";
-import { Card, CardContent, CardHeader } from "./affect/card-clean.tsx";
-import { EmptyState } from "./affect/empty-state-clean.tsx";
-import { TextArea } from "./affect/text-area-clean.tsx";
+import { ItemGroup } from "./ui/item.tsx";
+import { Skeleton } from "./ui/skeleton.tsx";
+import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "./ui/card.tsx";
+import { Label } from "./ui/label.tsx";
+import { Textarea } from "./ui/textarea.tsx";
+import { cn } from "./ui/utils.ts";
+import { Fold } from "./answer-ui.tsx";
 import { MonSprite } from "./mon.tsx";
 import { Blocks } from "./blocks.tsx";
 import { lessText } from "./less-text.ts";
-import { Points } from "./visual-blocks.tsx";
+import { GALLERY, Points, SHOT } from "./visual-blocks.tsx";
 import { prKind } from "./palette.ts";
 import { openInBb } from "./open-proof.ts";
 import { ProofLink } from "./proof-link.tsx";
@@ -22,13 +29,13 @@ import { APPROVE_MS, pressApprove } from "./keys.ts";
 import { keyState, say, emitKeys } from "./key-state.ts";
 import { useViewKeys } from "./key-view.ts";
 import { age } from "./lanes.ts";
-import { Btn, Kind, PageError, ReadState, Who, cx, when } from "./ui.tsx";
-import { FoldedOutputs } from "./files.tsx";
-import { START, deliverablesTab, fold, shownDeliverable, type View } from "./past.ts";
-import { DeliverablesTree, STATE_WORD } from "./past-view.tsx";
+import { Btn, EmptyState, Kind, PageError, ReadState, Who, when } from "./ui.tsx";
+import { FileFull, FoldedOutputs, OpenFolder } from "./files.tsx";
+import { START, deliverablesTab, fold, shownDeliverable, shownRevision, type FileItem, type View } from "./past.ts";
+import { PastControls, PastRows, STATE_WORD, type FoldersState } from "./past-view.tsx";
 import { useElementWidth } from "./panes.tsx";
+import { requestDeliverable } from "./reveal.ts";
 import { isWide } from "./source.ts";
-import { styleHref } from "./style-href.ts";
 
 type Deliverable = Deliverables[number];
 type Proof = Deliverable["revisions"][number]["proof"][number];
@@ -37,6 +44,8 @@ type Query = { data: Deliverables | undefined; error: { message: string } | null
 
 const TEXT_LINES = 200;
 export const proofSrc = (id: string) => `${WRITE_BASE}${PROOF_ROUTE}?id=${encodeURIComponent(id)}`;
+/** A recorded output's file, through the same route and rules (2026-11-17). */
+export const outputSrc = (id: string) => `${WRITE_BASE}${PROOF_ROUTE}?output=${encodeURIComponent(id)}`;
 
 /** In review, newest first: what the Deliverables tab and the badges count. A scoping project's wait in the Scope tab instead. */
 export const inReview = (all: Deliverables | undefined): Deliverable[] => (all ?? []).filter((d) => d.state === "review" && !d.scope).sort((a, b) => b.updatedAt - a.updatedAt);
@@ -70,13 +79,13 @@ function TextProof({ id, markdown }: { id: string; markdown: boolean }) {
   return (
     <>
       {markdown && text ? (
-        <div className="orch-wash max-h-96 min-w-0 max-w-full overflow-x-hidden overflow-y-auto p-3 text-sm [overflow-wrap:anywhere]">
+        <div className="max-h-96 min-w-0 max-w-full overflow-x-hidden overflow-y-auto rounded-md bg-muted/50 p-3 text-sm [overflow-wrap:anywhere]">
           <Markdown content={text.lines.join("\n")} />
         </div>
       ) : (
-        <pre className="orch-mono orch-wash m-0 max-h-64 min-w-0 max-w-full overflow-auto p-2 text-xs whitespace-pre-wrap [overflow-wrap:anywhere]">{text ? text.lines.join("\n") : "Loading…"}</pre>
+        <pre className="orch-mono m-0 max-h-64 min-w-0 max-w-full overflow-auto rounded-md bg-muted/50 p-2 text-xs whitespace-pre-wrap [overflow-wrap:anywhere]">{text ? text.lines.join("\n") : "Loading…"}</pre>
       )}
-      {text && text.more > 0 ? <p className="orch-muted m-0 text-xs">{text.more} more lines not shown.</p> : null}
+      {text && text.more > 0 ? <p className="m-0 text-xs text-muted-foreground">{text.more} more lines not shown.</p> : null}
     </>
   );
 }
@@ -87,7 +96,7 @@ const prNumber = (url: string | null | undefined) => url?.match(/\/pull\/(\d+)/)
 export function ProofView({ p }: { p: Proof }) {
   const navigate = useBbNavigate();
   const [unopened, setUnopened] = useState(false);
-  const caption = <figcaption className="orch-muted mt-1 text-xs [overflow-wrap:anywhere]">{p.caption}</figcaption>;
+  const caption = <figcaption className="mt-1 text-xs text-muted-foreground [overflow-wrap:anywhere]">{p.caption}</figcaption>;
   // every kind opens as a bb pane (open-proof.ts); a file's fallback is the proof route in a new tab
   const file = p.kind === "image" || p.kind === "video" || p.kind === "text" ? proofSrc(p.id) : undefined;
   const openLink = (
@@ -99,7 +108,7 @@ export function ProofView({ p }: { p: Proof }) {
     return (
       <figure className="m-0" data-proof={p.id}>
         {/* full size in a bb pane */}
-        <ProofLink open={p} fallback={file} className="orch-shot inline-block max-w-full">
+        <ProofLink open={p} fallback={file} className={cn(SHOT, "inline-block max-w-full")}>
           <img src={proofSrc(p.id)} alt={p.caption} loading="lazy" decoding="async" className="block h-auto max-h-80 w-auto max-w-full cursor-zoom-in" />
         </ProofLink>
         {caption}
@@ -108,7 +117,7 @@ export function ProofView({ p }: { p: Proof }) {
   if (p.kind === "video")
     return (
       <figure className="m-0" data-proof={p.id}>
-        <video src={proofSrc(p.id)} controls preload="metadata" className="orch-shot block h-64 w-full" />
+        <video src={proofSrc(p.id)} controls preload="metadata" className={cn(SHOT, "block h-64 w-full")} />
         <div className="flex items-baseline gap-2">
           {openLink}
           {caption}
@@ -133,7 +142,7 @@ export function ProofView({ p }: { p: Proof }) {
             {p.pr ? `PR${p.pr.number ? ` #${p.pr.number}` : ""} · ${p.pr.state ?? "?"}${p.pr.attention && p.pr.attention !== "none" && p.pr.attention !== p.pr.state ? ` · ${p.pr.attention.replace(/_/g, " ")}` : ""}${p.pr.checks ? ` · checks ${p.pr.checks}` : ""}` : `PR${prNumber(p.url) ? ` #${prNumber(p.url)}` : ""}`}
           </Kind>
         </ProofLink>
-        <span className="orch-muted text-xs [overflow-wrap:anywhere]">{p.caption}</span>
+        <span className="text-xs text-muted-foreground [overflow-wrap:anywhere]">{p.caption}</span>
       </div>
     );
   // a doc or a link: a file in bb's preview pane on its host, a URL in bb's browser pane
@@ -147,7 +156,7 @@ export function ProofView({ p }: { p: Proof }) {
         <Btn onClick={() => setUnopened(!openInBb(navigate, p))}>Open doc</Btn>
       )}
       <Kind of={p.kind} />
-      <span className="orch-muted text-xs [overflow-wrap:anywhere]">{p.caption}</span>
+      <span className="text-xs text-muted-foreground [overflow-wrap:anywhere]">{p.caption}</span>
       {unopened ? (
         <span role="alert" className="orch-danger text-xs">
           bb couldn't open this file here.
@@ -186,7 +195,10 @@ function Review({ d, refetchAll }: { d: Deliverable; refetchAll: () => void }) {
     <div className="mt-3 grid gap-2">
       {asking ? (
         <>
-          <TextArea label="What to change" value={text} onChange={(e) => setText(e.target.value)} maxLength={4000} minRows={3} placeholder="The lead gets these words and re-delivers" data-changes-text={d.id} />
+          <div className="grid gap-1.5">
+            <Label htmlFor={`changes-${d.id}`}>What to change</Label>
+            <Textarea id={`changes-${d.id}`} value={text} onChange={(e) => setText(e.target.value)} maxLength={4000} className="min-h-20" placeholder="The lead gets these words and re-delivers" data-changes-text={d.id} />
+          </div>
           <div className="flex flex-wrap justify-end gap-2">
             <Btn tone="ghost" disabled={busy} onClick={() => setAsking(false)}>
               Cancel
@@ -198,16 +210,22 @@ function Review({ d, refetchAll }: { d: Deliverable; refetchAll: () => void }) {
         </>
       ) : (
         <>
-          <TextArea
+          <Textarea
             aria-label="Next move"
             value={next}
             onChange={(e) => setNext(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                e.preventDefault();
+                if (!busy && action) void approve();
+              }
+            }}
             maxLength={4000}
-            minRows={1}
-            maxRows={4}
+            // one line to start, up to four as it fills
+            rows={1}
+            className="max-h-28 min-h-9"
             placeholder="Next move? e.g. forward this to the team"
             data-next-text={d.id}
-            onSubmitShortcut={() => !busy && action && void approve()}
           />
           <div className="flex flex-wrap justify-end gap-2">
             <Btn data-changes={d.id} disabled={busy} onClick={() => setAsking(true)}>
@@ -225,7 +243,7 @@ function Review({ d, refetchAll }: { d: Deliverable; refetchAll: () => void }) {
             </Btn>
           </div>
           {/* said under the button, not only in its tooltip: a phone has no hover */}
-          <p data-approve-hint="" className="orch-muted m-0 text-right text-xs">
+          <p data-approve-hint="" className="m-0 text-right text-xs text-muted-foreground">
             {action ? "Approves it; the lead does this and reports back" : "Closes it; the lead does nothing further"}
           </p>
         </>
@@ -243,9 +261,9 @@ const NEXT_TONE: Record<string, "done" | "deferred" | "alarm" | "inactive"> = { 
 export function NextLine({ n }: { n: NonNullable<Deliverable["next"]> }) {
   return (
     <p data-next={n.state} className="m-0 mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xs [overflow-wrap:anywhere]">
-      <span className="orch-muted">Next:</span>
+      <span className="text-muted-foreground">Next:</span>
       <span className="font-medium">{n.text}</span>
-      <span className="orch-muted">→</span>
+      <span className="text-muted-foreground">→</span>
       {n.state === "closed" ? (
         <>
           <Kind of={n.outcome ?? "closed"} group={NEXT_TONE[n.outcome ?? ""] ?? "inactive"} data-next-outcome={n.outcome ?? ""}>
@@ -253,7 +271,7 @@ export function NextLine({ n }: { n: NonNullable<Deliverable["next"]> }) {
           </Kind>
           <span>
             {n.note ? <span data-next-note="">· “{n.note}” </span> : null}
-            {n.closedAt ? <span className="orch-muted">· {age(n.closedAt, Date.now())}</span> : null}
+            {n.closedAt ? <span className="text-muted-foreground">· {age(n.closedAt, Date.now())}</span> : null}
           </span>
         </>
       ) : n.state === "dead" ? (
@@ -270,12 +288,11 @@ export function History({ d }: { d: Deliverable }) {
   const earlier = d.revisions.filter((r) => r.rev < d.rev);
   if (earlier.length === 0 && d.feedback.length === 0) return null;
   return (
-    <details className="mt-3 text-xs">
-      <summary className="orch-muted cursor-pointer">History ({d.revisions.length} revision{d.revisions.length === 1 ? "" : "s"})</summary>
+    <Fold label={`History (${d.revisions.length} revision${d.revisions.length === 1 ? "" : "s"})`} className="mt-3 text-xs" data-history="">
       <ol className="m-0 mt-2 grid list-none gap-2 p-0">
         {d.revisions.map((r) => (
-          <li key={r.rev} className="orch-wash p-2">
-            <div className="orch-muted">
+          <li key={r.rev} className="rounded-md bg-muted/50 p-2">
+            <div className="text-muted-foreground">
               rev {r.rev} · {when(r.at)} · {r.proof.length} proof
             </div>
             <div className="mt-1 min-w-0 [overflow-wrap:anywhere]"><Markdown content={r.summary} /></div>
@@ -284,7 +301,7 @@ export function History({ d }: { d: Deliverable }) {
               .map((f) => (
                 <p key={f.at} className="m-0 mt-1 flex flex-wrap items-center gap-1.5 [overflow-wrap:anywhere]">
                   <Kind of={f.outcome}>{f.outcome === "changes" ? "changes requested" : "approved"}</Kind>
-                  <span className="orch-muted">{when(f.at)}</span>
+                  <span className="text-muted-foreground">{when(f.at)}</span>
                   {f.text ? <span className="whitespace-pre-wrap">{f.text}</span> : null}
                 </p>
               ))}
@@ -292,7 +309,22 @@ export function History({ d }: { d: Deliverable }) {
           </li>
         ))}
       </ol>
-    </details>
+    </Fold>
+  );
+}
+
+/** A deliverable's title, its project and its state, as a shadcn card header. */
+function Head({ d }: { d: Deliverable }) {
+  return (
+    <CardHeader className="px-5">
+      <CardTitle role="heading" aria-level={3} className="text-base leading-6 [overflow-wrap:anywhere]">
+        {d.title}
+      </CardTitle>
+      <CardDescription>{d.project ?? "No project"}</CardDescription>
+      <CardAction>
+        <StateChip d={d} />
+      </CardAction>
+    </CardHeader>
   );
 }
 
@@ -308,7 +340,7 @@ function Settled({ d }: { d: Deliverable }) {
   return (
     <div className="mt-3" data-settled={d.id}>
       {d.withdrawn ? (
-        <p className="orch-muted m-0 text-xs [overflow-wrap:anywhere]">
+        <p className="m-0 text-xs text-muted-foreground [overflow-wrap:anywhere]">
           Withdrawn {when(d.withdrawn.at)}
           {d.withdrawn.reason ? `: ${d.withdrawn.reason}` : ""}
         </p>
@@ -326,10 +358,10 @@ export function DeliverableCard({ d, refetchAll, outputs, outputsAfter }: { d: D
   const short = latest ? lessText(latest) : null;
   if (short && latest) return <ShortCard d={d} rev={latest} layout={short} media={media} rest={rest} refetchAll={refetchAll} outputs={outputs} outputsAfter={outputsAfter} />;
   return (
-    <Card as="article" data-deliverable={d.state === "review" ? d.id : undefined} data-shown={d.id}>
-      <CardHeader title={d.title} titleAs="h3" description={d.project ?? "No project"} action={<StateChip d={d} />} />
-      <CardContent>
-        <div className="orch-muted flex flex-wrap items-center gap-2 text-xs">
+    <Card role="article" data-deliverable={d.state === "review" ? d.id : undefined} data-shown={d.id} className="gap-4 py-5">
+      <Head d={d} />
+      <CardContent className="px-5">
+        <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
           <MonSprite mon={d.leadMon} address={d.lead} size={28} />
           <Who address={d.lead} nowrap />
           <span>{when(d.updatedAt)}</span>
@@ -338,7 +370,7 @@ export function DeliverableCard({ d, refetchAll, outputs, outputsAfter }: { d: D
         {/* Requested 2026-11-13: "a lot more visual". What it looks like first (screenshots, video), then the typed
             parts (decisions, diagram, root cause, what to change, checks), then the rest of the proof. */}
         {media.length > 0 ? (
-          <div data-gallery="" className={cx("mt-3 grid gap-3", media.length > 1 && "orch-gallery")}>
+          <div data-gallery="" className={cn("mt-3 grid gap-3", media.length > 1 && GALLERY)}>
             {media.map((p) => (
               <ProofView key={p.id} p={p} />
             ))}
@@ -360,19 +392,90 @@ export function DeliverableCard({ d, refetchAll, outputs, outputsAfter }: { d: D
   );
 }
 
+/**
+ * A past deliverable as the owner looks back at it (2026-11-17): what its card said (summary, points, typed parts, how
+ * it was settled), then its files as full items: images and videos inline at full width, the rest as rows with name,
+ * kind and size, and Open folder; then its links and PRs, and its history.
+ */
+export function PastDeliverable({ d, files, folders, refetchAll, outputsAfter }: { d: Deliverable; files: FileItem[]; folders: FoldersState; refetchAll: () => void; outputsAfter: () => void }) {
+  if (d.state === "review") return <DeliverableCard d={d} refetchAll={refetchAll} outputs={[]} outputsAfter={outputsAfter} />;
+  const rev = shownRevision(d);
+  const host = folders.data?.hostId ?? null;
+  const folder = folders.data?.folders[d.id];
+  const media = files.filter((f) => !f.missing && ((f.kind === "images" && f.proof?.kind === "image") || (f.kind === "videos" && f.proof?.kind === "video")));
+  const rest = files.filter((f) => !media.includes(f));
+  const links = (rev?.proof ?? []).filter((p) => p.url);
+  return (
+    <Card role="article" data-shown={d.id} data-past-detail={d.id} className="gap-4 py-5">
+      <Head d={d} />
+      <CardContent className="grid gap-3 px-5">
+        <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+          <MonSprite mon={d.leadMon} address={d.lead} size={28} />
+          <Who address={d.lead} nowrap />
+          <span>{when(d.updatedAt)}</span>
+        </div>
+        <div className="min-w-0 [overflow-wrap:anywhere]">
+          <Markdown content={rev?.summary ?? d.summary} />
+        </div>
+        {rev && rev.points.length > 0 ? <Points points={rev.points} /> : null}
+        <Blocks blocks={rev?.blocks ?? []} prs={rev?.prs ?? []} />
+        <Settled d={d} />
+        <section aria-label="Files" data-past-files={d.id} className="grid gap-3 border-t pt-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h4 className="m-0 text-sm font-semibold">
+              Files <span className="font-normal text-muted-foreground tabular-nums">{files.length}</span>
+            </h4>
+            <OpenFolder folder={folder} host={host} />
+          </div>
+          {!folders.data && !folders.error ? (
+            <div role="status" className="grid gap-2">
+              <span className="sr-only">Loading…</span>
+              <Skeleton className="aspect-video w-full" />
+              <Skeleton className="h-4 w-56" />
+            </div>
+          ) : files.length === 0 ? (
+            <p className="m-0 text-sm text-muted-foreground">No files: its proof is links only.</p>
+          ) : (
+            <>
+              {media.map((f) => (
+                <FileFull key={f.key} f={f} host={host} after={outputsAfter} />
+              ))}
+              {rest.length > 0 ? (
+                <ItemGroup>
+                  {rest.map((f) => (
+                    <FileFull key={f.key} f={f} host={host} after={outputsAfter} />
+                  ))}
+                </ItemGroup>
+              ) : null}
+            </>
+          )}
+        </section>
+        {links.length > 0 ? (
+          <div className="grid gap-2" data-past-links="">
+            {links.map((p) => (
+              <ProofView key={p.id} p={p} />
+            ))}
+          </div>
+        ) : null}
+        <History d={d} />
+      </CardContent>
+    </Card>
+  );
+}
+
 /** A deliverable with points (2026-11-14, "way less text"): pictures, then each decision and finding in a line; the rest closed. */
 function ShortCard({ d, rev, layout, media, rest, refetchAll, outputs, outputsAfter }: { d: Deliverable; rev: Deliverable["revisions"][number]; layout: NonNullable<ReturnType<typeof lessText>>; media: Proof[]; rest: Proof[]; refetchAll: () => void; outputs: Output[]; outputsAfter: () => void }) {
   const part = (p: (typeof layout.parts)[number]) => {
     switch (p) {
       case "context":
         return (
-          <p key={p} data-context-line="" className="orch-muted m-0 mt-2 text-sm [overflow-wrap:anywhere]">
+          <p key={p} data-context-line="" className="m-0 mt-2 text-sm text-muted-foreground [overflow-wrap:anywhere]">
             {rev.summary}
           </p>
         );
       case "media":
         return media.length > 0 ? (
-          <div key={p} data-gallery="" className={cx("mt-3 grid gap-3", media.length > 1 && "orch-gallery")}>
+          <div key={p} data-gallery="" className={cn("mt-3 grid gap-3", media.length > 1 && GALLERY)}>
             {media.map((m) => (
               <ProofView key={m.id} p={m} />
             ))}
@@ -389,10 +492,9 @@ function ShortCard({ d, rev, layout, media, rest, refetchAll, outputs, outputsAf
       case "review":
         return d.state === "review" ? <Review key={p} d={d} refetchAll={refetchAll} /> : <Settled key={p} d={d} />;
       case "details":
-        // no open attribute: Details starts closed, and React never closes it again on a re-render
+        // Details starts closed; its content stays in the page, hidden, so the order holds open or closed
         return (
-          <details key={p} data-details="" className="mt-3">
-            <summary className="orch-muted cursor-pointer text-sm">{layout.detailsLabel}</summary>
+          <Fold key={p} label={layout.detailsLabel} data-details="" className="mt-3">
             <Blocks blocks={rev.blocks} prs={rev.prs} only={layout.rest} />
             {rest.length > 0 ? (
               <div className="mt-3 grid gap-3">
@@ -401,17 +503,17 @@ function ShortCard({ d, rev, layout, media, rest, refetchAll, outputs, outputsAf
                 ))}
               </div>
             ) : null}
-          </details>
+          </Fold>
         );
       case "history":
         return <History key={p} d={d} />;
     }
   };
   return (
-    <Card as="article" data-deliverable={d.state === "review" ? d.id : undefined} data-shown={d.id} data-layout="short">
-      <CardHeader title={d.title} titleAs="h3" description={d.project ?? "No project"} action={<StateChip d={d} />} />
-      <CardContent>
-        <div className="orch-muted flex flex-wrap items-center gap-2 text-xs">
+    <Card role="article" data-deliverable={d.state === "review" ? d.id : undefined} data-shown={d.id} data-layout="short" className="gap-4 py-5">
+      <Head d={d} />
+      <CardContent className="px-5">
+        <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
           <MonSprite mon={d.leadMon} address={d.lead} size={28} />
           <Who address={d.lead} nowrap />
           <span>{when(d.updatedAt)}</span>
@@ -469,13 +571,16 @@ export function DeliverablesView({ q, refetchAll, files = false }: { q: Query; r
   const wide = isWide(width);
   const [picked, setPicked] = useState<string | null>(null);
   const outputs = experimental_useRpcQuery({ contract: rpcContract, method: "outputs", input: null });
-  // the sidebar's project order and accents, for the tree's folders
+  // the sidebar's project order, for the project filter
   const order = experimental_useRpcQuery({ contract: rpcContract, method: "projectOrder", input: null });
-  const latestOutputs = useRef({ outputs: outputs.refetch, order: order.refetch });
-  latestOutputs.current = { outputs: outputs.refetch, order: order.refetch };
+  // every deliverable's own folder, listed (2026-11-17): its files beside its proof, and a thread's notes
+  const folders = experimental_useRpcQuery({ contract: rpcContract, method: "deliverableFolders", input: null });
+  const latestOutputs = useRef({ outputs: outputs.refetch, order: order.refetch, folders: folders.refetch });
+  latestOutputs.current = { outputs: outputs.refetch, order: order.refetch, folders: folders.refetch };
   const refetchOutputs = useCallback(() => {
     void latestOutputs.current.outputs();
     void latestOutputs.current.order();
+    void latestOutputs.current.folders();
   }, []);
   useRealtime(CHANGED_CHANNEL, refetchOutputs);
   const sorted = useSidebarOrder(order.data);
@@ -511,72 +616,94 @@ export function DeliverablesView({ q, refetchAll, files = false }: { q: Query; r
   if (!q.data) return <ReadState q={q} what="the deliverables" />;
   // a scoping project's deliverables in review are reviewed in the Scope tab; once decided they file here as usual
   const all = q.data.filter((d) => !inScope(d));
-  const tab = deliverablesTab(all, outputs.data ?? [], view, sorted);
+  const tab = deliverablesTab(all, outputs.data ?? [], view, sorted, folders.data?.folders ?? {});
   const review = tab.review;
   const filesState = { loaded: outputs.data !== undefined, error: outputs.error?.message ?? null };
+  const foldersState: FoldersState = { data: folders.data, error: folders.error?.message ?? null };
   const empty = <EmptyState title="Nothing to review" text="Leads deliver finished work here with proof (orch_deliver). You approve it or send it back." />;
+  const heading = view.filter === "files" ? "Files" : "Past deliverables";
+  // a file's deliverable link: back to the list, with that deliverable picked (wide) or opened (narrow)
+  const showDeliverable = (id: string) => {
+    setView(() => START);
+    setPicked(id);
+    requestDeliverable(id); // pending too, so the list that mounts in the nav opens its folder (reveal.ts)
+  };
+  const rows = (pick?: { id: string | null; on: (id: string) => void }) => (
+    <PastRows tab={tab} view={view} setView={setView} outputs={filesState} folders={foldersState} outputsAfter={refetchOutputs} refetchAll={refetchAll} pick={pick} onDeliverable={showDeliverable} />
+  );
   if (!wide)
     return (
       <div ref={setRoot} data-deliverables-width={width}>
         <div className="flex flex-col gap-4 pb-8" data-layout="column" style={{ maxWidth: 768, marginInline: "auto" }}>
           <ReadState q={q} what="the deliverables" />
           {review.length === 0 ? empty : review.map((r) => <DeliverableCard key={r.d.id} d={r.d} refetchAll={refetchAll} outputs={r.outputs} outputsAfter={refetchOutputs} />)}
-          <DeliverablesTree tab={tab} view={view} setView={setView} files={filesState} outputsAfter={refetchOutputs} />
+          <h2 className="m-0 text-base leading-6 font-semibold">{heading}</h2>
+          <PastControls tab={tab} view={view} setView={setView} />
+          {rows()}
         </div>
       </div>
     );
-  // wide: the directory (in review on top, then the project folders) beside the picked deliverable
+  // wide: the list (in review on top, then the past deliverables) beside the picked deliverable; under Files, the files
+  // take the detail's place
   const shown = shownDeliverable(all, picked);
   const shownOutputs = shown ? (fold(all, outputs.data ?? []).byDeliverable.get(shown.id) ?? []) : [];
+  const filesView = view.filter === "files";
   return (
     <div ref={setRoot} data-deliverables-width={width}>
-      <div className="orch-dlv pb-8" data-layout="list-detail">
+      <div className="pb-8" data-layout="list-detail">
         <ReadState q={q} what="the deliverables" />
-        <div className="orch-dlv__body">
-          <nav className="orch-dlv__list" aria-label="Deliverables">
+        <div className="grid grid-cols-[minmax(340px,420px)_minmax(0,1fr)] items-start gap-6">
+          <nav className="flex min-w-0 flex-col gap-6" aria-label="Deliverables">
             <section aria-label="In review">
-              <h2 className="orch-dlv__h">In review · {review.length}</h2>
+              <h2 className="m-0 mb-2 text-base leading-6 font-semibold">In review · {review.length}</h2>
               {review.length === 0 ? (
-                <p className="orch-muted m-0 text-sm">Nothing to review.</p>
+                <p className="m-0 text-sm text-muted-foreground">Nothing to review.</p>
               ) : (
-                <ul className="orch-dlv__rows" role="list">
+                <ul className="m-0 grid list-none gap-0.5 p-0" role="list">
                   {review.map(({ d }) => (
                     <li key={d.id}>
-                      <button type="button" className="orch-dlv__row" data-review-row={d.id} aria-current={shown?.id === d.id || undefined} onClick={() => setPicked(d.id)}>
-                        <span className="orch-dlv__t">{d.title}</span>
-                        <span className="orch-dlv__m">
+                      <Btn
+                        tone="ghost"
+                        className="h-auto w-full flex-col items-start gap-0.5 p-2 text-start font-normal whitespace-normal aria-[current=true]:bg-accent"
+                        data-review-row={d.id}
+                        aria-current={shown?.id === d.id || undefined}
+                        onClick={() => setPicked(d.id)}
+                      >
+                        <span className="text-sm leading-5 font-semibold [overflow-wrap:anywhere]">{d.title}</span>
+                        <span className="text-xs text-muted-foreground [overflow-wrap:anywhere]">
                           {d.project ?? "No project"} · {d.lead} · {age(d.updatedAt, Date.now())} ago{d.rev > 1 ? ` · rev ${d.rev}` : ""}
                         </span>
-                      </button>
+                      </Btn>
                     </li>
                   ))}
                 </ul>
               )}
             </section>
-            <DeliverablesTree tab={tab} view={view} setView={setView} files={filesState} outputsAfter={refetchOutputs} pick={{ id: shown?.id ?? null, on: setPicked }} />
+            <section className="grid grid-cols-[minmax(0,1fr)] gap-3" aria-label={heading}>
+              <h2 className="m-0 text-base leading-6 font-semibold">{heading}</h2>
+              <PastControls tab={tab} view={view} setView={setView} />
+              {filesView ? null : rows({ id: shown?.id ?? null, on: setPicked })}
+            </section>
           </nav>
-          <div className="orch-dlv__detail" data-detail={shown?.id ?? ""}>
-            {shown ? <DeliverableCard key={shown.id} d={shown} refetchAll={refetchAll} outputs={shownOutputs} outputsAfter={refetchOutputs} /> : empty}
-          </div>
+          {filesView ? (
+            <div className="min-w-0" data-detail="files">
+              {rows()}
+            </div>
+          ) : (
+            <div className="min-w-0" data-detail={shown?.id ?? ""}>
+              {shown ? (
+                shown.state === "review" ? (
+                  <DeliverableCard key={shown.id} d={shown} refetchAll={refetchAll} outputs={shownOutputs} outputsAfter={refetchOutputs} />
+                ) : (
+                  <PastDeliverable key={shown.id} d={shown} files={tab.filesBy.get(shown.id) ?? []} folders={foldersState} refetchAll={refetchAll} outputsAfter={refetchOutputs} />
+                )
+              ) : (
+                empty
+              )}
+            </div>
+          )}
         </div>
       </div>
-      <style href={styleHref("orch-dlv", dlvCss)} precedence="default">
-        {dlvCss}
-      </style>
     </div>
   );
 }
-
-// The wide tab, in the spirit of the Projects tab's list | detail: sizes 16/14/12, weights 400/600, selection a tint.
-const dlvCss = /* css */ `
-[data-orch] .orch-dlv__body { display: grid; grid-template-columns: minmax(340px, 420px) minmax(0, 1fr); gap: 24px; align-items: start; }
-[data-orch] .orch-dlv__list { display: flex; flex-direction: column; gap: 24px; min-width: 0; }
-[data-orch] .orch-dlv__h { margin: 0 0 8px; font-size: 16px; line-height: 24px; font-weight: 600; }
-[data-orch] .orch-dlv__rows { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; }
-[data-orch] .orch-dlv__row { display: grid; gap: 2px; width: 100%; padding: 8px; border: 0; border-radius: 6px; background: none; font: inherit; text-align: start; color: var(--orch-ink); cursor: pointer; }
-[data-orch] .orch-dlv__row:hover { background: var(--orch-wash); }
-[data-orch] .orch-dlv__row[aria-current] { background: light-dark(rgba(0, 0, 0, 0.07), rgba(255, 255, 255, 0.1)); }
-[data-orch] .orch-dlv__t { font-size: 14px; line-height: 20px; font-weight: 600; overflow-wrap: anywhere; }
-[data-orch] .orch-dlv__m { font-size: 12px; line-height: 16px; color: var(--orch-muted); overflow-wrap: anywhere; }
-[data-orch] .orch-dlv__detail { min-width: 0; }
-`;

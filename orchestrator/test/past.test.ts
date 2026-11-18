@@ -1,27 +1,34 @@
-// The merged Deliverables tab's promises (2026-11-16: Deliverables and Outputs in one, "so people can go look back and see
-// past deliverables easily", then "organize the All subtab by project" as "the folder style view and hierarchy"):
-// - what waits for the owner is always first, and never in the tree below;
-// - project folders follow the sidebar's order; inside one, newest first;
-// - a proof file is a child of its deliverable; an output that is that proof is that row, never listed again;
-// - an output that never became proof sits in its project's Files folder, never lost;
-// - a filter or search drops nothing that matches it, and a project with no match has no folder;
-// - the arrow keys walk the tree as a file explorer does.
+// The Deliverables tab's promises (2026-11-16: Deliverables and Outputs in one, "so people can go look back and see past
+// deliverables easily"; 2026-11-17: the tree was "really hard to navigate", so a flat list, and every file of every
+// deliverable "within that folder structure as well as alongside the deliverables as full items"):
+// - what waits for the owner is always first, and never in the list below;
+// - past deliverables are newest first; the project filter follows the sidebar's order;
+// - 2026-11-18, the owner ("we should still solve folders for the different projects"): under All projects, past
+//   deliverables and files sit in one folder per project, one level only, in the sidebar's order, with their counts
+//   after the filters; one project picked shows its rows with no folder;
+// - a deliverable's files are its folder's, sorted into artifacts, images and videos, with the proof that shows them;
+//   proof that couldn't be copied (missing, over the cap) is still listed, and says so;
+// - an output naming a deliverable's file (its copy or the original) is that file's, never listed again; any other
+//   output is loose, in Files, never lost;
+// - a filter, kind or search drops nothing that matches it;
+// - the arrow keys walk the list as a file explorer does, folders included.
 // Made-up projects, leads and files only.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { Deliverables, Outputs } from "../contract.ts";
-import { ALL_PROJECTS, FILTERS, START, deliverablesTab, flatten, fold, folderKeys, openByDefault, shownDeliverable, treeKey, type Folder, type ProjectNode, type View } from "../app/past.ts";
+import type { DeliverableFolders, Deliverables, Outputs } from "../contract.ts";
+import { ALL_PROJECTS, FILTERS, KINDS, START, deliverablesTab, fileItems, folderKey, folderOpen, fold, rowsOf, servedBy, shownDeliverable, treeKey, type Row, type View } from "../app/past.ts";
 import { RENAMED_VIEWS, panes, parse } from "../app/layout.ts";
 import { manualSectionOrder, sidebarOrder } from "../core/project-order.ts";
 
 type D = Deliverables[number];
 type O = Outputs[number];
+type P = D["revisions"][number]["proof"][number];
 
 let n = 0;
-function del(p: Partial<D> & { proof?: { path?: string; url?: string }[]; points?: string[] } = {}): D {
+function del(p: Partial<D> & { proof?: (Partial<P> & { path?: string; url?: string })[]; points?: string[] } = {}): D {
   const id = p.id ?? `v-${++n}`;
   const rev = p.rev ?? 1;
-  const proof = (p.proof ?? [{ path: `/work/${id}/shot.png` }]).map((x, i) => ({ id: `${id}-p${i}`, kind: x.url ? ("link" as const) : ("image" as const), caption: "c", path: x.path ?? null, url: x.url ?? null, hostId: x.path ? "h1" : null, pr: null }));
+  const proof = (p.proof ?? [{ path: `/work/${id}/shot.png` }]).map((x, i) => ({ id: `${id}-p${i}`, kind: x.url ? ("link" as const) : ("image" as const), caption: "c", pr: null, ...x, path: x.path ?? null, url: x.url ?? null, hostId: x.path ? "h1" : null }));
   const points = (p.points ?? []).map((headline) => ({ kind: "finding" as const, headline, why: "because" }));
   return {
     id,
@@ -42,75 +49,170 @@ function del(p: Partial<D> & { proof?: { path?: string; url?: string }[]; points
 }
 function out(p: Partial<O> = {}): O {
   const id = p.id ?? `o-${++n}`;
-  return { id, title: p.title ?? `Output ${id}`, kind: p.kind ?? "image", path: p.path === undefined ? `/work/files/${id}.png` : p.path, url: p.url ?? null, hostId: "h1", note: p.note ?? null, project: p.project === undefined ? "alpha" : p.project, author: "thread:alpha:1", at: p.at ?? 1 };
+  return { id, title: p.title ?? `Output ${id}`, kind: p.kind ?? "image", path: p.path === undefined ? `/work/files/${id}.png` : p.path, url: p.url ?? null, hostId: "h1", note: p.note ?? null, project: p.project === undefined ? "alpha" : p.project, author: "thread:alpha:1", at: p.at ?? 1, gone: p.gone ?? false };
+}
+/** A deliverable's folder as the server lists it. */
+function folder(id: string, names: string[], at = 5): DeliverableFolders["folders"][string] {
+  const root = `/state/deliverables/alpha/2026-11-17-x-${id}`;
+  return {
+    folder: root,
+    readme: `${root}/README.md`,
+    files: names.map((name) => {
+      const kind = /\.(png|jpe?g|gif|webp|avif|svg)$/.test(name) ? ("images" as const) : /\.(mp4|webm|mov|m4v)$/.test(name) ? ("videos" as const) : ("artifacts" as const);
+      return { path: `${root}/${kind}/${name}`, name, kind, bytes: 10, at, dir: false };
+    }),
+  };
 }
 
-const all: (n: Folder) => boolean = () => true;
-/** Every node of the tree, with its parent's key: the tree fully open. */
-const nodes = (tree: ProjectNode[]) => flatten(tree, all);
-const delIds = (tree: ProjectNode[]) => nodes(tree).flatMap((r) => (r.node.t === "deliverable" ? [r.node.d.id] : []));
-const fileIds = (tree: ProjectNode[]) => nodes(tree).flatMap((r) => (r.node.t === "file" ? [r.node.o.id] : []));
 const order = (...slugs: string[]) => slugs.map((slug) => ({ slug, monType: null }));
+const pastIds = (ds: D[], os: O[] = [], v: View = START) => deliverablesTab(ds, os, v).past.map((d) => d.id);
 
-test("what waits for the owner comes first, newest first, and is never repeated in the tree, under every filter and search", () => {
+test("what waits for the owner comes first, newest first, and is never repeated in the list, under every filter and search", () => {
   const old = del({ id: "v-old-review", state: "review", updatedAt: 10 });
   const newer = del({ id: "v-new-review", state: "review", updatedAt: 20, project: "beta" });
   const past = del({ id: "v-past", state: "approved", updatedAt: 99 });
   for (const f of FILTERS) {
-    for (const v of [{ ...START, filter: f.id }, { filter: f.id, project: "gamma", query: "nothing-matches-this" }] as View[]) {
+    for (const v of [{ ...START, filter: f.id }, { ...START, filter: f.id, project: "gamma", query: "nothing-matches-this" }] as View[]) {
       const tab = deliverablesTab([past, old, newer], [out({ at: 500 })], v);
       assert.deepEqual(tab.review.map((r) => r.d.id), ["v-new-review", "v-old-review"], `in review leads under ${JSON.stringify(v)}`);
-      assert.ok(!delIds(tab.tree).some((id) => id.endsWith("-review")), "and is not drawn again below");
+      assert.ok(!tab.past.some((d) => d.id.endsWith("-review")), "and is not drawn again below");
     }
   }
 });
 
-test("project folders follow the sidebar's order; a project it doesn't name comes after, by name, and No project last", () => {
+/** The rows as the owner reads them: a folder as `[project count]`, a deliverable or file by its id, indented under it. */
+const shape = (rows: Row[]) =>
+  rows.map((r) => {
+    const n = r.node;
+    const name = n.t === "project" ? `[${n.project ?? "none"} ${n.count}]` : n.t === "deliverable" ? n.d.id : (n.f.output?.id ?? n.f.d!.id);
+    return `${"  ".repeat(r.level)}${name}`;
+  });
+
+test("under All projects, past deliverables are one folder per project, one level only, in the sidebar's order, newest first inside", () => {
+  const ds = [
+    del({ id: "v-mid", updatedAt: 5, project: "beta" }),
+    del({ id: "v-new", updatedAt: 9 }),
+    del({ id: "v-old", updatedAt: 1, project: null }),
+    del({ id: "v-alpha-old", updatedAt: 2 }),
+    del({ id: "v-gone", updatedAt: 3, project: "deleted" }),
+  ];
+  assert.deepEqual(pastIds(ds), ["v-new", "v-mid", "v-gone", "v-alpha-old", "v-old"], "the tab's own list stays newest first");
+  const tab = deliverablesTab(ds, [], START, order("beta", "alpha"));
+  assert.deepEqual(shape(rowsOf(tab, START, () => false)), ["[beta 1]", "  v-mid", "[alpha 2]", "  v-new", "  v-alpha-old", "[deleted 1]", "  v-gone", "[none 1]", "  v-old"]);
+  for (const r of rowsOf(tab, START, () => true))
+    if (r.node.t === "project") assert.ok(r.level === 0 && r.parent === null, "a folder is at the top");
+    else assert.ok(r.level === 1 && r.parent === folderKey(r.node.t === "deliverable" ? r.node.d.project : null), "a deliverable sits in its project's folder, never deeper");
+});
+
+test("one project picked shows its deliverables with no folder", () => {
+  const ds = [del({ id: "v-a", project: "beta" }), del({ id: "v-b" }), del({ id: "v-c", project: null })];
+  for (const [project, ids] of [["beta", ["v-a"]], ["", ["v-c"]]] as const) {
+    const v = { ...START, project };
+    assert.deepEqual(shape(rowsOf(deliverablesTab(ds, [], v), v, () => false)), [...ids], `${project || "No project"} alone, at the top`);
+  }
+});
+
+test("a closed folder keeps its header and count but hides its rows; folders start open", () => {
+  const ds = [del({ id: "v-a", project: "beta", updatedAt: 2 }), del({ id: "v-b", updatedAt: 1 })];
+  const tab = deliverablesTab(ds, [], START);
+  assert.deepEqual(shape(rowsOf(tab, START, () => false)), ["[alpha 1]", "  v-b", "[beta 1]", "  v-a"], "open by default");
+  const closed = (key: string) => key !== folderKey("beta");
+  assert.deepEqual(shape(rowsOf(tab, START, () => false, closed)), ["[alpha 1]", "  v-b", "[beta 1]"]);
+});
+
+test("a search opens every folder with a match for as long as it is typed, and leaves the viewer's saved folders alone", () => {
+  const ds = [del({ id: "v-a", project: "beta", title: "Login fix" }), del({ id: "v-b", title: "Login redo" })];
+  const saved = { [folderKey("beta")]: false, [folderKey("alpha")]: false }; // the viewer closed both
+  const login = { ...START, query: "login" };
+  const tab = deliverablesTab(ds, [], login);
+  assert.deepEqual(shape(rowsOf(tab, login, () => false, folderOpen(login, saved, {}))), ["[alpha 1]", "  v-b", "[beta 1]", "  v-a"], "both open while searching");
+  const closedNow = { [folderKey("beta")]: false };
+  assert.deepEqual(shape(rowsOf(tab, login, () => false, folderOpen(login, saved, closedNow))), ["[alpha 1]", "  v-b", "[beta 1]"], "one closed during the search");
+  assert.deepEqual(saved, { [folderKey("beta")]: false, [folderKey("alpha")]: false }, "the saved state is untouched");
+  const cleared = deliverablesTab(ds, [], START);
+  assert.deepEqual(shape(rowsOf(cleared, START, () => false, folderOpen(START, saved, closedNow))), ["[alpha 1]", "[beta 1]"], "clearing the search brings the saved state back");
+  assert.deepEqual(shape(rowsOf(cleared, START, () => false, folderOpen({ ...START, query: "   " }, saved, {}))), ["[alpha 1]", "[beta 1]"], "spaces are no search");
+});
+
+test("filters and search reach into folders: a folder with no match is gone, and its count is what matches", () => {
+  const ds = [
+    del({ id: "v-a1", project: "beta", state: "approved", title: "Login fix", updatedAt: 3 }),
+    del({ id: "v-a2", project: "beta", state: "withdrawn", title: "Login redo", updatedAt: 2 }),
+    del({ id: "v-b", state: "approved", title: "Billing" }),
+  ];
+  const withdrawn = { ...START, filter: "withdrawn" as const };
+  assert.deepEqual(shape(rowsOf(deliverablesTab(ds, [], withdrawn), withdrawn, () => false)), ["[beta 1]", "  v-a2"]);
+  const login = { ...START, query: "login" };
+  assert.deepEqual(shape(rowsOf(deliverablesTab(ds, [], login), login, () => false)), ["[beta 2]", "  v-a1", "  v-a2"]);
+});
+
+test("Files are grouped the same way: each project's files and loose outputs in its folder, No project last", () => {
+  const ds = [del({ id: "v-a", project: "beta", updatedAt: 3 }), del({ id: "v-b", updatedAt: 1 })];
+  const os = [out({ id: "o-loose", project: "beta", at: 2 }), out({ id: "o-none", project: null, at: 5 })];
+  const fv = { ...START, filter: "files" as const };
+  const tab = deliverablesTab(ds, os, fv, order("alpha", "beta"));
+  assert.deepEqual(shape(rowsOf(tab, fv, () => false)), ["[alpha 1]", "  v-b", "[beta 2]", "  v-a", "  o-loose", "[none 1]", "  o-none"]);
+  const images = { ...fv, kind: "videos" as const };
+  assert.deepEqual(rowsOf(deliverablesTab(ds, os, images), images, () => false), [], "a kind with no files: no empty folders");
+  const one = { ...fv, project: "beta" };
+  assert.deepEqual(shape(rowsOf(deliverablesTab(ds, os, one), one, () => false)), ["v-a", "o-loose"], "one project: its files, no folder");
+});
+
+test("the project filter lists projects in the sidebar's order; one it doesn't name comes after, by name, and No project last", () => {
   const ds = [del({ project: "zeta" }), del({ project: null }), del({ project: "alpha" }), del({ project: "omega" }), del({ project: "beta" })];
-  const tree = deliverablesTab(ds, [], START, order("omega", "alpha", "zeta")).tree;
-  assert.deepEqual(tree.map((p) => p.project), ["omega", "alpha", "zeta", "beta", null]);
+  assert.deepEqual(deliverablesTab(ds, [], START, order("omega", "alpha", "zeta")).projects, ["omega", "alpha", "zeta", "beta", null]);
 });
 
-test("inside a project, deliverables are newest first, and its Files folder is newest first", () => {
-  const ds = [del({ id: "v-mid", updatedAt: 5 }), del({ id: "v-new", updatedAt: 9 }), del({ id: "v-old", updatedAt: 1 })];
-  const os = [out({ id: "o-b", at: 5 }), out({ id: "o-c", at: 9 }), out({ id: "o-a", at: 1 })];
-  const tree = deliverablesTab(ds, os, START).tree;
-  assert.equal(tree.length, 1);
-  assert.deepEqual(tree[0]!.children.map((c) => (c.t === "deliverable" ? c.d.id : "Files")), ["v-new", "v-mid", "v-old", "Files"]);
-  const files = tree[0]!.children.find((c) => c.t === "files");
-  assert.deepEqual(files?.t === "files" ? files.children.map((f) => f.o.id) : [], ["o-c", "o-b", "o-a"]);
+test("a deliverable's files are its folder's, sorted into artifacts, images and videos, each with the proof that shows it", () => {
+  const d = del({ id: "v-f" });
+  const f = folder("v-f", ["after.png", "demo.webm", "report.md", "notes.txt"]);
+  // the proof now shows the copy; its original stays as source
+  d.revisions[0]!.proof[0] = { ...d.revisions[0]!.proof[0]!, path: f.files[0]!.path, source: "/work/thread/after.png", stored: "copied" };
+  const tab = deliverablesTab([d], [], START, [], { "v-f": f });
+  const files = tab.filesBy.get("v-f")!;
+  assert.deepEqual(files.map((x) => [x.name, x.kind]), [["after.png", "images"], ["demo.webm", "videos"], ["report.md", "artifacts"], ["notes.txt", "artifacts"]]);
+  assert.equal(files[0]!.proof?.id, "v-f-p0", "the screenshot is served by its proof id");
+  assert.equal(files[2]!.proof, null, "a thread's note in the folder is a file too, without proof");
+  for (const k of KINDS) {
+    const v = { ...START, filter: "files" as const, kind: k.id };
+    assert.deepEqual(deliverablesTab([d], [], v, [], { "v-f": f }).files.map((x) => x.name).sort(), files.filter((x) => k.id === "all" || x.kind === k.id).map((x) => x.name).sort(), k.id);
+  }
+  assert.deepEqual(tab.kinds, { all: 4, artifacts: 2, images: 1, videos: 1 });
 });
 
-test("a proof file is a child of its deliverable, and an output that is that proof is that row, never in Files", () => {
-  const shot = "/work/alpha/after.png";
-  const link = "https://example.test/report";
-  const d = del({ id: "v-shown", proof: [{ path: shot }, { url: link }] });
-  const os = [out({ id: "o-shot", path: shot }), out({ id: "o-link", kind: "link", path: null, url: link }), out({ id: "o-loose" })];
-  const rows = nodes(deliverablesTab([d], os, START).tree);
-  const proofs = rows.filter((r) => r.node.t === "proof");
-  assert.deepEqual(proofs.map((r) => r.parent), ["d:v-shown", "d:v-shown"], "proof rows hang under the deliverable");
-  assert.deepEqual(proofs.map((r) => (r.node.t === "proof" ? r.node.output?.id : null)), ["o-shot", "o-link"]);
-  assert.deepEqual(fileIds(deliverablesTab([d], os, START).tree), ["o-loose"], "the proof outputs are not listed again");
-  // an in-review card also takes its proof outputs, so Files doesn't show them while the owner decides
-  const tab = deliverablesTab([{ ...d, state: "review" }], os, START);
-  assert.deepEqual(tab.review[0]!.outputs.map((o) => o.id).sort(), ["o-link", "o-shot"]);
-  assert.deepEqual(fileIds(tab.tree), ["o-loose"]);
+test("proof that never reached the folder is still listed: missing says so, over the cap and pre-folder ones keep their path", () => {
+  const d = del({
+    id: "v-m",
+    proof: [
+      { path: "/gone/worktree/lost.png", stored: "missing" },
+      { path: "/work/big.mp4", kind: "video", stored: "too_big", bytes: 300 },
+      { path: "/work/old.txt", kind: "text" },
+      { url: "https://example.test/pr" },
+    ],
+  });
+  const files = deliverablesTab([d], [], START, [], { "v-m": folder("v-m", []) }).filesBy.get("v-m")!;
+  assert.deepEqual(files.map((f) => [f.name, f.kind, f.missing]), [["lost.png", "images", true], ["big.mp4", "videos", false], ["old.txt", "artifacts", false]]);
+  assert.equal(files[1]!.proof?.id, "v-m-p1", "over the cap: still served, from the original");
+  assert.ok(!files.some((f) => f.url), "a link isn't a file");
 });
 
-test("a loose output sits under its own project's Files folder", () => {
-  const tree = deliverablesTab([del({ project: "alpha" })], [out({ id: "o-beta", project: "beta" }), out({ id: "o-none", project: null })], START, order("alpha", "beta")).tree;
-  const rows = nodes(tree);
-  const parentOf = (id: string) => rows.find((r) => r.node.t === "file" && r.node.o.id === id)!.parent;
-  assert.equal(parentOf("o-beta"), "F:beta");
-  assert.equal(rows.find((r) => r.node.key === "F:beta")!.parent, "p:beta");
-  assert.equal(parentOf("o-none"), "F:");
-  assert.equal(rows.find((r) => r.node.key === "F:")!.parent, "p:");
+test("an output naming a deliverable's file, by its copy or its original, is that file's and never listed again", () => {
+  const d = del({ id: "v-o" });
+  const f = folder("v-o", ["shot.png", "report.md"]);
+  d.revisions[0]!.proof[0] = { ...d.revisions[0]!.proof[0]!, path: f.files[0]!.path, source: "/work/thread/shot.png", stored: "copied" };
+  const byOriginal = out({ id: "o-orig", path: "/work/thread/shot.png" });
+  const byCopy = out({ id: "o-copy", kind: "doc", path: f.files[1]!.path }); // a thread's output the archive routed in
+  const loose = out({ id: "o-loose" });
+  const otherProject = out({ id: "o-beta", path: "/work/thread/shot.png", project: "beta" }); // same path, another project
+  const { items, loose: rest } = fileItems([d], [byOriginal, byCopy, loose, otherProject], { "v-o": f });
+  assert.equal(items.find((x) => x.name === "shot.png")!.output?.id, "o-orig");
+  assert.equal(items.find((x) => x.name === "report.md")!.output?.id, "o-copy");
+  assert.deepEqual(rest.map((x) => x.output!.id).sort(), ["o-beta", "o-loose"]);
 });
 
-test("no output is lost: each lands exactly once, as a proof row or under Files, withdrawn deliverables and older revisions included", () => {
+test("no output is lost: each lands exactly once, on a file or loose, withdrawn deliverables and older revisions included", () => {
   const ds = [
     del({ id: "v-a", proof: [{ path: "/work/a.png" }] }),
-    // only an older revision used this file: the tree shows rev 2's proof, so the file stays a visible File
     del({
       id: "v-b",
       rev: 2,
@@ -126,85 +228,131 @@ test("no output is lost: each lands exactly once, as a proof row or under Files,
     out({ id: "o-b-old", path: "/work/b-old.png" }),
     out({ id: "o-b-new", path: "/work/b-new.png" }),
     out({ id: "o-w", path: "/work/w.png" }),
-    out({ id: "o-other-project", path: "/work/a.png", project: "beta" }), // same file, another project: not v-a's
+    out({ id: "o-other-project", path: "/work/a.png", project: "beta" }),
     out({ id: "o-no-project", project: null }),
-    out({ id: "o-deleted-project", project: "retired" }), // a project the sidebar no longer names
+    out({ id: "o-deleted-project", project: "retired" }),
   ];
-  const { byProof, loose } = fold(ds, os);
-  assert.deepEqual([...byProof.values(), ...loose].map((o) => o.id).sort(), os.map((o) => o.id).sort(), "every output exactly once");
-  const rows = nodes(deliverablesTab(ds, os, START, order("alpha")).tree);
-  const onScreen = rows.flatMap((r) => (r.node.t === "file" ? [r.node.o.id] : r.node.t === "proof" && r.node.output ? [r.node.output.id] : []));
-  assert.deepEqual(onScreen.sort(), os.map((o) => o.id).sort(), "and every one is drawn once in the tree");
+  const files = deliverablesTab(ds, os, { ...START, filter: "files" }).files;
+  const drawn = files.flatMap((f) => (f.output ? [f.output.id] : []));
+  assert.deepEqual(drawn.sort(), os.map((o) => o.id).sort(), "every output exactly once in Files");
+  assert.equal(files.find((f) => f.output?.id === "o-b-old")?.d?.id, "v-b", "an older revision's file is still its deliverable's");
 });
 
-test("every past deliverable is in the tree, uncapped, withdrawn too", () => {
-  const ds = Array.from({ length: 45 }, (_, i) => del({ id: `v-${String(i).padStart(2, "0")}`, state: (["approved", "changes", "withdrawn"] as const)[i % 3], updatedAt: i }));
-  assert.deepEqual(delIds(deliverablesTab([...ds].reverse(), [], START).tree), ds.map((d) => d.id).reverse());
+test("a loose output is in Files with its own project, and the project filter finds it", () => {
+  const tab = deliverablesTab([del({ project: "alpha" })], [out({ id: "o-beta", project: "beta" }), out({ id: "o-none", project: null })], { ...START, filter: "files", project: "beta" }, order("alpha", "beta"));
+  assert.deepEqual(tab.files.map((f) => f.output?.id), ["o-beta"]);
+  assert.deepEqual(deliverablesTab([], [out({ id: "o-none", project: null })], { ...START, filter: "files", project: "" }).files.map((f) => f.output?.id), ["o-none"]);
 });
 
-test("no filter or search drops an item that matches it, and a project with no match has no folder", () => {
+test("a loose output whose file is gone is Missing, so the grid tile and the list row say so; a kept one is not", () => {
+  const { loose } = fileItems([], [out({ id: "o-gone", gone: true }), out({ id: "o-here" }), out({ id: "o-link", kind: "link", path: null, url: "https://example.test/x" })]);
+  const by = Object.fromEntries(loose.map((f) => [f.output!.id, f]));
+  assert.equal(by["o-gone"]!.missing, true, "the owner is told the file is gone, not shown a blank picture");
+  assert.equal(servedBy(by["o-gone"]!), null, "nothing is asked of the proof route for it");
+  assert.equal(by["o-here"]!.missing, false);
+  assert.equal(by["o-link"]!.missing, false, "a link is never a missing file");
+});
+
+test("no filter, kind or search drops an item that matches it", () => {
   const ds = [
     del({ id: "v-1", project: "alpha", state: "approved", title: "Harbour lights rollout" }),
     del({ id: "v-2", project: "beta", state: "changes", summary: "The Lantern route needs a second pass" }),
     del({ id: "v-3", project: null, state: "withdrawn", points: ["Kite festival cache was cold"] }),
     del({ id: "v-4", project: "beta", state: "approved", title: "Kite festival map", updatedAt: 3 }),
   ];
-  const os = [out({ id: "o-1", title: "Harbour photo", project: "alpha" }), out({ id: "o-2", title: "Map export", note: "kite festival draft", project: "beta" }), out({ id: "o-3", title: "Loose sketch", project: "gamma" })];
+  const os = [out({ id: "o-1", title: "Harbour photo", project: "alpha" }), out({ id: "o-2", title: "Map export", note: "kite festival draft", project: "beta", kind: "doc", path: "/work/map.md" }), out({ id: "o-3", title: "Loose sketch", project: "gamma" })];
   const text = (d: D) => [d.title, d.summary, ...d.revisions.flatMap((r) => [r.summary, ...r.points.flatMap((p) => [p.headline, p.why])])].join(" ").toLowerCase();
   const otext = (o: O) => [o.title, o.note ?? "", o.path ?? ""].join(" ").toLowerCase();
   const hit = (t: string, q: string) => q.toLowerCase().split(/\s+/).filter(Boolean).every((w) => t.includes(w));
   for (const f of FILTERS) {
     for (const project of [ALL_PROJECTS, "alpha", "beta", "gamma", ""]) {
       for (const query of ["", "kite", "FESTIVAL kite", "lantern", "harbour", "second pass", "sketch", "zzz"]) {
-        const tree = deliverablesTab(ds, os, { filter: f.id, project, query }, order("alpha", "beta", "gamma")).tree;
+        const v = { ...START, filter: f.id, project, query };
+        const tab = deliverablesTab(ds, os, v, order("alpha", "beta", "gamma"));
         const inP = (p: string | null) => project === ALL_PROJECTS || (p ?? "") === project;
         const wantDs = f.id === "files" ? [] : ds.filter((d) => (f.id === "all" || d.state === f.id) && inP(d.project) && hit(text(d), query));
-        const wantOs = f.id === "all" || f.id === "files" ? os.filter((o) => inP(o.project) && hit(otext(o), query)) : [];
-        const why = JSON.stringify({ filter: f.id, project, query });
-        assert.deepEqual(delIds(tree).sort(), wantDs.map((d) => d.id).sort(), why);
-        assert.deepEqual(fileIds(tree).sort(), wantOs.map((o) => o.id).sort(), why);
-        const wantFolders = new Set([...wantDs.map((d) => d.project), ...wantOs.map((o) => o.project)]);
-        assert.deepEqual(new Set(tree.map((p) => p.project)), wantFolders, `${why}: a folder for each project with a match, none other`);
-        assert.ok(nodes(tree).every((r) => r.node.t !== "files" || r.node.children.length > 0), `${why}: no empty Files folder`);
+        const why = JSON.stringify(v);
+        assert.deepEqual(tab.past.map((d) => d.id).sort(), wantDs.map((d) => d.id).sort(), why);
+        const wantOs = os.filter((o) => inP(o.project) && hit(otext(o), query));
+        assert.deepEqual(tab.files.flatMap((x) => (x.d ? [] : [x.output!.id])).sort(), wantOs.map((o) => o.id).sort(), why);
       }
     }
   }
+  // search reaches a file by its deliverable's title too
+  const files = deliverablesTab(ds, os, { ...START, filter: "files", query: "harbour lights" }).files;
+  assert.ok(files.some((x) => x.d?.id === "v-1"), "a deliverable's screenshot is found by the deliverable's title");
 });
 
 test("search reads the points a lead wrote, not only the title", () => {
   const d = del({ id: "v-pt", title: "Weekly sweep", points: ["Tidepool index rebuilt"] });
-  assert.deepEqual(delIds(deliverablesTab([d], [], { ...START, query: "tidepool" }).tree), ["v-pt"]);
+  assert.deepEqual(pastIds([d], [], { ...START, query: "tidepool" }), ["v-pt"]);
 });
 
-test("folders start closed, except a project with something in review; a filter or search opens the way to its matches", () => {
-  const tab = deliverablesTab([del({ project: "alpha" }), del({ project: "beta" }), del({ project: "beta", state: "review" })], [out({ project: "alpha" })], START, order("alpha", "beta"));
-  const [alpha, beta] = tab.tree;
-  assert.equal(openByDefault(alpha!, false), false);
-  assert.equal(openByDefault(beta!, false), true, "beta has an item in review");
-  const files = alpha!.children.find((c) => c.t === "files")!;
-  const d = alpha!.children.find((c) => c.t === "deliverable")!;
-  assert.equal(openByDefault(files as Folder, false), false);
-  assert.equal(openByDefault(alpha!, true) && openByDefault(files as Folder, true), true, "narrowed: projects and Files open");
-  assert.equal(openByDefault(d as Folder, true), false, "a deliverable stays closed until asked");
-  // with the defaults, only beta's children are drawn
-  const rows = flatten(tab.tree, (f) => openByDefault(f, false));
-  assert.deepEqual(rows.map((r) => r.node.key), ["p:alpha", "p:beta", ...beta!.children.map((c) => c.key)]);
-  assert.ok(folderKeys(tab.tree).includes(files.key), "Expand all reaches the Files folder too");
+test("files are newest first, across deliverables and loose outputs", () => {
+  const a = del({ id: "v-a", updatedAt: 1, proof: [{ url: "https://example.test/a" }] });
+  const b = del({ id: "v-b", updatedAt: 2, proof: [{ url: "https://example.test/b" }] });
+  const tab = deliverablesTab([a, b], [out({ id: "o-late", at: 50 })], { ...START, filter: "files" }, [], { "v-a": folder("v-a", ["a.png"], 10), "v-b": folder("v-b", ["b.png"], 30) });
+  assert.deepEqual(tab.files.map((f) => f.output?.id ?? f.name), ["o-late", "b.png", "a.png"]);
 });
 
-test("the arrow keys walk the tree as a file explorer does; Enter opens a file or a folder", () => {
-  const tab = deliverablesTab([del({ id: "v-x", proof: [{ path: "/w/a.png" }, { path: "/w/b.png" }] })], [], START);
-  const closed = flatten(tab.tree, () => false);
-  assert.deepEqual(treeKey(closed, "p:alpha", "ArrowRight"), { toggle: "p:alpha" }, "Right opens a closed folder");
-  const open = flatten(tab.tree, () => true);
-  const keys = open.map((r) => r.node.key); // p:alpha, d:v-x, f:v-x:v-x-p0, f:v-x:v-x-p1
-  assert.deepEqual(treeKey(open, "p:alpha", "ArrowRight"), { focus: keys[1] }, "Right on an open folder goes to its first child");
-  assert.deepEqual(treeKey(open, keys[2]!, "ArrowLeft"), { focus: "d:v-x" }, "Left on a file goes to its folder");
-  assert.deepEqual(treeKey(open, "d:v-x", "ArrowLeft"), { toggle: "d:v-x" }, "Left on an open folder closes it");
-  assert.deepEqual(treeKey(open, keys[3]!, "ArrowDown"), { focus: keys[3] }, "the end holds");
-  assert.deepEqual(treeKey(open, "p:alpha", "ArrowUp"), { focus: "p:alpha" });
-  assert.deepEqual(treeKey(open, keys[2]!, "Enter"), { activate: keys[2] }, "Enter opens a file");
+test("a file is dated when it was delivered, not when the backfill copied it", () => {
+  // every file copied in one backfill run shares a time; dating by it would make newest first say nothing
+  const copied = Date.parse("2026-11-18T00:47:00Z");
+  const img = (id: string) => `/state/deliverables/alpha/2026-11-17-x-${id}/images/${id}.png`;
+  const rev = (id: string, at: string) => [{ rev: 1, summary: "s", at, proof: [{ id: `${id}-p0`, kind: "image" as const, caption: "c", pr: null, path: img(id), url: null, hostId: "h1" }], blocks: [], points: [], prs: [] }];
+  const a = del({ id: "a", updatedAt: Date.parse("2026-11-16T11:00:00Z"), revisions: rev("a", "2026-11-16T10:00:00Z") });
+  const b = del({ id: "b", updatedAt: Date.parse("2026-11-17T11:00:00Z"), revisions: rev("b", "2026-11-17T10:00:00Z") });
+  const tab = deliverablesTab([a, b], [], { ...START, filter: "files" }, [], { a: folder("a", ["a.png", "notes.md"], copied), b: folder("b", ["b.png"], copied) });
+  const at = Object.fromEntries(tab.files.map((f) => [f.name, f.at]));
+  assert.equal(at["b.png"], Date.parse("2026-11-17T10:00:00Z"), "proof takes its revision's time");
+  assert.equal(at["notes.md"], a.updatedAt, "a file no proof shows takes its deliverable's time");
+  assert.deepEqual(tab.files.map((f) => f.name), ["b.png", "notes.md", "a.png"]);
+});
+
+test("every image in the Files grid has a picture: a loose output's image is served by its output id", () => {
+  // 2026-11-17: 123 of 400 image tiles showed the placeholder; all were outputs, and only proof was served
+  const shot = out({ id: "o-shot", path: "/work/files/shot.png" });
+  const gone = del({ id: "v-g", proof: [{ path: "/work/v-g/gone.png", stored: "missing" }] });
+  const tab = deliverablesTab([del({ id: "v-p" }), gone], [shot, out({ id: "o-svg", path: "/work/files/logo.svg" }), out({ id: "o-md", kind: "doc", path: "/work/files/notes.md" })], { ...START, filter: "files", kind: "all" });
+  const by = Object.fromEntries(tab.files.map((f) => [f.name, servedBy(f)]));
+  assert.deepEqual(by[shot.title], { output: "o-shot" }, "a loose output's image is served");
+  assert.deepEqual(by["shot.png"], { proof: "v-p-p0" }, "a proof image still by its proof id");
+  assert.equal(by["gone.png"], null, "only a truly missing file has no picture");
+  assert.equal(by["Output o-svg"], null, "never SVG");
+  assert.equal(by["Output o-md"], null, "a doc opens in bb's preview");
+});
+
+test("the arrow keys walk the folders and their rows as a file explorer does; Enter opens a file or a row", () => {
+  const ds = [del({ id: "v-x", updatedAt: 2 }), del({ id: "v-y", updatedAt: 1 }), del({ id: "v-z", project: "beta", updatedAt: 3 })];
+  const tab = deliverablesTab(ds, [], START, order("alpha", "beta"));
+  const closed = rowsOf(tab, START, () => false);
+  assert.deepEqual(shape(closed), ["[alpha 2]", "  v-x", "  v-y", "[beta 1]", "  v-z"]);
+  const A = folderKey("alpha");
+  const B = folderKey("beta");
+  assert.deepEqual(treeKey(closed, A, "ArrowDown"), { focus: "d:v-x" }, "Down from a folder goes into it");
+  assert.deepEqual(treeKey(closed, "d:v-y", "ArrowDown"), { focus: B }, "and out of it to the next folder");
+  assert.deepEqual(treeKey(closed, B, "ArrowUp"), { focus: "d:v-y" });
+  assert.deepEqual(treeKey(closed, A, "ArrowRight"), { focus: "d:v-x" }, "Right on an open folder goes to its first row");
+  assert.deepEqual(treeKey(closed, A, "ArrowLeft"), { toggle: A }, "Left closes an open folder");
+  assert.deepEqual(treeKey(closed, A, "Enter"), { toggle: A }, "Enter opens or closes a folder");
+  assert.deepEqual(treeKey(closed, "d:v-y", "ArrowLeft"), { focus: A }, "Left on a closed row goes to its folder");
+  assert.deepEqual(treeKey(closed, "d:v-x", "ArrowRight"), { toggle: "d:v-x" }, "Right opens a closed row");
+  assert.deepEqual(treeKey(closed, "d:v-x", "Home"), { focus: A });
+  assert.deepEqual(treeKey(closed, "d:v-x", "End"), { focus: "d:v-z" });
+  assert.deepEqual(treeKey(closed, "d:v-z", "ArrowDown"), { focus: "d:v-z" }, "the end holds");
+  const shut = rowsOf(tab, START, () => false, (k) => k !== A);
+  assert.deepEqual(treeKey(shut, A, "ArrowDown"), { focus: B }, "a closed folder's rows are skipped");
+  assert.deepEqual(treeKey(shut, A, "ArrowRight"), { toggle: A }, "Right opens a closed folder");
+  assert.deepEqual(treeKey(shut, A, "ArrowLeft"), {}, "Left on a closed folder stays: there is no level above");
+  const open = rowsOf(tab, START, () => true);
+  assert.deepEqual(treeKey(open, "d:v-x", "ArrowLeft"), { toggle: "d:v-x" }, "Left closes an open row first");
   assert.deepEqual(treeKey(open, "d:v-x", "Enter"), { toggle: "d:v-x" });
+  const fv = { ...START, filter: "files" as const };
+  const files = rowsOf(deliverablesTab(ds, [], fv, order("alpha", "beta")), fv, () => false);
+  const file = files.find((r) => r.node.t === "file")!;
+  assert.ok(file.open === null && file.parent === A, "Files rows are files, in their folder");
+  assert.deepEqual(treeKey(files, file.node.key, "Enter"), { activate: file.node.key }, "Enter opens a file");
+  assert.deepEqual(treeKey(files, file.node.key, "ArrowLeft"), { focus: A }, "Left on a file goes to its folder");
   assert.equal(treeKey(open, "d:v-x", "j"), null, "J and K stay the page's keys");
 });
 
@@ -232,7 +380,6 @@ test("a saved pane on the old Outputs tab opens Deliverables instead of throwing
   assert.equal(RENAMED_VIEWS.agents, "projects", "the earlier rename still holds");
 });
 
-
 test("wide Deliverables: what waits for the owner shows first; a pick stays while it exists; nothing to show is null", () => {
   const old = del({ id: "v-old", state: "approved", updatedAt: 100 });
   const newer = del({ id: "v-new", state: "changes", updatedAt: 300 });
@@ -246,4 +393,22 @@ test("wide Deliverables: what waits for the owner shows first; a pick stays whil
   // a pick that's gone falls back instead of showing nothing
   assert.equal(shownDeliverable([old, waiting], "v-gone")?.id, "v-wait");
   assert.equal(shownDeliverable([], null), null);
+});
+
+test("an in-review card's output whose file its deliverable copied (2026-11-17) still folds into that card by the original path", () => {
+  const d = del({ id: "v-copied", state: "review" });
+  const p = d.revisions[0]!.proof[0]!;
+  Object.assign(p, { source: "/work/thread/shot.png", path: "/state/deliverables/alpha/2026-11-17-x-v-copied/images/shot.png", stored: "copied" as const });
+  const o = out({ id: "o-shot", path: "/work/thread/shot.png" });
+  const { byProof, loose } = fold([d], [o]);
+  assert.equal(byProof.get(p.id)?.id, "o-shot", "not dropped to loose once the proof shows its copy");
+  assert.deepEqual(loose, []);
+  assert.deepEqual(deliverablesTab([d], [o], START).review[0]!.outputs.map((x) => x.id), ["o-shot"]);
+});
+
+test("a deliverable's files lead with its shown revision's proof, in the lead's order; the folder's other files follow", () => {
+  const f = folder("v-r", ["a-note.md", "before.png", "dashboard.png"]);
+  const d = del({ id: "v-r", proof: [{ path: f.files[2]!.path, stored: "copied" }, { path: f.files[1]!.path, stored: "copied" }] });
+  const files = deliverablesTab([d], [], START, [], { "v-r": f }).filesBy.get("v-r")!;
+  assert.deepEqual(files.map((x) => x.name), ["dashboard.png", "before.png", "a-note.md"]);
 });

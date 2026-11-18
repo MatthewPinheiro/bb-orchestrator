@@ -112,3 +112,30 @@ test("The owner's remove takes an output off the record and leaves the file alon
   assert.throws(() => s.e.removeOutput(output.id), /no output/);
   assert.ok(s.e.addOutput(s.lead, { title: "Plan", kind: "doc", path: inEnv }, place).created, "the file is still there to record again");
 });
+
+test("the proof route serves a recorded output's own image, video or plain text, and nothing else by that route", () => {
+  // 2026-11-17: in the Files view's image grid, 123 of 400 tiles were blank: every one was an output, which the route
+  // didn't serve. An output's picture must show; any file that isn't a recorded output's own must stay refused.
+  const s = setup();
+  const add = (rel: string, kind: "image" | "video" | "doc" | "report", text = "x") => s.e.addOutput(s.thread, { title: rel, kind, path: file(`env/${rel}`, text) }, place).output;
+  const png = add("shots/after.png", "image");
+  const webm = add("shots/walk.webm", "video");
+  const log = add("out/run.log", "report");
+  assert.deepEqual(s.e.outputFile(png.id), { path: png.path, contentType: "image/png", maxBytes: null }, "an output's image is served");
+  assert.equal(s.e.outputFile(webm.id).contentType, "video/webm");
+  assert.equal(s.e.outputFile(log.id).contentType, "text/plain; charset=utf-8", "plain text is served as plain text, capped");
+  assert.ok(s.e.outputFile(log.id).maxBytes);
+
+  const notFound = (err: Error & { kind?: string }) => err.kind === "not_found";
+  assert.throws(() => s.e.outputFile(outside), notFound, "a path is not an output id: a file outside the recorded outputs is refused");
+  assert.throws(() => s.e.outputFile("o-000000"), notFound, "an id never recorded");
+  const link = s.e.addOutput(s.thread, { title: "pr", kind: "link", url: "https://github.com/acme/app/pull/7" }, place).output;
+  assert.throws(() => s.e.outputFile(link.id), notFound, "a link is not a file");
+  assert.throws(() => s.e.outputFile(add("pages/x.html", "doc").id), notFound, "never HTML");
+  assert.throws(() => s.e.outputFile(add("shots/x.svg", "image").id), notFound, "never SVG");
+  assert.throws(() => s.e.outputFile(add("docs/notes.md", "doc").id), notFound, "a doc opens in bb's preview, not through this route");
+  const swapped = add("shots/swap.png", "image");
+  rmSync(swapped.path!);
+  symlinkSync(outside, swapped.path!);
+  assert.throws(() => s.e.outputFile(swapped.id), notFound, "a recorded file later swapped for a symlink out is refused");
+});

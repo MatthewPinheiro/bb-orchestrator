@@ -5,6 +5,13 @@ import { createContext, useContext, type MouseEvent, type ReactNode } from "reac
 import { useBbNavigate } from "@get-bb/plugin-sdk/app";
 import { openInBb, plainClick } from "./open-proof.ts";
 import { exactCtx, prChip, saysState, tokenize, type PrRef, type RefContext, type Token } from "./refs.ts";
+import { Button } from "./ui/button.tsx";
+
+/**
+ * A link-styled control inside a line of text (2026-11-17, the shadcn pass): shadcn's link Button, sized and coloured by
+ * the words around it, underlined in the hairline colour until hovered. Projects' and Scope's in-text links share it.
+ */
+export const INLINE_LINK = "h-auto min-h-0 gap-1 p-0 align-baseline text-[length:inherit] leading-[inherit] font-[inherit] text-current whitespace-normal underline decoration-border underline-offset-4 hover:decoration-current has-[>svg]:px-0";
 
 /** What every row shares (the project and its PRs are added per row): set once by the Projects tab. */
 export type SharedRefs = Omit<RefContext, "project" | "projectPrs">;
@@ -46,9 +53,9 @@ function RefLink({ t, chip = true }: { t: Exclude<Token, { kind: "text" }>; chip
       {t.text}
     </a>
   ) : (
-    <button type="button" className="ref" data-ref={t.kind} data-open-in-bb="" title={t.kind === "card" ? (t.answered ? "Open the answered card in Activity" : "Open the card in Needs you") : t.kind === "deliverable" ? "Open in Deliverables" : "Open the thread"} onClick={open}>
+    <Button variant="link" className={`ref ${INLINE_LINK}`} data-ref={t.kind} data-open-in-bb="" title={t.kind === "card" ? (t.answered ? "Open the answered card in Activity" : "Open the card in Needs you") : t.kind === "deliverable" ? "Open in Deliverables" : "Open the thread"} onClick={open}>
       {t.text}
-    </button>
+    </Button>
   );
   return t.kind === "pr" && chip ? (
     <>

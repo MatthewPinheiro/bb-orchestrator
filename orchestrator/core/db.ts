@@ -385,6 +385,26 @@ export const MIGRATIONS: string[] = [
      seen_at INTEGER NOT NULL,
      read_at INTEGER NOT NULL
    )`,
+  // Screenshots in the owner's direct messages (2026-11-17): each image the page sent, kept as a file at `path`; item_id
+  // is null until a message to that project's lead carries it (n: its place there). source_project: the bb project
+  // whose attachments took it (null: the plugin's own folder). Never the bytes.
+  `CREATE TABLE direct_images (
+     id TEXT PRIMARY KEY,
+     slug TEXT NOT NULL,
+     item_id TEXT,
+     n INTEGER,
+     name TEXT NOT NULL,
+     mime TEXT NOT NULL,
+     size INTEGER NOT NULL,
+     path TEXT NOT NULL,
+     source_project TEXT,
+     created_at INTEGER NOT NULL
+   );
+   CREATE INDEX direct_images_item ON direct_images (item_id)`,
+  // The CodeRabbit review queue (2026-11-18, review-queue/store.ts): its whole state as one JSON row, and the run lease
+  // that keeps two runs (or two plugin generations) from overlapping.
+  `CREATE TABLE review_queue_state (id INTEGER PRIMARY KEY CHECK (id = 1), json TEXT NOT NULL);
+   CREATE TABLE review_queue_lease (id INTEGER PRIMARY KEY CHECK (id = 1), token TEXT NOT NULL, expires INTEGER NOT NULL)`,
 ];
 
 export function migrate(db: Db): void {

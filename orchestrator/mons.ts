@@ -98,7 +98,7 @@ export const LINES: Record<string, { dex: number; types: readonly MonType[] }> =
   Togepi: { dex: 175, types: ["fairy", "flying"] }, Cleffa: { dex: 173, types: ["fairy"] },
 };
 /** The types a line carries in any of its forms (Nidoran♂ counts as Ground through Nidoking). */
-export const lineTypes = (base: string): readonly MonType[] => LINES[base]?.types ?? [];
+export const lineTypes = (base: string): readonly MonType[] => LINES[base]?.types ?? PACK.get(base)?.types ?? [];
 
 const lineMon = (name: string): Mon => m(name, LINES[name]!.dex);
 
@@ -136,7 +136,9 @@ export function pickType(project: string, taken: readonly string[]): MonType {
 }
 
 const BY_NAME = new Map([...Object.values(MON_POOLS).flat(), ...RETIRED_MONS, ...Object.keys(LINES).map(lineMon)].map((x) => [x.name, x]));
-export const monByName = (name: string | null | undefined): Mon | null => (name ? (BY_NAME.get(name) ?? null) : null);
+export const monByName = (name: string | null | undefined): Mon | null => (name ? (BY_NAME.get(name) ?? PACK_NAMES.get(name) ?? null) : null);
+/** A Pokémon mons.ts itself knows, whatever pack is loaded. */
+export const builtInMon = (name: string): Mon | null => BY_NAME.get(name) ?? null;
 
 /**
  * The Pokémon a new agent gets; `taken` is every live agent's, whatever its role (no two share one).
@@ -175,7 +177,11 @@ export const levelFor = (tokens: number): number => Math.max(1, Math.floor(Math.
 export const tokensForLevel = (level: number): number => level ** 3 * XP_PER_LEVEL_CUBE;
 
 /** Each thread's and lead's line: the level each later form arrives at. */
-const EVOLUTIONS: Record<string, readonly { at: number; mon: Mon }[]> = {
+export interface Evolution {
+  at: number;
+  mon: Mon;
+}
+const EVOLUTIONS: Record<string, readonly Evolution[]> = {
   Caterpie: [{ at: 7, mon: m("Metapod", 11) }, { at: 10, mon: m("Butterfree", 12) }],
   Starly: [{ at: 14, mon: m("Staravia", 397) }, { at: 34, mon: m("Staraptor", 398) }],
   Bidoof: [{ at: 15, mon: m("Bibarel", 400) }],
@@ -273,16 +279,20 @@ const EVOLUTIONS: Record<string, readonly { at: number; mon: Mon }[]> = {
 };
 /** A form's base (Alakazam → Abra); a base or a Pokémon without a line is its own. */
 export function baseOf(name: string): string {
-  for (const [base, line] of Object.entries(EVOLUTIONS)) if (line.some((e) => e.mon.name === name)) return base;
+  for (const [base, line] of [...Object.entries(EVOLUTIONS), ...[...PACK].map(([b, x]) => [b, x.evolutions] as const)]) if (line.some((e) => e.mon.name === name)) return base;
   return name;
 }
+/** A line's later forms: mons.ts's own, else a loaded pack's (none for a name with no line). */
+const evolutionsOf = (base: string | null | undefined): readonly Evolution[] => EVOLUTIONS[base ?? ""] ?? PACK.get(base ?? "")?.evolutions ?? [];
+/** mons.ts's own line for a base, whatever pack is loaded (null: it has none). */
+export const builtInEvolutions = (base: string): readonly Evolution[] | null => EVOLUTIONS[base] ?? null;
 for (const line of Object.values(EVOLUTIONS)) for (const e of line) BY_NAME.set(e.mon.name, e.mon);
 /** Every Pokémon name the orchestrator can show, evolutions included (the leak test checks none appears with the setting off). */
-export const allMonNames = (): string[] => [...BY_NAME.keys()];
+export const allMonNames = (): string[] => [...new Set([...BY_NAME.keys(), ...PACK_NAMES.keys()])];
 
 /** Which form of its line a Pokémon is at a level: 0 for the base, 1 and 2 for its evolutions. */
 export function stageAt(base: string | null | undefined, level: number): number {
-  return (EVOLUTIONS[base ?? ""] ?? []).filter((e) => level >= e.at).length;
+  return evolutionsOf(base).filter((e) => level >= e.at).length;
 }
 
 /**
@@ -296,7 +306,7 @@ export interface StagePin {
 
 /** The stage a Pokémon shows at a level: its line's, or the one it keeps (0 for a name with no line). */
 export function shownStage(base: string | null | undefined, level: number, pin: StagePin | null = null): number {
-  const line = EVOLUTIONS[base ?? ""] ?? [];
+  const line = evolutionsOf(base);
   const byLevel = stageAt(base, level);
   return Math.min(line.length, pin ? (level <= pin.level ? pin.stage : Math.max(pin.stage, byLevel)) : byLevel);
 }
@@ -306,5 +316,54 @@ export function formAt(base: string | null | undefined, level: number, pin: Stag
   const b = monByName(base);
   if (!b) return null;
   const stage = shownStage(b.name, level, pin);
-  return stage ? EVOLUTIONS[b.name]![stage - 1]!.mon : b;
+  return stage ? evolutionsOf(b.name)[stage - 1]!.mon : b;
+}
+
+// ---------------------------------------------------------------- lines a personas pack adds (personas.ts, 2026-11-18)
+// The one hook mons.ts has for a pack: lines it defines (base, dex, types, later forms) resolve like mons.ts's own while
+// it is loaded, for names, stages and forms. A pack never changes one of mons.ts's lines (personas.ts validates that).
+
+/** A line a pack defines: its base's dex, the types it carries, and each later form with the level it arrives at. */
+export interface PackLine {
+  dex: number;
+  types?: readonly MonType[];
+  evolutions: readonly { at: number; name: string; dex: number }[];
+}
+const PACK = new Map<string, { types: readonly MonType[]; evolutions: readonly Evolution[] }>();
+const PACK_NAMES = new Map<string, Mon>();
+
+/** Load a pack's lines (null: none). Each call replaces the last; mons.ts's own lines win over a pack's. */
+export function setPackLines(lines: Readonly<Record<string, PackLine>> | null): void {
+  PACK.clear();
+  PACK_NAMES.clear();
+  for (const [base, l] of Object.entries(lines ?? {})) {
+    if (BY_NAME.has(base)) continue;
+    PACK.set(base, { types: l.types ?? [], evolutions: l.evolutions.map((e) => ({ at: e.at, mon: m(e.name, e.dex) })) });
+    PACK_NAMES.set(base, m(base, l.dex));
+    for (const e of l.evolutions) if (!BY_NAME.has(e.name)) PACK_NAMES.set(e.name, m(e.name, e.dex));
+  }
+}
+/** The bases of the loaded pack's lines. */
+export const packLineNames = (): string[] => [...PACK.keys()];
+
+/**
+ * A family's lines while a pack gives leads people instead of Pokémon (scope §4): each family type's lead line, then
+ * its thread lines, in familyTypes order, each once. The lead lines are free then, as no lead holds a Pokémon.
+ */
+export const familyLinesWithLeads = (t: TypeFamily): string[] => [...new Set(familyTypes(t).flatMap((x) => [typeFamily(x)!.lead, ...typeFamily(x)!.threads]))];
+
+/**
+ * A thread's Pokémon while a pack applies: `first` (its trainer's lines, signature first), then its family with the lead
+ * lines (familyLinesWithLeads), then any free line; never one in `skip` (another live trainer's signature). Lines in
+ * `taken` are skipped; with every line held, its own lines are shared in turn, as pickMon does.
+ */
+export function pickPackThread(taken: readonly string[], type: string | null, first: readonly string[], skip: readonly string[]): Mon {
+  const fam = typeFamily(type) ?? TYPES[0]!;
+  const ok = (n: string) => !!monByName(n) && !skip.includes(n);
+  const mine = [...new Set([...first, ...familyLinesWithLeads(fam)])];
+  const own = mine.filter(ok).length ? mine.filter(ok) : mine;
+  const any = [...new Set([...TYPES.flatMap((t) => [t.lead, ...t.threads]), ...packLineNames()])].filter(ok);
+  const free = (n: string) => !taken.includes(n);
+  const name = own.find(free) ?? any.find(free) ?? own[taken.length % own.length]!;
+  return monByName(name)!;
 }

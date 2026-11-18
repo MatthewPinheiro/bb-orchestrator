@@ -122,6 +122,16 @@ Settings (`bb plugin config orchestrator set <key> <value>`): `batchInbox` (fals
 `memoryConfig` (empty: memory off), `memoryConfigEnv` (MEMORY_CONFIG), `memoryUnits`, `memoryTimers`, `dreamsEnabled` (false),
 `hiddenTabs` (empty: every tab shows; Scope still shows while something waits in it or the owner is on it), `retentionDays` and `activityRetentionDays` (0 = keep forever; `bb orchestrator prune [--dry-run]`, owner only).
 
+## CodeRabbit review queue (read-only for agents)
+
+The owner's queue posts `@coderabbitai review` on one PR at a time (review-queue/, docs in USAGE.md). Agents may read it
+(the `reviewQueue` RPC: entries, facts, Schedule, Auto, dry-run, last outcome). Every change (add, pin, reorder,
+Schedule, Auto, the model picker's settings, Run now) is a page-only write the owner makes, in the CodeRabbit tab; there is no
+agent tool for it. A thread titled "CodeRabbit queue picker" is the queue's own optional picker (off by default): leave it
+alone, it is archived once it answers. Never post
+`@coderabbitai review` yourself, and never change `reviewQueueDryRun` (on by default): going live is the owner's own
+decision, on a card. Keep it on while another CodeRabbit scheduler runs.
+
 ## External fleet integration (opt-in; operator CLI)
 
 Worker spawning accepts `provider` as well as `model`; the default provider remains

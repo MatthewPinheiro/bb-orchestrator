@@ -5,10 +5,11 @@
 // "(again)" — never loses it. Nothing here calls a model: escalation, resends and dead letters are the `tick`.
 import { BatchInbox, type MailPolicy } from "./batch-inbox.ts";
 import { createHash, randomBytes } from "node:crypto";
-import { realpathSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync, statSync } from "node:fs";
 import { extname, isAbsolute, sep } from "node:path";
 import { type Db, migrate, tx } from "./db.ts";
-import { MON_POOLS, familyThreads, formAt, levelFor, monByName, pickMon, pickType, shownStage, typeFamily, type Mon, type MonType } from "../mons.ts";
+import { MON_POOLS, builtInMon, familyThreads, formAt, levelFor, monByName, pickMon, pickPackThread, pickType, setPackLines, shownStage, typeFamily, type Mon, type MonType, type PackLine } from "../mons.ts";
+import { agentPersona, assignPersonas, type AgentPersona, type PersonaPack } from "../personas.ts";
 import { blocksSchema, pointsSchema, type Block, type Point } from "../blocks.ts";
 import { ownerWords, type OwnerWords } from "./owner.ts";
 import type { Verdict } from "./clean.ts";
@@ -16,11 +17,13 @@ import { externalBody, externalMailSchema, externalPreview, type ExternalMail } 
 import type { StartedBy } from "./start.ts";
 import { MOOT_MIN_SHARED, MOOT_WINDOW_MS, sharedWords } from "./moot.ts";
 import { cardRefusal } from "./caps.ts";
+import { type DirectImage, type ImageType, MAX_IMAGE_BYTES, MAX_IMAGES, withImages, wordsOf } from "./direct-images.ts";
 import type { BbPrReading } from "./open-prs.ts";
 import type { WaitView } from "./watchers.ts";
 import { type LeadStatus, normalizeStatus, sameWait, type StatusParams, STATUS_STALE_MS, statusLine } from "./status.ts";
 import { backfillEvents, buildHistory, buildSummary, logEvent, logSince, SUMMARY_DONE_MS, type DecisionLite, type EventIn, type EventRow, type HistoryInput, type ProjectHistory, type ProjectSummary, type SummaryInput } from "./history.ts";
 import { waitsOf } from "./status.ts";
+import { COPY_MAX, fileProof, folderFor, keepFile, keptCopy, listFolder, type Kept, writeReadme } from "./deliverable-files.ts";
 import { addPin, findPin, getPin, pinViews, unpin, type Pin, type PinTarget, type PinView } from "./pins.ts";
 import { SUMMARY_ANSWERED_SQL, projectBook, searchAnswered, type CardHit, type ProjectBook } from "./book.ts";
 
@@ -38,9 +41,11 @@ export const WAIT_WHEN = ["approved", "green", "ready", "merged"] as const;
 export type WaitWhen = (typeof WAIT_WHEN)[number];
 /** How often the CoS gets the stale-thread list at most, and how long idle (or silent) counts as stale. */
 export const STALE_WAKE_MS = 24 * 3_600_000;
+/** How long mail to an address no agent holds yet (a new project's lead, the first CoS) waits for one before it is a dead letter. */
+export const UNHELD_GRACE_MS = 24 * 3_600_000;
 /** A project's direct line on the Projects row (contract.ts directLineSchema). */
 export interface DirectLine {
-  messages: { id: string; text: string; at: number; followUp: string | null; state: string; outcome: string | null; note: string | null; answeredAt: number | null; unread: boolean }[];
+  messages: { id: string; text: string; at: number; followUp: string | null; state: string; outcome: string | null; note: string | null; answeredAt: number | null; unread: boolean; images?: { name: string }[] }[];
   unread: boolean;
 }
 /** For this long the owner's direct word wins on its point over a CoS instruction, earlier or later (PLAN 3.6). */
@@ -92,8 +97,13 @@ export interface Settings {
   pokemon: boolean;
   batchInbox: boolean; // off by default, in the server setting and here: per-message delivery until the owner switches it on
   inboxDebounceMs: number;
+  // The personas hook (2026-11-18, personas.ts): the pack the personaPack setting names, already checked; an error when
+  // the path is set but the pack failed (nothing shows, nothing moves); null when none is set. Picks follow a loaded pack
+  // whatever the pokemon setting (so switching it moves nothing); what shows needs pokemon on too.
+  personas?: PersonaPack | { error: string } | null;
 }
-export const DEFAULT_SETTINGS: Settings = { escalateMs: 5 * 60_000, resendMs: 10 * 60_000, owner: "", pokemon: false, batchInbox: false, inboxDebounceMs: 2000 };
+export const DEFAULT_SETTINGS: Settings = { escalateMs: 5 * 60_000, resendMs: 10 * 60_000, owner: "", pokemon: false, batchInbox: false, inboxDebounceMs: 2000, personas: null };
+const packOf = (x: Settings["personas"]): PersonaPack | null => (x && !("error" in x) ? x : null);
 
 export type DeliverResult = { delivery: "sent" } | { delivery: "queued"; queuedMessageId: string } | { delivery: "held"; why: string };
 
@@ -111,6 +121,8 @@ export interface Ports {
   cardUp?(d: Decision): void;
   /** A lead delivered (or re-delivered) a deliverable: it is in the owner's review. */
   delivered?(d: Deliverable): void;
+  /** Where deliverables keep their own files (core/deliverable-files.ts); none: proof stays where the lead filed it. */
+  files?(): { dir: string; maxBytes?: number; kept?: string } | null;
   log(msg: string): void;
 }
 
@@ -269,10 +281,15 @@ function parseBlocks(blocks: unknown): Block[] {
 }
 
 /** A deliverable's points, checked here too; none given keeps the revision in the old layout. */
+interface DirectImageRow { id: string; slug: string; item_id: string | null; n: number | null; name: string; mime: string; size: number; path: string; source_project: string | null; created_at: number }
+function imageOf(r: DirectImageRow): DirectImage {
+  return { id: r.id, name: r.name, mime: r.mime as ImageType, size: r.size, path: r.path, sourceProject: r.source_project };
+}
+
 /** An owner.message item as the page shows it. `unread`: answers after the owner last opened the line, by item id. */
-function directMessageOf(it: Item, unread: Map<string, number>): DirectLine["messages"][number] {
+function directMessageOf(it: Item, unread: Map<string, number>, images: DirectImage[] = []): DirectLine["messages"][number] {
   return {
-    id: it.id, text: it.body, at: it.createdAt, followUp: it.ref, state: it.state,
+    id: it.id, text: wordsOf(it.body, images), at: it.createdAt, ...(images.length ? { images: images.map((i) => ({ name: i.name })) } : {}), followUp: it.ref, state: it.state,
     outcome: it.state === "closed" ? it.outcome : null, note: it.state === "closed" ? it.note : null,
     // an unread answer's time is its event's, the exact value the seen cursor is compared with (closed_at is
     // stamped a moment earlier on a live clock, so a cursor capped at it would never pass the answer)
@@ -473,6 +490,15 @@ export function outputUrl(u: string): string {
 
 // ---------------------------------------------------------------- deliverables (docs/deliverables-plan.md)
 
+/** A file still at the realpath it was registered with (missing, or swapped for a symlink: no). */
+function registered(path: string): boolean {
+  try {
+    return realpathSync(path) === path;
+  } catch {
+    return false;
+  }
+}
+
 /** A text proof is shown from small files only. */
 export const TEXT_PROOF_MAX = 256 * 1024;
 export const PROOF_MAX = 20;
@@ -485,6 +511,15 @@ export const PROOF_TYPES: Record<"image" | "video", Record<string, string>> = {
   video: { ".mp4": "video/mp4", ".m4v": "video/mp4", ".webm": "video/webm", ".mov": "video/quicktime" },
 };
 const TEXT_TYPE = "text/plain; charset=utf-8";
+/** `at` when it is still the file registered there: its own realpath (not since swapped for a symlink) and a file. */
+function stillFile(at: string): string | null {
+  try {
+    const real = realpathSync(at);
+    return real === at && statSync(real).isFile() ? real : null;
+  } catch {
+    return null;
+  }
+}
 
 export interface ProofInput {
   kind: ProofKind;
@@ -619,7 +654,9 @@ export function checkMatch(raw: unknown): RuleMatch {
 }
 
 export class Engine {
-  settings: Settings;
+  private _settings: Settings;
+  /** The pack lines registered in mons.ts now (setPackLines). */
+  private packLines: Record<string, PackLine> | null = null;
   readonly batch: BatchInbox;
   private inflight = new Set<string>();
 
@@ -629,20 +666,17 @@ export class Engine {
   constructor(db: Db, ports: Ports, settings: Partial<Settings> = {}) {
     this.db = db;
     this.ports = ports;
-    this.settings = { ...DEFAULT_SETTINGS, ...settings };
+    this._settings = { ...DEFAULT_SETTINGS, ...settings };
+    this.usePackLines(this.pack?.lines ?? null);
     migrate(db);
     this.batch = new BatchInbox(db, () => this.now(), (id) => {
       const it = this.item(id);
       return it ? this.render(it, false) : null;
     });
     if (this.settings.batchInbox) this.batch.sync();
-    // the Pokémon families: it must never stop the plugin from starting (its transaction rolls back on a failure)
-    try {
-      const moved = this.settleMons();
-      if (moved) this.ports.log(`pokemon: ${moved} agent(s) moved to their project's type`);
-    } catch (e) {
-      this.ports.log(`pokemon: settling failed, Pokémon unchanged: ${e instanceof Error ? e.message : String(e)}`);
-    }
+    // the Pokémon families: it must never stop the plugin from starting (its transaction rolls back on a failure). A
+    // pack that failed its checks moves nothing: a typo in it is not its removal.
+    if (!this.packBroken) this.settleLogged();
     this.settleRelayedCards();
     // the project page's history: once, from what the older tables say. It must never stop the plugin from starting.
     try {
@@ -671,6 +705,7 @@ export class Engine {
    * Idempotent: a second run moves nothing. Returns how many agents moved.
    */
   settleMons(): number {
+    const pack = this.pack;
     return tx(this.db, () => {
       const projects = this.db.prepare(`SELECT slug, mon_type FROM projects WHERE archived_at IS NULL ORDER BY created_at, slug`).all() as { slug: string; mon_type: string | null }[];
       const types: string[] = [];
@@ -682,6 +717,8 @@ export class Engine {
       const rows = this.db
         .prepare(`SELECT thread_id, address, role, project, mon, mon_stage, mon_stage_level FROM agents WHERE retired_at IS NULL ORDER BY CASE role WHEN 'cos' THEN 0 WHEN 'steward' THEN 1 WHEN 'lead' THEN 2 ELSE 3 END, created_at, thread_id`)
         .all() as { thread_id: string; address: string; role: Role; project: string | null; mon: string | null; mon_stage: number | null; mon_stage_level: number | null }[];
+      // with a pack a lead is a person: its Pokémon is kept, unseen and unmoved, and no longer holds its line (scope §3)
+      if (pack) rows.splice(0, rows.length, ...rows.filter((r) => r.role !== "lead"));
       // first every rightful holder keeps its Pokémon, then only the rest are re-picked, so no one else's changes
       const held: string[] = [];
       const redo = rows.filter((r) => {
@@ -691,13 +728,16 @@ export class Engine {
       });
       let moved = 0;
       for (const r of redo) {
-        const next = pickMon(r.role, held, this.projectType(r.project)).name;
+        const next = (pack && r.role === "thread" ? this.pickThread(held, r.project, true) : pickMon(r.role, held, this.projectType(r.project))).name;
         held.push(next);
         if (next === r.mon) continue;
         const { level } = this.xpOf(r.address);
         const pin = r.mon_stage != null && r.mon_stage_level != null ? { stage: r.mon_stage, level: r.mon_stage_level } : null;
-        const stage = shownStage(r.mon, level, pin);
-        this.db.prepare(`UPDATE agents SET mon = ?, mon_stage = ?, mon_stage_level = ? WHERE thread_id = ?`).run(next, stage, level, r.thread_id);
+        // a line no longer known (a pack's, after the pack went before this process started) has no stages to read: its
+        // pin, if it had one, is kept; else the new line shows its own stage at the level
+        const known = !!monByName(r.mon);
+        const stage = known ? shownStage(r.mon, level, pin) : (pin?.stage ?? null);
+        this.db.prepare(`UPDATE agents SET mon = ?, mon_stage = ?, mon_stage_level = ? WHERE thread_id = ?`).run(next, stage, known ? level : (pin?.level ?? null), r.thread_id);
         moved++;
       }
       return moved;
@@ -706,10 +746,12 @@ export class Engine {
 
   /** Whether an agent's Pokémon may stay, given what older live agents hold (settleMons). */
   private monFits(role: Role, mon: string | null, project: string | null, held: readonly string[]): boolean {
-    if (!mon || held.includes(mon) || !monByName(mon)) return false;
+    if (!mon || held.includes(mon) || !(builtInMon(mon) || this.pack?.lines?.[mon])) return false;
     if (role === "cos" || role === "steward") return MON_POOLS[role].some((x) => x.name === mon);
     const fam = typeFamily(this.projectType(project));
     if (!fam) return false;
+    // with a pack, a thread keeps any Pokémon it can show that no older agent holds: loading a pack moves no thread
+    if (this.pack && role === "thread") return true;
     if (role === "lead") return mon === fam.lead || (held.includes(fam.lead) && MON_POOLS.lead.some((x) => x.name === mon));
     const own = familyThreads(fam);
     return own.includes(mon) || (own.every((n) => held.includes(n)) && MON_POOLS.thread.some((x) => x.name === mon));
@@ -745,6 +787,108 @@ export class Engine {
     return formAt(a.mon, level, a.monPin);
   }
 
+  // ---------------------------------------------------------------- personas (personas.ts, 2026-11-18)
+
+  get settings(): Settings {
+    return this._settings;
+  }
+  /**
+   * New settings. A changed pack registers its lines and settles the Pokémon once, with the old pack's lines still
+   * readable so a thread that moves off one keeps its stage: loading a pack moves no thread, removing it gives the
+   * leads their Pokémon back and moves the threads on lines only the pack had. A pack that failed its checks changes
+   * nothing until it is fixed or unset.
+   */
+  set settings(next: Settings) {
+    const before = this._settings.personas ?? null;
+    this._settings = next;
+    if ((next.personas ?? null) === before || this.packBroken) return;
+    const lines = this.pack?.lines ?? null;
+    this.usePackLines({ ...(this.packLines ?? {}), ...(lines ?? {}) });
+    this.settleLogged();
+    this.usePackLines(lines);
+    this.ports.changed();
+  }
+
+  private settleLogged(): void {
+    try {
+      const moved = this.settleMons();
+      if (moved) this.ports.log(`pokemon: ${moved} agent(s) moved to their project's type`);
+    } catch (e) {
+      this.ports.log(`pokemon: settling failed, Pokémon unchanged: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  private usePackLines(lines: Record<string, PackLine> | null): void {
+    this.packLines = lines;
+    setPackLines(lines);
+  }
+
+  /** The loaded pack (null: none, or one that failed its checks). */
+  get pack(): PersonaPack | null {
+    return packOf(this._settings.personas);
+  }
+
+  private get packBroken(): boolean {
+    const x = this._settings.personas;
+    return !!x && "error" in x;
+  }
+
+  /** Leads are people (scope §3): the pokemon setting is on and a pack is loaded. Their Pokémon is hidden then. */
+  private get leadsArePeople(): boolean {
+    return this.settings.pokemon && !!this.pack;
+  }
+
+  private toAgent(r: AgentRow): Agent {
+    const a = toAgent(r, this.settings.pokemon);
+    return this.leadsArePeople && a.role === "lead" ? { ...a, mon: null, monPin: null } : a;
+  }
+
+  /**
+   * Each live lead's persona id, by project (personas.ts assignPersonas), leads in the order they started, so a lead
+   * that starts later never takes an earlier one's persona. `also`: a lead about to start (the brief's prediction).
+   */
+  personaAssignments(also: string | null = null): Map<string, string> {
+    const pack = this.pack;
+    if (!pack) return new Map();
+    const leads = (this.db.prepare(`SELECT project FROM agents WHERE role = 'lead' AND retired_at IS NULL AND status != 'archived' ORDER BY created_at, thread_id`).all() as { project: string }[])
+      .filter((r) => r.project !== also)
+      .map((r) => ({ project: r.project, type: this.projectType(r.project) }));
+    if (also) leads.push({ project: also, type: this.typeFor(also, false) });
+    return assignPersonas(pack, leads);
+  }
+
+  /** A thread's Pokémon while a pack is loaded: its trainer's lines first, never another live trainer's signature line. */
+  private pickThread(taken: readonly string[], project: string | null, assign: boolean): Mon {
+    const pack = this.pack!;
+    const type = this.typeFor(project, assign);
+    const held = this.personaAssignments();
+    const roster = (project && pack.personas[held.get(project) ?? ""]?.roster) || [];
+    const skip = [...held].filter(([p]) => p !== project).map(([, x]) => pack.personas[x]?.roster?.[0]).filter((n): n is string => !!n && n !== roster[0]);
+    return pickPackThread(taken, type, roster, skip);
+  }
+
+  /**
+   * What the screens show for an agent with a persona: the CoS's and the Steward's (with their Pokémon as partner) and
+   * each live lead's. Null for threads, and whenever the pokemon setting is off or no pack is loaded.
+   */
+  personaOf(a: Agent, assigned: Map<string, string> | null = null): AgentPersona | null {
+    const pack = this.leadsArePeople ? this.pack : null;
+    if (!pack) return null;
+    const id = a.role === "cos" || a.role === "steward" ? pack.roles?.[a.role] : a.role === "lead" && a.project && a.status !== "archived" ? (assigned ?? this.personaAssignments()).get(a.project) : undefined;
+    const p = id ? pack.personas[id] : undefined;
+    if (!p) return null;
+    return agentPersona(p, a.role === "lead" ? null : (this.formOf(a, this.xpOf(a.address).level)?.name ?? a.mon));
+  }
+
+  /** The persona registerStarted's agent will have, for its brief (null: none; see personaOf). */
+  personaForStart(role: Role, project: string | null): AgentPersona | null {
+    const pack = this.leadsArePeople ? this.pack : null;
+    if (!pack || role === "thread") return null;
+    const id = role === "lead" ? (project ? this.personaAssignments(project).get(project) : undefined) : pack.roles?.[role];
+    const p = id ? pack.personas[id] : undefined;
+    return p ? agentPersona(p, role === "lead" ? null : this.monForStart(role, null)) : null;
+  }
+
   private now() {
     return this.ports.now();
   }
@@ -753,22 +897,22 @@ export class Engine {
 
   agentByThread(threadId: string): Agent | null {
     const r = this.db.prepare(`SELECT * FROM agents WHERE thread_id = ? AND retired_at IS NULL`).get(threadId) as AgentRow | undefined;
-    return r ? toAgent(r, this.settings.pokemon) : null;
+    return r ? this.toAgent(r) : null;
   }
 
   /** A thread's agent, retired ones too (the newest role it had): the Open PRs tab maps a resolved thread's PR to its project. */
   agentByThreadEver(threadId: string): Agent | null {
     const r = this.db.prepare(`SELECT * FROM agents WHERE thread_id = ? ORDER BY created_at DESC LIMIT 1`).get(threadId) as AgentRow | undefined;
-    return r ? toAgent(r, this.settings.pokemon) : null;
+    return r ? this.toAgent(r) : null;
   }
 
   agentByAddress(address: string): Agent | null {
     const r = this.db.prepare(`SELECT * FROM agents WHERE address = ? AND retired_at IS NULL`).get(address) as AgentRow | undefined;
-    return r ? toAgent(r, this.settings.pokemon) : null;
+    return r ? this.toAgent(r) : null;
   }
 
   agents(): Agent[] {
-    return (this.db.prepare(`SELECT * FROM agents WHERE retired_at IS NULL ORDER BY created_at`).all() as AgentRow[]).map((r) => toAgent(r, this.settings.pokemon));
+    return (this.db.prepare(`SELECT * FROM agents WHERE retired_at IS NULL ORDER BY created_at`).all() as AgentRow[]).map((r) => this.toAgent(r));
   }
 
   /**
@@ -895,7 +1039,10 @@ export class Engine {
    * only predicts it (the brief, before the thread exists): the project's type is not stored then.
    */
   nextMon(role: Role, exceptThreadId: string | null = null, project: string | null = null, assign = true): string {
-    const taken = (this.db.prepare(`SELECT mon FROM agents WHERE retired_at IS NULL AND mon IS NOT NULL AND thread_id IS NOT ?`).all(exceptThreadId) as { mon: string }[]).map((r) => r.mon);
+    const rows = this.db.prepare(`SELECT mon, role FROM agents WHERE retired_at IS NULL AND mon IS NOT NULL AND thread_id IS NOT ?`).all(exceptThreadId) as { mon: string; role: string }[];
+    // with a pack, a thread draws from its trainer's lines first, and the leads' (unseen) Pokémon hold nothing
+    if (this.pack && role === "thread") return this.pickThread(rows.filter((r) => r.role !== "lead").map((r) => r.mon), project, assign).name;
+    const taken = rows.map((r) => r.mon);
     return pickMon(role, taken, role === "lead" || role === "thread" ? this.typeFor(project, assign) : null).name;
   }
 
@@ -925,7 +1072,8 @@ export class Engine {
    * retired then. Null with the pokemon setting off.
    */
   monForStart(role: Role, project: string | null): string | null {
-    if (!this.settings.pokemon) return null;
+    if (!this.settings.pokemon || (role === "lead" && this.pack)) return null; // with a pack, a lead is a person
+
     const old = this.agentByAddress(addressFor(role, role === "lead" ? project : null));
     return this.nextMon(role, old?.status === "archived" ? old.threadId : null, project, false);
   }
@@ -947,7 +1095,7 @@ export class Engine {
     this.boardAdd("notice", by, a.project, by === "cos" ? `cos started ${a.address}` : `Started ${a.address}`, body, threadId);
   }
 
-  /** Retire a thread's role. Its pending mail becomes dead letters (the owner resends them), never the next holder's mail. */
+  /** Retire a thread's role. Its unacked mail becomes dead letters (the CoS resends them), never the next holder's mail. */
   retire(threadId: string, keepMail = false, at = this.now()): void {
     const a = this.agentByThread(threadId);
     this.db.prepare(`UPDATE agents SET retired_at = ? WHERE thread_id = ? AND retired_at IS NULL`).run(at, threadId);
@@ -958,20 +1106,28 @@ export class Engine {
   }
 
   /**
-   * Pending mail to an address whose holder retired and that no live agent holds is a dead letter: else it would wait
-   * forever, or reach whoever takes the address next. An address nobody ever held (imported mail for a lead that
-   * isn't registered yet) keeps waiting. The owner's direct message to a lead is the exception: it is to the project's
-   * lead, whoever that is, so it waits for the next one (register re-sends it).
+   * Mail no live agent can take is a dead letter: else it would wait forever, or reach whoever takes the address next.
+   * A stopped agent still holds its address, so its mail waits for it; a new agent under an old address takes the mail.
+   * 2026-11-17: with the batched inbox on, mail to an address no agent ever held, and mail a retired holder was given
+   * but never acked, each kept a wake that never fired. So this covers every address with no live agent, delivered
+   * mail too, in both modes. Mail to a retired holder dies at once. An address with no agent row at all may just not be
+   * registered yet (a new project's lead, the first CoS), so its mail waits UNHELD_GRACE_MS for one, its wake with it,
+   * and is a dead letter only after that. (A thread that takes a new role drops its retired row: that address waits too.)
+   * The owner's direct message to a lead is the exception: it is to the project's lead, whoever that is, so it waits
+   * for the next one (register re-sends it). So is the engine's own "orchestrator" address: a dream card's answer goes
+   * there and the card's ack closes it (orchestratorAck). Nothing reads that inbox, so its unread is dropped instead.
    */
   private deadLetterOrphans(): void {
     const rows = this.db
       .prepare(
-        `SELECT * FROM items i WHERE i.state = 'pending' AND i.kind <> 'owner.message'
+        `SELECT i.*, EXISTS (SELECT 1 FROM agents r WHERE r.address = i.recipient) AS retired FROM items i
+         WHERE i.state IN ('pending','delivered') AND i.kind <> 'owner.message' AND i.recipient <> 'orchestrator'
            AND NOT EXISTS (SELECT 1 FROM agents a WHERE a.address = i.recipient AND a.retired_at IS NULL)
-           AND EXISTS (SELECT 1 FROM agents r WHERE r.address = i.recipient AND r.retired_at IS NOT NULL)`,
+           AND (EXISTS (SELECT 1 FROM agents r WHERE r.address = i.recipient) OR i.created_at <= ?)`,
       )
-      .all() as ItemRow[];
-    for (const r of rows) this.dead(toItem(r), `${r.recipient} has no live agent (its holder retired)`);
+      .all(this.now() - UNHELD_GRACE_MS) as (ItemRow & { retired: number })[];
+    for (const r of rows) this.dead(toItem(r), `${r.recipient} has no live agent (${r.retired ? "its holder retired" : `no agent took that address within ${ago(UNHELD_GRACE_MS)}`})`);
+    this.batch.droppedFor("orchestrator"); // batched: no wake waits on it; flush clears the wake
   }
 
   /**
@@ -1265,7 +1421,8 @@ export class Engine {
   /** The owner resends a dead letter from the board, or the CoS from its dead letters (no board row then). */
   resend(itemId: string, by = "person"): Item {
     const it = this.mustDead(itemId);
-    if (!this.agentByAddress(it.recipient) && this.db.prepare(`SELECT 1 FROM agents WHERE address = ? AND retired_at IS NOT NULL`).get(it.recipient))
+    // 2026-11-17: any address with no live agent, not only a retired one: the sweep would make it a dead letter again
+    if (!this.agentByAddress(it.recipient))
       throw new EngineError("bad_state", `${it.recipient} has no live agent: give the address a role first${by === "person" ? "" : ", or re-route it"}`);
     this.db.prepare(`UPDATE items SET state = 'pending', attempts = 1, queued_message_id = NULL, delivered_at = NULL WHERE id = ?`).run(itemId);
     this.batch.reroute(itemId, it.recipient); // batched: unread again, as a new arrival
@@ -1596,10 +1753,11 @@ export class Engine {
    * characters. `followUp` names an earlier direct message to the same lead. Refused without a live lead. The CoS gets
    * a read-only copy and Activity keeps a row. Never a push.
    */
-  ownerMessage(slug: string, text: string, followUp: string | null = null): Item {
-    const body = text.trim();
-    if (!body) throw new EngineError("invalid", "empty message");
-    if (body.length > 4000) throw new EngineError("invalid", `a message is at most 4000 characters; this is ${body.length}`);
+  ownerMessage(slug: string, text: string, followUp: string | null = null, images: string[] = []): Item {
+    const words = text.trim();
+    if (!words && !images.length) throw new EngineError("invalid", "empty message");
+    if (words.length > 4000) throw new EngineError("invalid", `a message is at most 4000 characters; this is ${words.length}`);
+    if (images.length > MAX_IMAGES) throw new EngineError("invalid", `a message carries at most ${MAX_IMAGES} images; this has ${images.length}`);
     const p = this.project(slug);
     if (!p) throw new EngineError("not_found", `no project ${slug}`);
     if (p.archivedAt) throw new EngineError("bad_state", `${slug} is archived: start its lead first`);
@@ -1610,13 +1768,44 @@ export class Engine {
         const first = this.item(followUp);
         if (!first || first.kind !== "owner.message" || first.recipient !== to) throw new EngineError("invalid", `${followUp} isn't a direct message to ${to}`);
       }
+      // its images (2026-11-17): each sent for this project and on no message yet; their paths end the body
+      const imgs = [...new Set(images)].map((id) => this.directImageRow(id));
+      if (imgs.length !== images.length) throw new EngineError("invalid", "an image is named twice");
+      for (const i of imgs) if (!i || i.slug !== slug || i.item_id !== null) throw new EngineError("invalid", "an image isn't one sent for this message: attach it again");
+      const kept = imgs.map((i) => imageOf(i!));
+      const body = withImages(words, kept);
       const it = this.put({ recipient: to, sender: "person", kind: "owner.message", ref: followUp, body, needsAck: true });
+      kept.forEach((i, n) => this.db.prepare(`UPDATE direct_images SET item_id = ?, n = ? WHERE id = ?`).run(it.id, n, i.id));
       if (this.agentByAddress("cos"))
         this.put({ recipient: "cos", sender: "person", kind: "copy", ref: it.id, body: `(copy of ${this.owner.name}'s direct message ${it.id} to ${to}${followUp ? `, a follow-up of ${followUp}` : ""}; ${to} answers it, not you) ${body}`, key: `copy:cos:${it.id}`, needsAck: false });
       this.boardAdd("direct", "person", slug, `${this.owner.Name} → ${to}${followUp ? ` (follow-up of ${followUp})` : ""}`, body, it.id);
       this.ports.changed();
       return it;
     });
+  }
+
+  /**
+   * An image the page sent for a message to a project's lead (2026-11-17), kept by the server at `img.path`: its id,
+   * which the message names. The server has checked its bytes (core/direct-images.ts sniff); the bytes never come here.
+   */
+  addDirectImage(slug: string, img: { name: string; mime: ImageType; size: number; path: string; sourceProject: string | null }): string {
+    if (!this.project(slug)) throw new EngineError("not_found", `no project ${slug}`);
+    if (img.size > MAX_IMAGE_BYTES) throw new EngineError("invalid", `an image is at most ${MAX_IMAGE_BYTES / 1024 / 1024} MB`);
+    if (!isAbsolute(img.path)) throw new EngineError("invalid", "an image is kept at an absolute path");
+    const id = `img-${hex(6)}`;
+    this.db
+      .prepare(`INSERT INTO direct_images (id, slug, item_id, n, name, mime, size, path, source_project, created_at) VALUES (?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?)`)
+      .run(id, slug, img.name, img.mime, img.size, img.path, img.sourceProject, this.now());
+    return id;
+  }
+
+  private directImageRow(id: string): DirectImageRow | undefined {
+    return this.db.prepare(`SELECT * FROM direct_images WHERE id = ?`).get(id) as DirectImageRow | undefined;
+  }
+
+  /** The images a direct message carries, in the order the owner attached them. */
+  directImagesOf(itemId: string): DirectImage[] {
+    return (this.db.prepare(`SELECT * FROM direct_images WHERE item_id = ? ORDER BY n`).all(itemId) as DirectImageRow[]).map(imageOf);
   }
 
   /** The owner's direct messages to a lead still in force (PLAN 3.6): the last 48 h, newest first, whatever their state. */
@@ -1642,7 +1831,7 @@ export class Engine {
       for (const id of unread.keys()) if (!items.some((it) => it.id === id)) { const it = this.item(id); if (it) items.push(it); }
       if (!items.length) continue;
       items.sort((x, y) => y.createdAt - x.createdAt);
-      out.set(slug, { messages: items.map((it) => directMessageOf(it, unread)), unread: unread.size > 0 });
+      out.set(slug, { messages: items.map((it) => directMessageOf(it, unread, this.directImagesOf(it.id))), unread: unread.size > 0 });
     }
     return out;
   }
@@ -1659,7 +1848,7 @@ export class Engine {
       .all(`lead:${slug}`, before ?? Number.MAX_SAFE_INTEGER, n + 1) as ItemRow[];
     const answers = this.db.prepare(`SELECT ref, MAX(at) AS at FROM events WHERE project = ? AND at > ? AND kind = 'direct-answer' GROUP BY ref`);
     const unread = new Map((answers.all(slug, this.directSeen(slug)) as { ref: string; at: number }[]).map((r) => [r.ref, r.at]));
-    return { messages: rows.slice(0, n).map(toItem).map((it) => directMessageOf(it, unread)), more: rows.length > n };
+    return { messages: rows.slice(0, n).map(toItem).map((it) => directMessageOf(it, unread, this.directImagesOf(it.id))), more: rows.length > n };
   }
 
   /** When the owner last looked at a project's direct thread (opened its composer): answers after it are new. */
@@ -3891,7 +4080,7 @@ export class Engine {
       )
       .all(this.now() - graceMs) as AgentRow[];
     for (const r of rows) {
-      const a = toAgent(r, this.settings.pokemon);
+      const a = this.toAgent(r);
       this.db.prepare(`UPDATE agents SET flags = trim(flags || ',unplanned', ',') WHERE thread_id = ?`).run(a.threadId);
       this.boardAdd("unplanned", "orchestrator", a.project, `${a.address} started without a plan card`, `Thread ${a.threadId} was started outside orch_spawn_thread. It works as usual; this is the record.`, a.threadId);
       if (this.agentByAddress(`lead:${a.project}`)) this.put({ recipient: `lead:${a.project}`, sender: "orchestrator", kind: "notice", ref: a.threadId, body: `${a.address} was started without an approved plan card; it is flagged on the board. Start threads with orch_spawn_thread from an approved plan.`, needsAck: false });
@@ -4271,7 +4460,153 @@ export class Engine {
            updated_at = excluded.updated_at, json = excluded.json`,
       )
       .run(d.id, d.project, d.lead, d.title, d.summary, d.state, d.rev, d.createdAt, d.updatedAt, JSON.stringify(d));
+    this.readme(d);
     this.ports.changed();
+  }
+
+  // ---------------------------------------------------------------- a deliverable's own folder (2026-11-17)
+
+  /** Its README follows every save (state, revision, retitle). A failed write is logged, never a failed save. */
+  private readme(d: Deliverable): void {
+    if (!d.folder) return;
+    try {
+      writeReadme(d, d.folder);
+    } catch (e) {
+      this.ports.log(`deliverable ${d.id}: README not written (${String(e)})`);
+    }
+  }
+
+  /**
+   * Copy the file proof in `proof` into the deliverable's folder (made on first use) and point each item at its copy.
+   * Items already filed are left as they are; a failed copy keeps the original and is tried again by the backfill.
+   * Returns what each item it filed got (none: nothing changed). Without a files port nothing is copied.
+   */
+  private fileInto(d: Deliverable, proof: Proof[]): Kept[] {
+    const f = this.ports.files?.();
+    if (!f || !proof.some((p) => p.path && (!p.stored || p.stored === "failed"))) return [];
+    try {
+      if (!d.folder || !existsSync(d.folder)) {
+        const at = d.folder ?? folderFor(f.dir, d);
+        mkdirSync(at, { recursive: true });
+        d.folder = realpathSync(at);
+      }
+    } catch (e) {
+      this.ports.log(`deliverable ${d.id}: no folder (${String(e)})`);
+      return [];
+    }
+    const kept: Kept[] = [];
+    for (const p of proof) {
+      if (!p.path || (p.stored && p.stored !== "failed")) continue;
+      const was = p.source ?? p.path;
+      // proof is registered by realpath: one since swapped for a symlink is no longer that file (proofFile refuses it too)
+      let k: Kept = registered(was) ? keepFile(d.folder, was, f.maxBytes ?? COPY_MAX) : { stored: "missing" };
+      // gone from its worktree, but the archive kept it as a thread output: copy that (the proof's source stays the original)
+      const archived = k.stored === "missing" && f.kept ? keptCopy(f.kept, was) : null;
+      if (archived) {
+        k = keepFile(d.folder, archived, f.maxBytes ?? COPY_MAX);
+        if (k.stored === "copied") p.source = was;
+      }
+      if (k.stored === "failed") this.ports.log(`deliverable ${d.id}: ${p.path} not copied (${k.why})`);
+      fileProof(p, k);
+      kept.push(k);
+    }
+    return kept;
+  }
+
+  /**
+   * One-time and idempotent (run on every start): copy the surviving files of deliverables filed before 2026-11-17 into
+   * their folders, and record the missing ones. Each proof item it files is marked, so a second run copies nothing. It
+   * isn't activity: updated_at, the Board and pushes are untouched.
+   */
+  backfillFiles(): { deliverables: number; copied: number; reused: number; tooBig: number; failed: number; missing: { id: string; title: string; path: string }[] } {
+    const out = { deliverables: 0, copied: 0, reused: 0, tooBig: 0, failed: 0, missing: [] as { id: string; title: string; path: string }[] };
+    if (!this.ports.files?.()) return out;
+    const rows = this.db.prepare(`SELECT id, json FROM deliverables ORDER BY created_at, id`).all() as DeliverableDbRow[];
+    for (const row of rows) {
+      const d = JSON.parse(row.json) as Deliverable;
+      const proof = d.revisions.flatMap((r) => r.proof);
+      const missingBefore = new Set(proof.filter((p) => p.stored === "missing").map((p) => p.id));
+      const kept = this.fileInto(d, proof);
+      if (!kept.length && d.folder) continue;
+      if (!kept.length) {
+        // links only: a folder for its README all the same, so every deliverable is browsed the same way
+        const f = this.ports.files!()!;
+        const at = folderFor(f.dir, d);
+        try {
+          mkdirSync(at, { recursive: true });
+          d.folder = realpathSync(at);
+        } catch (e) {
+          this.ports.log(`deliverable ${d.id}: no folder (${String(e)})`);
+          continue;
+        }
+      }
+      out.deliverables++;
+      for (const k of kept) {
+        // reused: a copy that already held these bytes (a later revision showing the same file again)
+        if (k.stored === "copied") out[k.reused ? "reused" : "copied"]++;
+        else if (k.stored === "too_big") out.tooBig++;
+        else if (k.stored === "failed") out.failed++;
+      }
+      for (const p of proof) if (p.stored === "missing" && !missingBefore.has(p.id)) out.missing.push({ id: d.id, title: d.title, path: p.path! });
+      this.db.prepare(`UPDATE deliverables SET json = ? WHERE id = ?`).run(JSON.stringify(d), d.id);
+      this.readme(d);
+    }
+    if (out.deliverables) this.ports.changed();
+    return out;
+  }
+
+  /**
+   * The folder a resolving thread's notes and outputs go to: the newest deliverable of its project's lead that shows
+   * the thread's work, that is a proof file from inside its worktree (`root`) or one of the outputs it recorded.
+   */
+  deliverableForThread(threadId: string, root: string | null): Deliverable | null {
+    // retired or not: archiving follows the resolve
+    const a = this.db.prepare(`SELECT project FROM agents WHERE thread_id = ? ORDER BY created_at DESC LIMIT 1`).get(threadId) as { project: string | null } | undefined;
+    if (!a?.project) return null;
+    const prefix = root ? (root.endsWith(sep) ? root : root + sep) : null;
+    const mine = new Set((this.db.prepare(`SELECT path, url FROM outputs WHERE thread_id = ?`).all(threadId) as { path: string | null; url: string | null }[]).flatMap((o) => [o.path, o.url]).filter((x): x is string => !!x));
+    const rows = this.db.prepare(`SELECT json FROM deliverables WHERE lead = ? ORDER BY updated_at DESC, id DESC`).all(`lead:${a.project}`) as { json: string }[];
+    for (const r of rows) {
+      const d = JSON.parse(r.json) as Deliverable;
+      if (!d.folder) continue;
+      const shows = d.revisions.some((v) =>
+        v.proof.some((p) => [p.source, p.path, p.url].some((x) => !!x && (mine.has(x) || (!!prefix && x.startsWith(prefix))))),
+      );
+      if (shows) return d;
+    }
+    return null;
+  }
+
+  /**
+   * The folders of the deliverables the tab shows (the same newest 200), listed, for the Deliverables tab. `hostId`: the
+   * host of a copied proof file; every folder is on that machine, the plugin's own (null: none copied yet).
+   */
+  deliverableFolders(): { hostId: string | null; folders: Record<string, NonNullable<ReturnType<typeof listFolder>>> } {
+    const folders: Record<string, NonNullable<ReturnType<typeof listFolder>>> = {};
+    let hostId: string | null = null;
+    for (const d of this.deliverables()) {
+      hostId ??= d.revisions.flatMap((r) => r.proof).find((p) => p.stored === "copied" && p.hostId)?.hostId ?? null;
+      const f = d.folder ? listFolder(d.folder) : null;
+      if (f) folders[d.id] = f;
+    }
+    return { hostId, folders };
+  }
+
+  /** The outputs a resolving thread's archive keeps: every one inside its worktree (whoever recorded it), and its own. */
+  threadOutputs(threadId: string, root: string): OutputRow[] {
+    const own = (this.db.prepare(`SELECT * FROM outputs WHERE thread_id = ? AND path IS NOT NULL`).all(threadId) as OutputDbRow[]).map(toOutput);
+    const seen = new Set<string>();
+    return [...this.outputsUnder(root), ...own].filter((o) => !seen.has(o.id) && !!seen.add(o.id));
+  }
+
+  /** Copy a file into a deliverable's folder (a thread's notes and outputs as it resolves) and rewrite its README. */
+  keepInDeliverable(id: string, src: string): Kept {
+    const d = this.mustDeliverable(id);
+    if (!d.folder) throw new EngineError("bad_state", `${id} has no folder`);
+    const k = keepFile(d.folder, src, this.ports.files?.()?.maxBytes ?? COPY_MAX);
+    if (k.stored === "failed") throw new Error(`${src} not copied into ${d.folder}: ${k.why}`);
+    this.readme(d);
+    return k;
   }
 
   /**
@@ -4346,6 +4681,7 @@ export class Engine {
         d.summary = summary;
         d.state = "review";
         d.revisions.push({ rev: d.rev, summary, proof, at: iso(t), blocks, ...points });
+        this.fileInto(d, proof);
         if (scoping) d.scope = true;
         else delete d.scope;
         if (task) d.scope_task = task;
@@ -4371,6 +4707,7 @@ export class Engine {
           ...(scoping ? { scope: true } : {}),
           ...(task ? { scope_task: task } : {}),
         };
+        this.fileInto(d, proof);
         this.saveDeliverable(d);
         this.boardAdd("deliverable", by.address, by.project, `Delivered: ${title}`, summary, d.id);
       }
@@ -4541,17 +4878,31 @@ export class Engine {
     if (!found) throw new EngineError("not_found", `no proof ${proofId}`);
     const p = found.proof;
     if (!p.path || (p.kind !== "image" && p.kind !== "video" && p.kind !== "text")) throw new EngineError("not_found", `${proofId} is not a file the proof route serves`);
-    let real: string;
-    try {
-      real = realpathSync(p.path);
-    } catch {
-      throw new EngineError("not_found", `${proofId}'s file is gone`);
-    }
-    if (real !== p.path || !statSync(real).isFile()) throw new EngineError("not_found", `${proofId}'s file is no longer the one registered`);
+    // the deliverable's own copy, else (2026-11-17) the original it was copied from; either must still be the file registered
+    const real = stillFile(p.path) ?? (p.source ? stillFile(p.source) : null);
+    if (!real) throw new EngineError("not_found", existsSync(p.path) ? `${proofId}'s file is no longer the one registered` : `${proofId}'s file is gone`);
     if (p.kind === "text") return { path: real, contentType: TEXT_TYPE, maxBytes: TEXT_PROOF_MAX };
     const type = PROOF_TYPES[p.kind][extname(real).toLowerCase()];
     if (!type) throw new EngineError("not_found", `${proofId} is not a type the proof route serves`);
     return { path: real, contentType: type, maxBytes: null };
+  }
+
+  /**
+   * What the proof route may serve for a recorded output (2026-11-17: a third of the Files view's image tiles were blank,
+   * because only proof was served). The same rules as proofFile: only the output's own recorded path, still at that
+   * realpath and a file; an image or video by its extension, or plain text (.txt, .log) capped; never HTML or SVG.
+   */
+  outputFile(outputId: string): { path: string; contentType: string; maxBytes: number | null } {
+    const o = this.output(outputId);
+    if (!o) throw new EngineError("not_found", `no output ${outputId}`);
+    if (!o.path) throw new EngineError("not_found", `${outputId} is a link, not a file`);
+    const real = stillFile(o.path);
+    if (!real) throw new EngineError("not_found", existsSync(o.path) ? `${outputId}'s file is no longer the one recorded` : `${outputId}'s file is gone`);
+    const ext = extname(real).toLowerCase();
+    const type = PROOF_TYPES.image[ext] ?? PROOF_TYPES.video[ext];
+    if (type) return { path: real, contentType: type, maxBytes: null };
+    if (ext === ".txt" || ext === ".log") return { path: real, contentType: TEXT_TYPE, maxBytes: TEXT_PROOF_MAX };
+    throw new EngineError("not_found", `${outputId} is not a type the proof route serves`);
   }
 
   /** The live state of a PR proof, from pr-watch's readings, when one has this URL. */
@@ -4584,7 +4935,7 @@ export class Engine {
     // 2. deferrals that came due
     const due = this.db.prepare(`SELECT id FROM decisions WHERE deferred_until IS NOT NULL AND deferred_until <= ? AND state = 'asked'`).all(t) as { id: string }[];
     for (const { id } of due) this.personReturn(id, null, "engine");
-    // 3. mail to a retired address nobody holds now
+    // 3. mail to an address no live agent holds (retired at once; never held after a grace: 2026-11-17)
     this.deadLetterOrphans();
     // 4. unacked items whose recipient has been idle long enough: one resend, then a dead letter
     const open = (this.db.prepare(`SELECT * FROM items WHERE state = 'delivered' AND needs_ack = 1`).all() as ItemRow[]).map(toItem);

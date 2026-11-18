@@ -6,7 +6,8 @@ import { test } from "node:test";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { Engine, type DeliverResult } from "../core/engine.ts";
-import { BRIEF_VARS, BRIEFS, loadBrief, pokemonSentence } from "../core/start.ts";
+import { BRIEF_VARS, BRIEFS, introSentence, loadBrief, pokemonSentence } from "../core/start.ts";
+import { readPersonaPack } from "../personas.ts";
 import { allMonNames, tokensForLevel } from "../mons.ts";
 
 const BRIEF_DIR = join(import.meta.dirname, "..", "briefs");
@@ -103,4 +104,59 @@ test("agents registered and handed off while off show their Pokémon once it is 
   assert.equal(e.agentByAddress("cos")!.mon, "Rayquaza");
   assert.equal(e.agentByAddress("lead:code-reviews")!.mon, "Deino");
   assert.equal(e.agentByThread("T-w2")!.mon, "Sandile", "the handoff successor kept the Pokémon while it was hidden");
+});
+
+// ---------------------------------------------------------------- the personas hook (2026-11-18, personas.ts)
+// The off guarantee covers a loaded pack too: its personas' names, titles, images and credits, and its own Pokémon
+// (read from the pack, which allMonNames() doesn't list once it is unloaded). The pack here is made up.
+const PACK = readPersonaPack(join(import.meta.dirname, "fixtures", "personas-pack.json"));
+const PACK_TERMS = [
+  ...Object.values(PACK.personas).flatMap((p) => [p.name, p.title, p.image, p.credit ?? "", ...(p.team ?? []), ...(p.roster ?? [])]),
+  ...Object.entries(PACK.lines ?? {}).flatMap(([base, l]) => [base, ...l.evolutions.map((x) => x.name)]),
+].filter(Boolean);
+const ANY_PACK = new RegExp(`(${PACK_TERMS.map((n) => n.replace(/[.*+?^${}()|[\]\\-]/g, "\\$&")).join("|")})`);
+
+function packEngine(pokemon: boolean) {
+  return new Engine(
+    new DatabaseSync(":memory:") as never,
+    { now: () => Date.parse("2026-11-18T10:00:00Z"), deliver: async (): Promise<DeliverResult> => ({ delivery: "sent" }), mirror: () => {}, changed: () => {}, log: () => {} },
+    { pokemon, personas: PACK },
+  );
+}
+/** Everything an agent or the owner could read: the briefs, the board, the agents and their personas (the RPC's). */
+function shown(e: Engine): string {
+  const briefText = BRIEFS.map((role) => {
+    const project = role === "lead" ? "code-reviews" : null;
+    const known: Record<string, string> = { slug: "code-reviews", address: "lead:code-reviews", pokemon: introSentence(e.monForStart(role, project), e.personaForStart(role, project)) };
+    return loadBrief(BRIEF_DIR, role, Object.fromEntries(BRIEF_VARS[role].map((k) => [k, known[k] ?? "x"])));
+  });
+  work(e);
+  e.register("T-w3", "thread", "code-reviews", "T-la");
+  e.gainXp("T-w3", tokensForLevel(40), 1);
+  const rows = e.board().map((r) => `${r.title}\n${r.body ?? ""}`);
+  const agents = e.agents().map((a) => JSON.stringify({ ...a, persona: e.personaOf(a), form: e.formOf(a, e.xpOf(a.address).level)?.name ?? null }));
+  return [...briefText, ...rows, ...agents].join("\n");
+}
+
+test("the pack's terms are what the leak test looks for, and a pack line is in play", () => {
+  for (const n of ["Vesna", "Pilot", "Feebas", "Milotic", "https://personas.example.test/vesna.png"]) assert.ok(PACK_TERMS.includes(n), n);
+});
+
+test("on with a pack: the briefs, the board and the agents show the personas (so the leak test can fail)", () => {
+  const text = shown(packEngine(true));
+  assert.match(text, /You are Pilot Vesna\./);
+  assert.match(text, /Feebas evolved into Milotic/);
+  assert.match(text, /personas\.example\.test\/orrin\.png/);
+});
+
+test("off with a pack loaded: no persona name, title, image or credit and no Pokémon, the pack's included, anywhere", () => {
+  const e = packEngine(false);
+  const text = shown(e);
+  assert.doesNotMatch(text, ANY_PACK);
+  assert.doesNotMatch(text, ANY_MON);
+  assert.doesNotMatch(text, POKEMON_WORD);
+  assert.doesNotMatch(text, /You are \w+ \w+[.;]/, "no persona sentence");
+  for (const a of e.agents()) assert.equal(e.personaOf(a), null, a.address);
+  assert.equal(e.personaForStart("cos", null), null);
+  assert.equal(e.personaForStart("lead", "edge-cli"), null);
 });

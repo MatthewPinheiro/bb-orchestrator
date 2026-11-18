@@ -3,22 +3,22 @@
 // heavier weight, never with a coloured left edge; the project page's thread tree indents without a rail. This reads
 // the tab's own sources, so a left bar added back in any of them fails here, before a screenshot would catch it.
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { test } from "node:test";
 
 // every component the tab renders (projects.tsx's, project-book.tsx's and search.tsx's own imports included)
 const FILES = [
   "projects.tsx", "cc-lines.tsx", "project-detail.tsx", "direct-line.tsx", "ref-text.tsx", "project-book.tsx", "search.tsx",
   "agent-bits.tsx", "mon.tsx", "status-bar.tsx", "ui.tsx", "kit-ui.tsx", "thread-card.tsx", "pins.tsx",
-  "affect/badge-clean.tsx", "affect/dropdown-menu-clean.tsx", "affect/empty-state-clean.tsx", "affect/segmented-control-clean.tsx",
-  // the chat's card and its composer are built from the kit: its parts, and the layer that fits them to the tab's rules
-  "affect-fit.tsx", "affect/card-clean.tsx", "affect/button-clean.tsx", "affect/text-area-clean.tsx", "affect/checkbox-clean.tsx",
-  "affect/text-field-clean.tsx",
   // the Scope tab follows the same rule
   "scope.tsx",
+  // 2026-11-17: every shadcn component in app/ui, which every tab is moving onto (read from the folder, so a new one is in)
+  ...readdirSync(new URL("../app/ui/", import.meta.url)).filter((f) => /\.tsx?$/.test(f)).map((f) => `ui/${f}`),
 ];
 // a left or inline-start border, Tailwind's border-l/border-s, or an inset shadow with an x offset (inset 2px 0 0 …)
 const BAR = /border-?left|borderLeft|border-?inline-?start|borderInlineStart|\bborder-[ls](?:-|\b)|inset\s+-?[1-9][\d.]*px\s+0/;
+
+test("app/ui is read", () => assert.ok(FILES.includes("ui/button.tsx") && FILES.includes("ui/card.tsx"), "the shadcn components are in the list"));
 
 for (const f of FILES) {
   test(`${f}: no left border or vertical bar`, () => {

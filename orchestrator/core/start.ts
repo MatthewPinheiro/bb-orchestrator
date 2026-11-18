@@ -6,6 +6,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { EngineError } from "./model.ts";
 import { SLUG as SLUG_RE } from "./memory.ts";
+import { personaSentence } from "../personas.ts";
 
 export type Repo = { path: string; base: string | null };
 
@@ -80,6 +81,12 @@ export const BRIEF_VARS: Record<BriefName, readonly string[]> = {
  */
 export const pokemonSentence = (mon: string | null): string => (mon ? `Your Pokémon is ${mon}. ` : "");
 
+/**
+ * The brief's {pokemon} with the personas hook (personas.ts): an agent with a persona is told who it is ("You are Pilot
+ * Vesna. ", with the partner for the CoS and the Steward) instead of its Pokémon; any other, as pokemonSentence.
+ */
+export const introSentence = (mon: string | null, persona: { name: string; title: string; partner: string | null } | null): string => (persona ? personaSentence(persona) : pokemonSentence(mon));
+
 /** Path equality for a bb project source: trailing slashes don't count. */
 export const samePath = (a: string, b: string) => a.replace(/\/+$/, "") === b.replace(/\/+$/, "");
 
@@ -88,7 +95,12 @@ export type StartedBy = "person" | "cos";
 
 /** What startLead needs from the server: the engine's checks, the folders, bb's project lookup and the spawn. */
 export type LeadStartPorts = {
-  engine: { checkStart(role: "lead", project: string): string; monForStart(role: "lead", project: string): string | null; project(slug: string): { mode: "scoping" | "active" } | null };
+  engine: {
+    checkStart(role: "lead", project: string): string;
+    monForStart(role: "lead", project: string): string | null;
+    personaForStart?(role: "lead", project: string): { name: string; title: string; partner: string | null } | null;
+    project(slug: string): { mode: "scoping" | "active" } | null;
+  };
   /** The projects folder (the projectsDir setting). */
   projectsDir: string;
   /** A project folder the memory config names for this slug, if any. */
@@ -147,7 +159,7 @@ export async function startLead(p: LeadStartPorts, slug: string) {
   if (!repo) throw new EngineError("bad_state", `${folder}/PROJECT.md names no repo: put its absolute path in backticks under "## Repos"`);
   if (!existsSync(repo.path)) throw new EngineError("bad_state", `${slug}'s repo ${repo.path} isn't on this machine`);
   const base = repo.base ?? "not named in PROJECT.md (leave base_branch out: the repo's default branch)";
-  const brief = loadBrief(p.briefDir, "lead", { slug, address, pokemon: pokemonSentence(p.engine.monForStart("lead", slug)), folder, repo: repo.path, base, owner: p.owner });
+  const brief = loadBrief(p.briefDir, "lead", { slug, address, pokemon: introSentence(p.engine.monForStart("lead", slug), p.engine.personaForStart?.("lead", slug) ?? null), folder, repo: repo.path, base, owner: p.owner });
   const prompt = p.engine.project(slug)?.mode === "scoping" ? `${brief.trimEnd()}\n\n${scopingStart(slug, p.owner, folder)}\n` : brief;
   const { projectId, hostId } = await p.bbProject(repo.path);
   p.engine.checkStart("lead", slug); // again: the project may have been held meanwhile

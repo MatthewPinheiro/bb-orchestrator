@@ -29,7 +29,8 @@ export const CODEOWNERS_PATHS = [".github/CODEOWNERS", "CODEOWNERS", "docs/CODEO
 /** One PR's state fields a wait reads (approved, green, ready, merged). */
 const WAIT_FIELDS = "url,number,state,isDraft,reviewDecision,statusCheckRollup,mergeable,mergeStateStatus";
 /** What the search can't return about an open PR: review, checks, merge state, branches, body. */
-const VIEW_FIELDS = "url,body,isDraft,headRefName,headRefOid,baseRefName,reviewDecision,mergeable,mergeStateStatus,statusCheckRollup,reviews";
+// author and reviewRequests (2026-11-18): the review states read who wrote it and who was asked; gh pages reviews in full
+const VIEW_FIELDS = "url,body,isDraft,headRefName,headRefOid,baseRefName,reviewDecision,mergeable,mergeStateStatus,statusCheckRollup,reviews,author,reviewRequests";
 
 const must = (ok: boolean, what: string, v: unknown) => {
   if (!ok) throw new Error(`not a valid ${what}: ${JSON.stringify(v)}`);
@@ -97,6 +98,16 @@ export interface RawPr {
   checks: string | null; // the head commit's checks rolled up: SUCCESS | FAILURE | PENDING; null: no checks
   approvedBy: string[]; // people (not bots) whose latest review approves
   required: number | null; // approvals the base branch's rules require, when GitHub says
+  author: string; // the PR's author login ("" when gh gave none)
+  reviews: HumanReview[]; // submitted reviews by people (bots left out), oldest first, each with the commit it was on
+  requested: string[]; // people asked to review (teams left out)
+}
+
+/** One submitted review by a person: who, its state, and the head commit it was on ("" when GitHub gave none). */
+export interface HumanReview {
+  login: string;
+  state: string;
+  sha: string;
 }
 
 export interface RepoArea {
@@ -115,7 +126,8 @@ const enumOf = (v: unknown): string | null => (typeof v === "string" && v.trim()
  * Bots among review authors. gh gives a review's author only as a login (GraphQL's Bot type is gone), so a bot is a
  * login ending in [bot], or one of GitHub's own reviewer apps that don't.
  */
-const BOT_LOGINS = new Set(["copilot-pull-request-reviewer", "copilot", "github-actions"]);
+// coderabbitai (2026-11-18): gh prints CodeRabbit's reviews under the bare login, so its approval counted as a person's
+const BOT_LOGINS = new Set(["copilot-pull-request-reviewer", "copilot", "github-actions", "coderabbitai", "dependabot", "renovate"]);
 export const isBot = (login: string): boolean => login.toLowerCase().endsWith("[bot]") || BOT_LOGINS.has(login.toLowerCase());
 
 /** Reviews by people (bots left out), in the order gh gives them (oldest first). */
@@ -196,6 +208,16 @@ export function parsePrView(data: Json): PrView {
     mergeState: enumOf(n.mergeStateStatus),
     checks: rollupOf(n.statusCheckRollup),
     approvedBy: approversOf(n.reviews),
+    author: str(obj(n.author).login) ?? "",
+    reviews: arr(n.reviews)
+      .map(obj)
+      .map((r) => ({ login: str(obj(r.author).login) ?? "", state: str(r.state) ?? "", sha: str(obj(r.commit).oid) ?? "" }))
+      .filter((r) => !!r.login && !isBot(r.login)),
+    requested: arr(n.reviewRequests)
+      .map(obj)
+      .filter((r) => r.__typename === "User")
+      .map((r) => str(r.login) ?? "")
+      .filter((l) => !!l && !isBot(l)),
   };
 }
 
@@ -340,6 +362,51 @@ export function needsReview(pr: Pick<RawPr, "draft" | "reviewDecision" | "approv
   return !pr.draft && !fullyApproved(pr) && ciOf(pr.checks) !== "fail";
 }
 
+// ---------------------------------------------------------------- the review states (2026-11-18)
+//
+// Three states beside Needs review, from a contributor's review queue (folded in from public PR #4): a first review (no
+// person has reviewed it yet), a re-review (someone's latest review is on an older head commit), and approved on this
+// head. Only people count: bots (isBot) and the PR's author never do. A comment after an approval doesn't take it back.
+
+export type ReviewState = "first" | "rereview" | "approved";
+export interface Queue {
+  state: ReviewState | null;
+  who: string[]; // first: requested people, else suggested; re-review: those whose review is on an older head; approved: the approvers
+}
+
+const uniq = (logins: string[]) => [...new Map(logins.map((l) => [l.toLowerCase(), l])).values()];
+
+/** A PR's review state and its people. A draft, or a PR with no head commit or no author, has none. */
+export function reviewState(pr: Pick<RawPr, "draft" | "sha" | "author" | "reviews" | "requested">, suggested: string[] = []): Queue {
+  const none: Queue = { state: null, who: [] };
+  if (pr.draft || !pr.sha || !pr.author) return none;
+  const me = pr.author.toLowerCase();
+  const person = (l: string) => !!l && !isBot(l) && l.toLowerCase() !== me && !l.includes("/");
+  const reviews = pr.reviews.filter((r) => person(r.login) && ["APPROVED", "CHANGES_REQUESTED", "COMMENTED", "DISMISSED"].includes(r.state));
+  const latest = new Map<string, HumanReview>();
+  const opinion = new Map<string, HumanReview>();
+  for (const r of reviews) {
+    latest.set(r.login.toLowerCase(), r);
+    if (r.state !== "COMMENTED") opinion.set(r.login.toLowerCase(), r);
+  }
+  const approved = [...opinion.values()].filter((r) => r.state === "APPROVED" && r.sha === pr.sha);
+  if (approved.length) return { state: "approved", who: approved.map((r) => r.login) };
+  if (!reviews.length) {
+    const asked = pr.requested.filter(person);
+    return { state: "first", who: uniq(asked.length ? asked : suggested.filter(person).slice(0, 3)) };
+  }
+  // a review with no commit can't show the head moved
+  const stale = [...latest.values()].filter((r) => r.sha && r.sha !== pr.sha);
+  return stale.length ? { state: "rereview", who: stale.map((r) => r.login) } : none;
+}
+
+/** The state chip's words. A re-review GitHub calls approved says so, so it never contradicts the review chip. */
+export function stateWords(state: ReviewState, approved: boolean): string {
+  if (state === "first") return "First review";
+  if (state === "approved") return "Approved on this head";
+  return approved ? "Re-review: approved on an older head" : "Re-review: reviewed on an older head";
+}
+
 /** The review state in words: "changes requested", "approved", "review required" or "no review yet". */
 export function reviewWords(pr: Pick<RawPr, "reviewDecision" | "approvedBy" | "required">): string {
   if (pr.reviewDecision === "CHANGES_REQUESTED") return "changes requested";
@@ -366,7 +433,7 @@ export function mergeWords(pr: Pick<RawPr, "mergeable" | "mergeState">): string 
 /** What a state chip's colour says: green good, amber act on it, red broken, grey waiting, neutral facts, muted draft. */
 export type ChipTone = "ok" | "warn" | "fail" | "pending" | "neutral" | "muted";
 export interface Chip {
-  key: "draft" | "review" | "ci" | "merge";
+  key: "draft" | "state" | "review" | "ci" | "merge";
   text: string;
   tone: ChipTone;
 }
@@ -376,13 +443,14 @@ export interface Chip {
  * conflicts amber, CI failing red, CI running grey, a draft muted; waiting for review and "blocked by rules" (the
  * normal state of an unapproved PR) neutral, never alarming.
  */
-export function prChips(pr: { draft: boolean; review: string; approved: boolean; approvals: string; ci: Ci; merge: string }): Chip[] {
+export function prChips(pr: { draft: boolean; review: string; approved: boolean; approvals: string; ci: Ci; merge: string; state?: ReviewState | null }): Chip[] {
   const review: ChipTone = pr.approved ? "ok" : pr.review === "changes requested" ? "warn" : "neutral";
   const ci: ChipTone = pr.ci === "pass" ? "ok" : pr.ci === "fail" ? "fail" : pr.ci === "pending" ? "pending" : "neutral";
   const merge: ChipTone = pr.merge === "has conflicts" ? "warn" : pr.merge === "mergeable" ? "ok" : "neutral";
   const ciWords: Record<Ci, string> = { pass: "CI passing", pending: "CI running", fail: "CI failing", none: "no CI checks" };
   return [
     ...(pr.draft ? [{ key: "draft", text: "Draft", tone: "muted" } as Chip] : []),
+    ...(pr.state ? [{ key: "state", text: stateWords(pr.state, pr.approved), tone: pr.state === "approved" ? "ok" : pr.state === "rereview" ? "warn" : "neutral" } as Chip] : []),
     { key: "review", text: `${pr.review}, ${pr.approvals}`, tone: review },
     { key: "ci", text: ciWords[pr.ci], tone: ci },
     { key: "merge", text: pr.merge, tone: merge },
@@ -639,15 +707,22 @@ export const promptTitle = (title: string, repo: string): string => noBareRefs(t
  * these PRs only, mapped ones as @handle). Empty when no PR is given. The preview, the HTML flavour and the copy are
  * all this string, through slackLines (2026-11-16 rev 2).
  */
-export function buildPrompt(prs: PromptPr[], max = 5): string {
+export function buildPrompt(prs: PromptPr[], max = 5, again = false): string {
   if (prs.length === 0) return "";
   const blocks = prs.map((p) => `*${promptTitle(p.title, p.repo) || p.url}*\n${p.url}\n• ${noBareRefs(p.summary, p.repo).replace(/\s+/g, " ").trim()}`);
   const who = suggestReviewers(prs, max).map((c) => c.say);
-  const head = prs.length === 1 ? "This PR is ready for review:" : `These ${prs.length} PRs are ready for review:`;
-  return [head, ...blocks, ...(who.length ? [`${REVIEWERS_LEAD}${who.join(", ")}`] : [])].join("\n\n");
+  // again (2026-11-18): the Re-review filter's ask, to the people whose review is on an older head
+  const head = again
+    ? prs.length === 1 ? "This PR changed since it was reviewed:" : `These ${prs.length} PRs changed since they were reviewed:`
+    : prs.length === 1 ? "This PR is ready for review:" : `These ${prs.length} PRs are ready for review:`;
+  return [head, ...blocks, ...(who.length ? [`${again ? REASK_LEAD : REVIEWERS_LEAD}${who.join(", ")}`] : [])].join("\n\n");
 }
 
 export const REVIEWERS_LEAD = "Suggested reviewers: ";
+/** Re-review's people line (2026-11-18, the owner's layout feedback): they reviewed before, so they are asked again. */
+export const REASK_LEAD = "Reviewers to re-ask: ";
+/** The lines whose @handles are mentions: the people lines, and no other (a title's "@" stays text). */
+const isPeopleLine = (line: string) => line.startsWith(REVIEWERS_LEAD) || line.startsWith(REASK_LEAD);
 
 // ---------------------------------------------------------------- the Slack formatter (preview, HTML, copy)
 
@@ -693,7 +768,7 @@ export function slackLines(text: string): SlackLine[] {
     let toks: SlackTok[] = line ? [{ kind: "text", raw: line, show: line }] : [];
     toks = textOnly(toks, (s) => splitBy(s, URL_RE, (m) => ["", { kind: "link", raw: m[0], show: m[0] }]));
     toks = textOnly(toks, (s) => splitBy(s, BOLD_RE, (m) => [m[1]!, { kind: "bold", raw: `*${m[2]}*`, show: m[2]! }]));
-    if (line.startsWith(REVIEWERS_LEAD)) toks = textOnly(toks, (s) => splitBy(s, MENTION_RE, (m) => [m[1]!, { kind: "mention", raw: `@${m[2]}`, show: `@${m[2]}` }]));
+    if (isPeopleLine(line)) toks = textOnly(toks, (s) => splitBy(s, MENTION_RE, (m) => [m[1]!, { kind: "mention", raw: `@${m[2]}`, show: `@${m[2]}` }]));
     return { bullet: line.startsWith("• "), toks };
   });
 }
@@ -712,6 +787,50 @@ export function slackHtml(lines: SlackLine[]): string {
   return lines.map((l) => l.toks.map(tok).join("")).join("<br>");
 }
 
+// ---------------------------------------------------------------- the posted message (2026-11-17)
+
+/** The @handles a Post would mention: the reviewers line's mention tokens, without "@". */
+export const mentionHandles = (text: string): string[] => [...new Set(slackLines(text).flatMap((l) => l.toks.filter((t) => t.kind === "mention").map((t) => t.raw.slice(1))))];
+
+/** Slack's three control characters, escaped as its API wants them in text (it shows them back as typed). */
+const slackEsc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+/**
+ * What Post shows and what it sends, from the one copied string and the handles' user IDs. `shown` is the text the
+ * confirm draws: the copied string, except that a handle no one in Slack has loses its "@" (it would never be a mention).
+ * `posted` is `shown` as Slack's API takes it: a resolved handle becomes <@ID> (a real mention, which a typed @handle
+ * sent through the API is not) and &, < and > are escaped. Slack draws `posted` as `shown`, so the message is the preview.
+ */
+export function slackPost(text: string, ids: Record<string, string | null>): { shown: string; posted: string; unresolved: string[] } {
+  const unresolved: string[] = [];
+  const shown: string[] = [];
+  const posted: string[] = [];
+  for (const l of slackLines(text)) {
+    let s = "";
+    let p = "";
+    for (const t of l.toks) {
+      if (t.kind !== "mention") {
+        s += t.raw;
+        p += slackEsc(t.raw);
+        continue;
+      }
+      const h = t.raw.slice(1);
+      const id = ids[h.toLowerCase()] ?? null;
+      if (id && /^[UW][A-Z0-9]{2,}$/.test(id)) {
+        s += t.raw;
+        p += `<@${id}>`;
+      } else {
+        unresolved.push(h);
+        s += h;
+        p += slackEsc(h);
+      }
+    }
+    shown.push(s);
+    posted.push(p);
+  }
+  return { shown: shown.join("\n"), posted: posted.join("\n"), unresolved };
+}
+
 // ---------------------------------------------------------------- when to read GitHub again
 
 /**
@@ -724,6 +843,53 @@ export function dueToFetch(s: { hasSnapshot: boolean; lastAttempt: number | null
   const gap = s.pollMs > 0 ? s.pollMs : s.hasSnapshot ? Number.POSITIVE_INFINITY : 5 * 60_000;
   return s.now - s.lastAttempt >= gap;
 }
+
+// ---------------------------------------------------------------- the kept snapshot (2026-11-17)
+//
+// The last good read is kept in plugin storage, so a restart (an install, a reload) shows the PRs at once, marked with
+// when they were checked, while a new read runs: the owner measured 18-21 s of an empty tab after each install. Only
+// what the page shows is kept (no PR bodies, no changed files): each PR's suggested reviewers are kept as computed,
+// without their @handle, which the read adds from the current slackHandleMap.
+
+export const KEPT_VERSION = 1;
+/** One PR as kept: the fields the read shows and needsReview judges, its summary, its agent and its candidates. */
+export interface KeptPr extends Omit<RawPr, "body" | "branch" | "sha" | "author" | "reviews" | "requested"> {
+  summary: string;
+  // the review states (2026-11-18): optional, so a snapshot kept before them still loads (no state until the next read)
+  sha?: string;
+  queue?: Queue;
+  agent: { address: string; role: string; project: string | null } | null;
+  cands: Omit<Candidate, "say">[];
+}
+export interface KeptSnapshot {
+  v: typeof KEPT_VERSION;
+  login: string;
+  at: number;
+  more: boolean;
+  prs: KeptPr[];
+}
+
+const isStr = (v: unknown): v is string => typeof v === "string";
+const keptPrOk = (v: unknown): boolean => {
+  const p = obj(v);
+  const a = p.agent === null ? true : isStr(obj(p.agent).address) && isStr(obj(p.agent).role);
+  return (
+    isStr(p.url) && PR_URL_RE.test(p.url) && typeof p.number === "number" && isStr(p.title) && isStr(p.repo) && isStr(p.updatedAt) && typeof p.draft === "boolean" &&
+    Array.isArray(p.approvedBy) && p.approvedBy.every(isStr) && isStr(p.summary) && Array.isArray(p.cands) && p.cands.every((c) => isStr(obj(c).name)) && a
+  );
+};
+
+/** What storage gave back, if it is a kept snapshot of this login in this version; anything else is no snapshot. */
+export function parseKept(v: unknown, login: string): KeptSnapshot | null {
+  const s = obj(v);
+  if (s.v !== KEPT_VERSION || s.login !== login || typeof s.at !== "number" || !Number.isFinite(s.at) || typeof s.more !== "boolean" || !Array.isArray(s.prs)) return null;
+  return s.prs.every(keptPrOk) ? (s as unknown as KeptSnapshot) : null;
+}
+
+/** A PR's candidates as kept: the name, CODEOWNER and recent counts, in rank order; the @handle comes at read time. */
+export const keptCands = (cs: Candidate[]): Omit<Candidate, "say">[] => cs.map(({ say: _say, ...c }) => c);
+/** The kept candidates with their @handle from the current map (tag), so a map edited after the read still applies. */
+export const sayCands = (cs: Omit<Candidate, "say">[], handles: Record<string, string>): Candidate[] => cs.map((c) => ({ ...c, say: tag(c.name, handles) }));
 
 // ---------------------------------------------------------------- settings
 

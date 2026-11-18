@@ -118,6 +118,14 @@ async function post(path: string, body: unknown): Promise<Outcome> {
   }
 }
 
+/**
+ * A file staged for a write that follows (2026-11-17: a screenshot for a message to a lead), outside the gate: staging
+ * changes nothing the page shows, and the message that names it goes through `write` as every write does.
+ */
+export function stage(path: string, body: unknown): Promise<Outcome> {
+  return post(path, body);
+}
+
 export type WriteOptions = {
   /** The card written, for its mark while the page holds, and to hide it once the write took. */
   card?: { id: string; rev: number; hide: Hide };

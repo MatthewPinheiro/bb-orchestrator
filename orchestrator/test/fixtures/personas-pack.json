@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "note": "A made-up pack for the tests: none of these personas is anyone. The images are on a reserved test domain.",
+  "personas": {
+    "orrin": { "name": "Orrin", "title": "Harbormaster", "image": "https://personas.example.test/orrin.png", "team": ["Rayquaza"] },
+    "tamsin": { "name": "Tamsin", "title": "Warden", "image": "https://personas.example.test/tamsin.png" },
+    "vesna": { "name": "Vesna", "title": "Pilot", "image": "https://personas.example.test/vesna.png", "credit": "drawn by a made-up artist", "team": ["Milotic", "Roserade", "Togekiss", "Spiritomb"], "roster": ["Feebas", "Budew", "Togepi"] },
+    "pell": { "name": "Pell", "title": "Scout", "image": "https://personas.example.test/pell.png", "team": ["Garchomp", "Lucario"], "roster": ["Gible", "Riolu"] },
+    "brannoc": { "name": "Brannoc", "title": "Courier", "image": "https://personas.example.test/brannoc.png", "roster": ["Shinx", "Pichu"] },
+    "ysolde": { "name": "Ysolde", "title": "Archivist", "image": "https://personas.example.test/ysolde.png", "roster": ["Ralts"] }
+  },
+  "roles": { "cos": "orrin", "steward": "tamsin" },
+  "byType": { "dark": ["vesna", "pell"], "ground": ["pell", "brannoc"], "electric": ["brannoc"] },
+  "byProject": {},
+  "fallback": "ysolde",
+  "lines": {
+    "Feebas": { "dex": 349, "types": ["water"], "evolutions": [{ "at": 35, "name": "Milotic", "dex": 350 }] }
+  }
+}

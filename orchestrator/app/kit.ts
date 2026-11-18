@@ -283,15 +283,69 @@ export function scopeEntryOf(p: ScopeProject, scopeTask: string | null | undefin
 /**
  * The entry header's one line on what happens next (1.13.0), so the owner never has to work out the flow: answer the
  * "Scoping done?" card when it is there, else the open cards, else nothing waits and the lead brings questions here.
+ * 2026-11-17: while nothing waits, the line is the status card's Next, not the header's.
  */
 export function scopeNext(e: ScopeEntry, o: { cards: readonly { title: string; scopingDone?: unknown }[]; delivered: number; hasLead: boolean }): string {
   if (!o.hasLead) return `No lead is running for ${e.slug}: start it from Projects, and its chat opens here.`;
   const done = o.cards.find((c) => !!c.scopingDone);
   if (done) return e.task ? `Next: answer ${JSON.stringify(done.title)}. Yes closes this task; anything still open under it goes the normal way.` : `Next: answer ${JSON.stringify(done.title)}. Yes makes ${e.slug} active; its cards go the normal way from then on.`;
-  const planner = plannerOf(e);
   const filesDone = e.task ? `the lead files "Scoping done?" when the findings and plan are written` : `the lead files "Scoping done?" when the goal, constraints and first plan are in PROJECT.md`;
   if (o.cards.length || o.delivered) return `Next: ${o.cards.length ? "answer the cards" : "review what was handed over"}; ${filesDone}.`;
-  return planner.kind === "thread" ? `Nothing waits on you. ${planner.name} is investigating; the lead brings its questions here.` : `Nothing waits on you. The lead brings its questions here; write to it below.`;
+  // nothing waits (2026-11-17): the entry's status card says who is on it, so this line only says what comes next
+  return `Questions appear here; the lead proposes "Scoping done?" when it's ready.`;
+}
+
+// ---------------------------------------------------------------- the Scope entry's status card (2026-11-17)
+// The owner asked for a better Scope entry while nothing waits on them: an empty cards column left most of a wide pane
+// blank. Then one small card takes its place (who is scoping and whether they are working, what they are on now, what
+// is done so far, what comes next) and the chat takes the rest of the width. With anything waiting the entry is as before.
+
+/** Nothing in the entry waits on the owner (no open card, no scoping deliverable to review): it shows its status card, not its cards. */
+export const scopeQuiet = (o: { cards: number; delivered: number }): boolean => o.cards === 0 && o.delivered === 0;
+
+type ProjectRow = Projects[number];
+export interface ScopeStatus {
+  /** Who scopes the entry: its scoping thread, else the lead. idleSince: when it went idle, while it is. */
+  who: { kind: "lead" | "thread"; name: string; address: string | null; working: boolean; state: string; idleSince: number | null };
+  /**
+   * What it is on now, in its own words: a scoping thread's last report; the lead's status update (its first bullet) or
+   * its current step, whichever it published last. Never the lead's line for a thread's task: the lead's status covers
+   * the whole project, and under the task it would read as the thread's. None before its first.
+   */
+  now: { text: string; from: "report" | "update" | "step"; at: number } | null;
+}
+
+export function scopeStatus(e: ScopeEntry, p: Pick<ProjectRow, "slug" | "lead" | "status" | "summary"> | undefined): ScopeStatus {
+  const t = e.planner;
+  if (t) {
+    const working = t.status === "active";
+    return {
+      who: { kind: "thread", name: t.title ?? t.address, address: t.address, working, state: PLANNER_STATE[t.status] ?? t.status, idleSince: t.status === "idle" ? (t.idleAt ?? null) : null },
+      now: t.report ? { text: t.report.text, from: "report", at: t.report.at } : null,
+    };
+  }
+  const lead = p?.lead ?? null;
+  const st = p?.status ?? null;
+  const u = st?.update?.workingOn[0] ? { text: st.update.workingOn[0], from: "update" as const, at: st.update.updateAt } : null;
+  const i = st ? st.steps.findIndex((s) => s.state === "current") : -1;
+  const step = st && i >= 0 ? { text: `Step ${i + 1} of ${st.steps.length}: ${st.steps[i]!.title}`, from: "step" as const, at: st.updatedAt } : null;
+  return {
+    who: {
+      kind: "lead",
+      name: "The lead",
+      address: lead?.address ?? null,
+      working: lead?.status === "active",
+      state: lead ? (PLANNER_STATE[lead.status] ?? lead.status) : "not running",
+      idleSince: lead?.status === "idle" ? (p?.summary?.leadIdleSince ?? null) : null,
+    },
+    // the one it wrote last; on a tie (one orch_status with both) the update, which is written for the owner
+    now: u && step ? (step.at > u.at ? step : u) : (u ?? step),
+  };
+}
+
+/** What the entry's planning has handed over and the owner has already looked at: its scoping deliverables approved or sent back for changes, newest first. */
+export function scopeDone<D extends { project: string | null; state: string; scope?: boolean; scopeTask?: string; updatedAt: number }>(all: readonly D[], p: ScopeProject, task: string | null): D[] {
+  return all.filter((d) => d.project === p.slug && !!d.scope && (d.state === "approved" || d.state === "changes") && inScopeEntry(p, task, d.scopeTask)).sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
 // ---------------------------------------------------------------- the owner's scoping switches (1.13.0)

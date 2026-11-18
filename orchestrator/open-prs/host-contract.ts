@@ -8,6 +8,8 @@ const rawPr = z.object({
   url: z.string(), number: z.number(), title: z.string(), body: z.string(), repo: z.string(), draft: z.boolean(), updatedAt: z.string(),
   branch: z.string(), sha: z.string(), reviewDecision: z.string().nullable(), mergeable: z.string().nullable(), mergeState: z.string().nullable(),
   checks: z.string().nullable(), approvedBy: z.array(z.string()), required: z.number().nullable(),
+  // the review states (2026-11-18): the author, people's reviews with their commit, and the people asked
+  author: z.string().default(""), reviews: z.array(z.object({ login: z.string(), state: z.string(), sha: z.string() })).default([]), requested: z.array(z.string()).default([]),
 });
 
 // bb's PR-status reading shape (core/open-prs.ts BbPrReading)

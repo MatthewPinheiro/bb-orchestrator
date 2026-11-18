@@ -1,16 +1,19 @@
-// The Orchestrator page as panes (layout.ts holds the rules). Each pane has its own tabs (affectUI's segmented control,
+// The Orchestrator page as panes (layout.ts holds the rules). Each pane has its own tabs (shadcn's Tabs since 2026-11-17,
 // scrolling sideways when they don't fit), split right, split down and close. Dividers drag to resize. Each pane scrolls on
 // its own. A phone-width page shows only the focused pane.
-import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
-import { SegmentedControl } from "./affect/segmented-control-clean.tsx";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
+import { Columns2, Rows2, X } from "lucide-react";
 import { MAX_PANES, panes, type Layout, type Node, type Pane } from "./layout.ts";
+import { Badge } from "./ui/badge.tsx";
+import { Tabs, TabsList, TabsTrigger } from "./ui/tabs.tsx";
+import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip.tsx";
 import { Btn, cx } from "./ui.tsx";
 
 /** `counted`: the tab can carry a count, so its slot stays while there is none and a count coming or going moves no tab */
 export type ViewDef = { id: string; label: string; count?: number | string; counted?: boolean };
 
 /**
- * A counted tab's label: its count sits in a slot that is always there, hidden while empty, at least two digits wide (paneCss).
+ * A counted tab's label: its count is a badge in a slot that is always there, hidden while empty, at least two digits wide.
  * While the slot is empty the label is centred across the whole box, not left of a blank gap (2026-11-17, the owner).
  */
 function CountedLabel({ label, count }: { label: string; count?: number | string }) {
@@ -18,9 +21,9 @@ function CountedLabel({ label, count }: { label: string; count?: number | string
   return (
     <span className="orch-tab-label" data-label={label} data-empty={text === "" || undefined}>
       <span className="orch-tab-name">{label}</span>
-      <span key={text} className="ui-segc__count orch-tab-count" data-empty={text === "" || undefined} aria-hidden={text === "" || undefined}>
+      <Badge variant="secondary" className="orch-tab-count h-4 min-w-[calc(2ch+8px)] px-1 tabular-nums" data-empty={text === "" || undefined} aria-hidden={text === "" || undefined}>
         {text}
-      </span>
+      </Badge>
     </span>
   );
 }
@@ -106,7 +109,10 @@ function Divider({ row, box, onMove }: { row: boolean; box: RefObject<HTMLDivEle
       role="separator"
       aria-orientation={row ? "vertical" : "horizontal"}
       data-divider=""
-      className={cx("orch-divider", row ? "orch-divider--row" : "orch-divider--col")}
+      className={cx(
+        "relative flex-none touch-none after:absolute after:rounded-xs after:bg-transparent after:transition-colors hover:after:bg-foreground/15 active:after:bg-foreground/15",
+        row ? "w-1.5 cursor-col-resize after:inset-x-0.5 after:inset-y-2" : "h-1.5 cursor-row-resize after:inset-x-2 after:inset-y-0.5",
+      )}
       onPointerDown={(e) => {
         const el = box.current;
         if (!el) return;
@@ -133,28 +139,57 @@ function Divider({ row, box, onMove }: { row: boolean; box: RefObject<HTMLDivEle
   );
 }
 
-const SplitRight = () => (
-  <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden>
-    <rect x="2" y="2.5" width="12" height="11" rx="2" />
-    <path d="M8 2.5v11" />
-  </svg>
-);
-const SplitDown = () => (
-  <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden>
-    <rect x="2" y="2.5" width="12" height="11" rx="2" />
-    <path d="M2 8h12" />
-  </svg>
-);
-const CloseIcon = () => (
-  <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden>
-    <path d="m4.5 4.5 7 7m0-7-7 7" />
-  </svg>
-);
+/** A pane's icon button: its name is its tooltip (and its accessible name) */
+function PaneAction({ label, icon, ...p }: { label: string; icon: ReactNode; onClick: () => void; [data: `data-${string}`]: string | undefined }) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Btn tone="ghost" icon={icon} aria-label={label} {...p} />
+      </TooltipTrigger>
+      <TooltipContent>{label}</TooltipContent>
+    </Tooltip>
+  );
+}
 
 function PaneView({ pane, views, render, fill, wide, onView, onFocus, onSplit, onClose, layout, many, canSplit }: Inner & { pane: Pane }) {
   const ref = useRef<HTMLElement>(null);
   const width = useWidth(ref);
+  const strip = useRef<HTMLDivElement>(null);
   const focused = layout.focus === pane.id;
+  // The active tab stays in view when the strip scrolls. And a tab a shortcut or a link switched away from gives up the
+  // focus to the active one: Radix selects a tab when it gets the focus, so a stale focused tab would switch the pane
+  // back the next time the window or a closed dialog hands the focus back to it.
+  useLayoutEffect(() => {
+    const s = strip.current;
+    const t = s?.querySelector<HTMLElement>("[role=tab][data-state=active]");
+    if (!s || !t) return;
+    const a = document.activeElement;
+    if (a instanceof HTMLElement && a !== t && a.getAttribute("role") === "tab" && s.contains(a)) t.focus({ preventScroll: true });
+    if (s.scrollWidth <= s.clientWidth) return;
+    const sr = s.getBoundingClientRect();
+    const tr = t.getBoundingClientRect();
+    if (tr.left < sr.left) s.scrollLeft -= sr.left - tr.left + 8;
+    else if (tr.right > sr.right) s.scrollLeft += tr.right - sr.right + 8;
+  }, [pane.view, width]);
+  // 2026-11-18: the strip's scrollbar is hidden, so a quiet fade at an edge says more tabs sit past it (none when all fit)
+  const [fade, setFade] = useState("");
+  useLayoutEffect(() => {
+    const s = strip.current;
+    if (!s) return;
+    const read = () => {
+      const more = s.scrollWidth - s.clientWidth;
+      setFade(more <= 1 ? "" : [s.scrollLeft > 1 && "start", s.scrollLeft < more - 1 && "end"].filter(Boolean).join(" "));
+    };
+    read();
+    s.addEventListener("scroll", read, { passive: true });
+    const ro = new ResizeObserver(read);
+    ro.observe(s);
+    if (s.firstElementChild) ro.observe(s.firstElementChild);
+    return () => {
+      s.removeEventListener("scroll", read);
+      ro.disconnect();
+    };
+  }, [views.length]);
   const fills = fill(pane.view);
   const column = wide?.(pane.view) ? "w-full" : "mx-auto w-full max-w-3xl";
   return (
@@ -163,7 +198,7 @@ function PaneView({ pane, views, render, fill, wide, onView, onFocus, onSplit, o
       data-pane={pane.id}
       data-pane-view={pane.view}
       data-focused={focused || undefined}
-      className={cx("orch-pane flex min-h-0 min-w-0 flex-1 flex-col", many && "orch-pane--framed")}
+      className={cx("orch-pane flex min-h-0 min-w-0 flex-1 flex-col", many && "m-1 rounded-lg border data-[focused]:border-foreground/25")}
       onPointerDownCapture={() => {
         if (!focused) onFocus(pane.id);
       }}
@@ -171,27 +206,29 @@ function PaneView({ pane, views, render, fill, wide, onView, onFocus, onSplit, o
       {/* the strip's row spans the pane on every tab (tabs left, split buttons right), whatever width the tab's content
           takes, so it never moves with the tab (2026-11-17: only the wide tabs drew it so) and fits more tabs before it
           scrolls; the tab's content scrolls under it, in its own column */}
-      <header className={cx("flex shrink-0 items-center gap-1", many ? "px-2 pt-2" : "px-4 pt-4")}>
-        <div className="min-w-0 flex-1">
-          <SegmentedControl
-            kind="tabs"
-            variant="tray"
-            size="sm"
-            fullWidth
-            value={pane.view}
-            options={views.map((v) => (v.counted ? { value: v.id, label: <CountedLabel label={v.label} count={v.count} /> } : { value: v.id, label: v.label, count: v.count }))}
-            onChange={(id) => onView(pane.id, id)}
-          />
-        </div>
+      {/* the strip keeps the content's inset, px-3 in a split pane as its cards (2026-11-18, the owner: at px-2 it ran
+          closer to the pane's edge than the cards) */}
+      <header className={cx("flex shrink-0 items-center gap-1", many ? "px-3 pt-2" : "px-4 pt-4")}>
+        {/* every tab one width, the widest tab's (2026-11-17, the owner: "make all the tab widths the same"): a grid of
+            equal columns at its natural width, labels centred; too narrow for them all, the strip scrolls sideways with the
+            tabs still equal, none cut short (a strip stretched across the row would make each a tenth of a wide pane).
+            A tab not shown is bb's muted text, as in dark: shadcn's 60% ink on the light tray is 3.4:1, under 4.5:1 */}
+        <Tabs ref={strip} data-tab-strip="" data-fade={fade || undefined} value={pane.view} onValueChange={(id) => onView(pane.id, id)} className="min-w-0 flex-1 gap-0 overflow-x-auto overflow-y-hidden [scrollbar-width:none]">
+          <TabsList className="grid w-max auto-cols-fr grid-flow-col">
+            {views.map((v) => (
+              <TabsTrigger key={v.id} value={v.id} className="text-muted-foreground">
+                {v.counted || v.count !== undefined ? <CountedLabel label={v.label} count={v.count} /> : v.label}
+              </TabsTrigger>
+            ))}
+          </TabsList>
+        </Tabs>
         {canSplit ? (
           <>
-            <Btn tone="ghost" icon={<SplitRight />} aria-label="Split right" title="Split right" data-split-right="" onClick={() => onSplit(pane.id, "row")} />
-            <Btn tone="ghost" icon={<SplitDown />} aria-label="Split down" title="Split down" data-split-down="" onClick={() => onSplit(pane.id, "col")} />
+            <PaneAction label="Split right" icon={<Columns2 />} data-split-right="" onClick={() => onSplit(pane.id, "row")} />
+            <PaneAction label="Split down" icon={<Rows2 />} data-split-down="" onClick={() => onSplit(pane.id, "col")} />
           </>
         ) : null}
-        {many ? (
-          <Btn tone="ghost" icon={<CloseIcon />} aria-label="Close pane" title="Close pane" data-close-pane="" onClick={() => onClose(pane.id)} />
-        ) : null}
+        {many ? <PaneAction label="Close pane" icon={<X />} data-close-pane="" onClick={() => onClose(pane.id)} /> : null}
       </header>
       {fills ? (
         <div className="flex min-h-0 flex-1 flex-col pt-2">{render(pane.view, { id: pane.id, width })}</div>
@@ -205,32 +242,26 @@ function PaneView({ pane, views, render, fill, wide, onView, onFocus, onSplit, o
 }
 
 export const paneCss = /* css */ `
-[data-orch] .orch-pane--framed { margin: 4px; border-radius: 10px; box-shadow: 0 0 0 0.5px var(--orch-line); }
-[data-orch] .orch-pane--framed[data-focused] { box-shadow: 0 0 0 1px light-dark(rgba(0, 0, 0, 0.16), rgba(255, 255, 255, 0.22)); }
-[data-orch] .orch-divider { flex: none; position: relative; touch-action: none; }
-[data-orch] .orch-divider--row { width: 6px; cursor: col-resize; }
-[data-orch] .orch-divider--col { height: 6px; cursor: row-resize; }
-[data-orch] .orch-divider::after { content: ""; position: absolute; border-radius: 2px; background: transparent; transition: background-color 120ms ease; }
-[data-orch] .orch-divider--row::after { inset: 8px 2px; }
-[data-orch] .orch-divider--col::after { inset: 2px 8px; }
-[data-orch] .orch-divider:hover::after, [data-orch] .orch-divider:active::after { background: light-dark(rgba(0, 0, 0, 0.16), rgba(255, 255, 255, 0.22)); }
 /* A scrollbar coming or going moves no content: its room is always kept */
 [data-orch] .orch-pane__scroll { scrollbar-gutter: stable; }
-/* The strip's counts: at least two digits wide ("2" → "10" moves no tab), and a counted tab keeps its slot while empty */
-[data-orch] [data-pane] > header .ui-segc .ui-segc__count { min-width: calc(2ch + 6px); }
+/* 2026-11-17, the owner: on Projects the list and the project's header stay put and only the cards scroll. A tab that
+   lays out its own scroll regions marks its root [data-fits-pane]: the pane hands it its whole height and scrolls nothing
+   itself, so there is one scrollbar per region and none for the page */
+[data-orch] .orch-pane__scroll:has([data-fits-pane]) { display: flex; flex-direction: column; overflow: hidden; scrollbar-gutter: auto; }
+[data-orch] .orch-pane__scroll:has([data-fits-pane]) > div { display: flex; flex: 1 1 auto; flex-direction: column; min-height: 0; padding-bottom: 0; }
+[data-orch] [data-fits-pane] { display: flex; flex: 1 1 auto; flex-direction: column; min-height: 0; }
+/* 2026-11-18: the tab strip fades at a side (a mask reads only alpha, so black is no colour here) that has more tabs past it (data-fade: start, end, or both) */
+[data-orch] [data-tab-strip][data-fade] { --fade-l: 0px; --fade-r: 0px; -webkit-mask-image: linear-gradient(to right, transparent, black var(--fade-l), black calc(100% - var(--fade-r)), transparent); mask-image: linear-gradient(to right, transparent, black var(--fade-l), black calc(100% - var(--fade-r)), transparent); }
+[data-orch] [data-tab-strip][data-fade~="start"] { --fade-l: 24px; }
+[data-orch] [data-tab-strip][data-fade~="end"] { --fade-r: 24px; }
 /* A counted tab's box is its label, the gap and the slot, count or none. A hidden copy of the label holds column one, so
    with the slot empty the label itself spans both columns, centred, and the box keeps its width */
-[data-orch] .orch-tab-label { display: inline-grid; grid-template-columns: auto auto; align-items: center; column-gap: 5px; }
+[data-orch] .orch-tab-label { display: inline-grid; grid-template-columns: auto auto; align-items: center; column-gap: 4px; }
 [data-orch] .orch-tab-label::before { content: attr(data-label); grid-area: 1 / 1; visibility: hidden; }
 [data-orch] .orch-tab-name { grid-area: 1 / 1; }
 [data-orch] .orch-tab-count { grid-area: 1 / 2; }
 [data-orch] .orch-tab-label[data-empty] .orch-tab-name { grid-column: 1 / -1; justify-self: center; }
 [data-orch] .orch-tab-count[data-empty] { visibility: hidden; }
-/* Every tab one width, the widest tab's (2026-11-17, the owner: "make all the tab widths the same"). The strip uses the
-   control's equal mode (fullWidth): columns of minmax(widest, 1fr) in a max-content track, so each is the widest label
-   with its count slot, its label centred. Kept at that natural width here (the mode would otherwise stretch the strip
-   across the row); too narrow for them all, the strip scrolls sideways with the tabs still equal, none cut short */
-[data-orch] [data-pane] > header .ui-segc[data-full] { display: inline-flex; width: auto; }
 /* 2026-11-17: in a plugin pane bb-app 0.49.0's ThreadChat caps only the transcript at its 760px column, not the composer (bb's own thread page caps both), so the composer's wrapper (bb's [data-scroll-footer] and [data-app-composer] hooks) gets the same cap; a no-op once bb centres it itself */
 [data-orch] [data-pane-view="chat"] [data-scroll-footer] :has(> [data-app-composer]) { max-width: 760px; margin-inline: auto; }
 `;

@@ -5,15 +5,17 @@
 import { existsSync, mkdirSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve as resolvePath, sep } from "node:path";
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { type BbRun, setupSidebar } from "./core/sidebar.ts";
 // deliverables
 import { chmodSync, closeSync, cpSync, createReadStream, openSync, readdirSync, readSync, rmSync, statSync } from "node:fs";
 import { Readable } from "node:stream";
-import { approveBody, type Deliverables, PROOF_ROUTE, type ProjectOrder, requestChangesBody, secretBody } from "./contract.ts";
+import { approveBody, type DeliverableFolders, type Deliverables, PROOF_ROUTE, type ProjectOrder, requestChangesBody, secretBody } from "./contract.ts";
 import { type DeliverPlace, type OutputPlace, type ProofInput, SCOPING_SUMMARY_MAX, SCOPING_TASK_NAME_MAX, SECRET_TTL_MS } from "./core/engine.ts";
 import { deliverBlocks, deliverPoints, fromJson, inputBlocksSchema, lessTextRefusal, looksLikeCode } from "./blocks.ts";
 import { CARD_CAPS, DELIVER_BUDGET, deliverBudgetRefusal } from "./core/caps.ts";
 import { ignoredTopLevelUpdate, statusParams, statusLine } from "./core/status.ts";
+import { type DirectImage, MAX_IMAGE_BYTES, imageInput, safeName, sniff, withImages } from "./core/direct-images.ts";
 import { checkAnswers, toQuestions } from "./interactions.ts";
 
 /** A pending interaction as bb lists it (only the fields read here). */
@@ -32,6 +34,8 @@ import {
   CHANGED_CHANNEL,
   holdBody,
   directMessageBody,
+  directImageBody,
+  cosImageBody,
   directSeenBody,
   priorityBody,
   type Projects,
@@ -60,7 +64,7 @@ import {
   type Watchers,
 } from "./contract.ts";
 import type { Db } from "./core/db.ts";
-import { type DeliverResult, Engine, OUTPUT_KINDS, parseSince, type PrResult, WAIT_WHEN } from "./core/engine.ts";
+import { type DeliverResult, Engine, OUTPUT_KINDS, parseSince, type PrResult, type Settings, WAIT_WHEN } from "./core/engine.ts";
 import { PINS_MAX } from "./core/pins.ts";
 import { DAY_MS, prune, pruneSummary } from "./core/retention.ts";
 import { AlarmState, describe as describeAlarm, sample, type Snapshot, type Thresholds } from "./core/host.ts";
@@ -71,7 +75,8 @@ import {
 import { formAt, tokensForLevel } from "./mons.ts";
 import { placeable, pruneSections } from "./core/sections.ts";
 import { type Agent, type Decision, EngineError, OUTCOMES, projectTitle, type Role, ROLES, sectionTitle } from "./core/model.ts";
-import { type LeadStartPorts, loadBrief, pokemonSentence, samePath, scopingThreadStart, startLead, type StartedBy } from "./core/start.ts";
+import { introSentence, type LeadStartPorts, loadBrief, samePath, scopingThreadStart, startLead, type StartedBy } from "./core/start.ts";
+import { readPersonaPack } from "./personas.ts";
 import { externalMailSchema, integrationRoutes, allowImport } from "./core/integration.ts";
 import { adoptThread, type AdoptThread } from "./core/adopt.ts";
 import { spawnSelection, START_DEFAULTS } from "./core/provider.ts";
@@ -82,6 +87,10 @@ import { type DreamOptions, Dreams, loadDreamConfig, parseTimers, parseUnits, re
 // the Cloud tab
 import { registerCloud } from "./cloud/server.ts";
 import { registerOpenPrs } from "./open-prs/server.ts";
+import { OPEN_PRS_COPIED, OPEN_PRS_POST, openPrsCopiedBody, openPrsPostBody } from "./open-prs/contract.ts";
+// the CodeRabbit review queue (review-queue/)
+import { registerReviewQueue } from "./review-queue/server.ts";
+import { REVIEW_QUEUE_WRITE, queueActionSchema } from "./review-queue/contract.ts";
 import { uncoveredWaitUrls } from "./core/open-prs.ts";
 import { JOB_IDS, jobRefusal, jobsView, watchText } from "./core/watchers.ts";
 // the Game Boy tab
@@ -150,6 +159,7 @@ export default async function plugin(bb: BbPluginApi) {
     // Requested 2026-11-17: hide tabs the owner doesn't use, by id or label. Empty (the default) shows every tab.
     hiddenTabs: { type: "string", label: "Tabs to hide, comma-separated (ids or labels, e.g. gameboy, rules, activity). Empty: show every tab. Scope still shows while something waits in it or you're on it", default: "" },
     pokemon: { type: "boolean", label: "Pokémon", description: "Give each agent a Pokémon that evolves as it levels: sprites in the app and the sidebar, its name in its brief, evolutions on the board. Each project gets a Pokémon type: its lead and threads share it, and its colour is the project's accent. Sprites load from PokeAPI's public sprite repo at runtime. Pokémon is a trademark of Nintendo, Creatures and GAME FREAK; this plugin is not affiliated with them.", default: false },
+    personaPack: { type: "string", label: "Personas pack (with Pokémon on): the absolute path of a JSON pack", description: "Optional, empty by default. A pack gives the CoS, the Steward and each lead a persona (a name, a title and an image) in place of a Pokémon of their own; threads stay Pokémon and draw from their lead's persona's lines first. The plugin ships no pack. It is read when this is saved and when the plugin loads; a pack that fails its checks is ignored, with the problems in the log. Check one with: node personas-check.ts <path>.", default: "" },
     pushNeedsYou: { type: "boolean", label: "Desktop/web push when a card enters Needs you (never sent while mobile push is on)", default: true },
     notifyOnlyOrchestrator: { type: "boolean", label: "Orchestrator notifications only", description: "bb notifies you only for the orchestrator: Needs-you cards, deliveries and the CoS thread. Mutes every other thread by setting push-notifications' defaultLevel and childLevel to muted; switching it off restores them. Card and delivery pushes still need pushNeedsYou on and mobile push off.", default: false },
     // dreams
@@ -175,9 +185,13 @@ export default async function plugin(bb: BbPluginApi) {
     gcpLoginConfig: { type: "string", label: "Cloud tab: GCP login config", description: "Full path of the workforce login config (gcp-login-config.json) on the machine. Empty: look in the usual places.", default: "" },
     // the Open PRs tab (open-prs/): all empty by default; the tab says what to set
     githubLogin: { type: "string", label: "Open PRs: your GitHub login", description: "The tab lists every open PR this login authored, through the machine's own gh login (read-only). Empty: the tab says to set it.", default: "" },
-    reviewChannel: { type: "string", label: "Open PRs: code-review channel", description: "A Slack channel name (team-reviews) or an https link to it. Post copies the review text and opens this channel; it never sends anything itself.", default: "" },
+    reviewChannel: { type: "string", label: "Open PRs: code-review channel", description: "A Slack channel name (team-reviews), its ID, or an https link to it. With slackToken set, Post sends the review text here after a preview and a confirm; without it, Post copies the text and opens this channel.", default: "" },
     reviewExcludedProjects: { type: "string", label: "Open PRs: projects left out of Post", description: "Project slugs, separated by commas or spaces. Their PRs start unticked in the Post preview.", default: "" },
     slackHandleMap: { type: "string", label: "Open PRs: GitHub login to Slack handle", description: "A JSON object, e.g. {\"some-login\": \"slackname\"}. Only mapped logins are tagged @handle; anyone else is shown by plain name, never guessed.", default: "", experimental_multiline: true },
+    // 2026-11-17, the owner: "Post as me". A secret: kept by bb in a 0600 file, read only by the server, never sent to the page.
+    // 2026-11-18: the CodeRabbit review queue posts nothing while this is on. Going live is the owner's own choice.
+    reviewQueueDryRun: { type: "boolean", label: "Review queue: dry-run (nothing is posted to GitHub)", description: "On: the queue checks and picks a PR and shows what it would post, and posts nothing. Keep it on while another CodeRabbit scheduler runs; turn it off only once you've decided the queue should post \"@coderabbitai review\" for you.", default: true },
+    slackToken: { type: "string", secret: true, label: "Open PRs: Slack token for Post", description: "Empty: Post copies the text and opens reviewChannel. Set: Post sends it to reviewChannel after a preview and a confirm. To post as yourself, use a user token: create a Slack app (api.slack.com/apps), add the User Token Scopes chat:write, channels:read, groups:read (for a private channel) and users:read (to turn @handles into mentions), install it to your workspace, and paste its User OAuth Token (xoxp-…). A bot token (xoxb-…) with the same scopes works too; invite the bot to the channel." },
   });
   // The retired name of cosCompactTokens: never carried over, only unset (retireClearSetting).
   const retired = bb.settings.define({
@@ -185,6 +199,23 @@ export default async function plugin(bb: BbPluginApi) {
   });
   await retireClearSetting(retired, (m) => bb.log.warn(m));
   let cfg = await settings.get();
+  // The personas hook (personas.ts): the pack is read at load and on each settings save; an unchanged pack is the same
+  // object, so the engine settles nothing for it. One that fails its checks is ignored, with its problems in the log.
+  let lastPack: { text: string; pack: Settings["personas"] } = { text: "null", pack: null };
+  const loadPack = (path: string): Settings["personas"] => {
+    let pack: Settings["personas"] = null;
+    if (path.trim()) {
+      try {
+        pack = readPersonaPack(path.trim());
+      } catch (e) {
+        pack = { error: errText(e) };
+        bb.log.warn(`personas: ${pack.error}`);
+      }
+    }
+    const text = JSON.stringify(pack);
+    if (text !== lastPack.text) lastPack = { text, pack };
+    return lastPack.pack;
+  };
   /** The owner in tool descriptions, as at load: a changed ownerName reaches them on the next plugin reload. */
   const O = ownerWords(cfg.ownerName);
   registerCloud(bb, () => cfg);
@@ -226,7 +257,20 @@ export default async function plugin(bb: BbPluginApi) {
     }
   };
 
-  async function deliver(threadId: string, text: string, item: { sender: string; id?: string }): Promise<DeliverResult> {
+  // A send with the owner's images as bb's image inputs (2026-11-17). If bb refuses those inputs, the text goes alone:
+  // it already names each image's path, which the reader opens with its file reader. Logged without any bytes.
+  async function sendWithImages(req: { threadId: string; mode: "queue-if-active" | "steer-if-active"; senderThreadId?: string }, text: string, images: Pick<DirectImage, "path" | "sourceProject">[], what: string) {
+    const textOnly = () => bb.sdk.threads.send({ ...req, input: [{ type: "text", text, mentions: [] }] });
+    if (!images.length) return textOnly();
+    try {
+      return await bb.sdk.threads.send({ ...req, input: [{ type: "text", text, mentions: [] }, ...images.map(imageInput)] });
+    } catch (e) {
+      bb.log.warn(`${what}: bb refused ${images.length} image input(s) (${errText(e).slice(0, 200)}); sent the text with their paths only`);
+      return textOnly();
+    }
+  }
+
+  async function deliver(threadId: string, text: string, item: { sender: string; id?: string; kind?: string }): Promise<DeliverResult> {
     const agent = engine.agentByThread(threadId);
     if (agent?.status === "stopped") return { delivery: "held", why: "stopped by the orchestrator" };
     const t = await bb.sdk.threads.get({ threadId });
@@ -235,12 +279,10 @@ export default async function plugin(bb: BbPluginApi) {
     // 2026-11-13: queued behind a running turn, mail waited 15-60+ min on threads that stay busy (median 25 s queued vs
     // 0.08 s direct). Steering adds it to the running turn, so the agent reads it at its next tool boundary; where
     // nothing can be steered bb starts a turn, or queues it (a provider that can't steer).
-    const res = await bb.sdk.threads.send({
-      threadId,
-      mode: item.id?.startsWith("wake:") ? "queue-if-active" : "steer-if-active",
-      input: [{ type: "text", text, mentions: [] }],
-      ...(sender ? { senderThreadId: sender.threadId } : {}),
-    });
+    // the owner's screenshots (2026-11-17) go as bb's own image inputs too, beside their paths in the text
+    const images = item.id && item.kind === "owner.message" ? engine.directImagesOf(item.id) : [];
+    const req = { threadId, mode: item.id?.startsWith("wake:") ? ("queue-if-active" as const) : ("steer-if-active" as const), ...(sender ? { senderThreadId: sender.threadId } : {}) };
+    const res = await sendWithImages(req, text, images, item.id ?? "");
     if (res.delivery === "queued") return { delivery: "queued", queuedMessageId: res.queuedMessage.id };
     return { delivery: "sent" };
   }
@@ -250,10 +292,12 @@ export default async function plugin(bb: BbPluginApi) {
     { now: () => Date.now(), externalEnabled: (source, to) => {
       try { allowImport(integrationRoutes(cfg.integrationRoutes), source, to); return true; }
       catch { return false; }
-    }, deliver, mirror, changed, log: (m) => bb.log.warn(m), cardUp: (d) => void pushCard(d), delivered: (d) => void pushDelivered(d) },
-    { escalateMs: cfg.escalateMinutes * 60_000, resendMs: cfg.resendMinutes * 60_000, owner: cfg.ownerName, pokemon: cfg.pokemon, batchInbox: cfg.batchInbox, inboxDebounceMs: Math.min(60000, Math.max(0, cfg.inboxDebounceMs || 2000)) },
+    }, deliver, mirror, changed, log: (m) => bb.log.warn(m), cardUp: (d) => void pushCard(d), delivered: (d) => void pushDelivered(d), files: () => ({ dir: join(stateDir(), "deliverables"), kept: join(stateDir(), "threads") }) },
+    { escalateMs: cfg.escalateMinutes * 60_000, resendMs: cfg.resendMinutes * 60_000, owner: cfg.ownerName, pokemon: cfg.pokemon, batchInbox: cfg.batchInbox, inboxDebounceMs: Math.min(60000, Math.max(0, cfg.inboxDebounceMs || 2000)), personas: loadPack(cfg.personaPack) },
   );
   const openPrs = registerOpenPrs(bb, engine, () => cfg);
+  // after the engine, whose migrations made its tables; dry-run unless the setting is exactly false
+  const reviewQueue = registerReviewQueue(bb, { db, dryRun: () => cfg.reviewQueueDryRun !== false });
   // ---------------------------------------------------------------- notifyOnlyOrchestrator (core/notify-only.ts)
   const PN = "push-notifications";
   const notifyOnly = serialReconcile(
@@ -288,8 +332,9 @@ export default async function plugin(bb: BbPluginApi) {
     if (next.pushNeedsYou && !cfg.pushNeedsYou) void resumePush(); // the push was switched back on: lift a pause
     const notifyFlip = next.notifyOnlyOrchestrator !== cfg.notifyOnlyOrchestrator;
     cfg = next;
+    reviewQueue.changed(); // the queue page re-reads dry-run
     changed(); // the page re-reads its config (owner name, CoS title) and the agents (Pokémon on or off)
-    engine.settings = { escalateMs: next.escalateMinutes * 60_000, resendMs: next.resendMinutes * 60_000, owner: next.ownerName, pokemon: next.pokemon, batchInbox: next.batchInbox, inboxDebounceMs: Math.min(60000, Math.max(0, next.inboxDebounceMs || 2000)) };
+    engine.settings = { escalateMs: next.escalateMinutes * 60_000, resendMs: next.resendMinutes * 60_000, owner: next.ownerName, pokemon: next.pokemon, batchInbox: next.batchInbox, inboxDebounceMs: Math.min(60000, Math.max(0, next.inboxDebounceMs || 2000)), personas: loadPack(next.personaPack) };
     reloadMemory();
     if (notifyFlip) void notifyOnly();
   });
@@ -906,19 +951,34 @@ export default async function plugin(bb: BbPluginApi) {
    * stay uncommitted (handoff-*.md, report.md at the root) and the files of outputs recorded inside the worktree to
    * <stateDir>/threads/<id>/, and point those outputs at the copies so the Deliverables tab still opens them. Says what was
    * kept, or "" when nothing was. A failed copy throws: the archive waits rather than lose them.
+   * 2026-11-17: when its lead delivered the thread's work (engine.deliverableForThread), they go into that newest
+   * deliverable's own folder instead, with every output the thread recorded, so the deliverable holds all its markdown.
    */
   function keepFiles(threadId: string, worktree: string | null): string {
     if (!worktree || !existsSync(worktree)) return "";
     const root = realpathSync(worktree);
-    const dir = join(stateDir(), "threads", threadId);
     const notes = readdirSync(root, { withFileTypes: true }).filter((d) => d.isFile() && EXEMPT_NOTE.test(d.name)).map((d) => d.name);
+    const into = engine.deliverableForThread(threadId, root);
+    const dir = join(stateDir(), "threads", threadId);
     for (const n of notes) {
+      if (into && engine.keepInDeliverable(into.id, join(root, n)).stored === "copied") continue;
       mkdirSync(dir, { recursive: true });
       cpSync(join(root, n), join(dir, n));
     }
     let moved = 0;
-    for (const o of engine.outputsUnder(root)) {
+    for (const o of into ? engine.threadOutputs(threadId, root) : engine.outputsUnder(root)) {
       if (!existsSync(o.path!)) continue; // already gone: nothing left to keep
+      const inWorktree = o.path!.startsWith(root + sep);
+      if (into) {
+        const k = engine.keepInDeliverable(into.id, o.path!);
+        if (k.stored === "copied") {
+          // the worktree goes once archived: an output in it now opens its copy
+          if (inWorktree) engine.repointOutput(o.id, k.path);
+          moved++;
+          continue;
+        }
+      }
+      if (!inWorktree) continue; // not copied (over the cap) and not going away: it stays where it is
       const to = join(dir, "outputs", relative(root, o.path!));
       mkdirSync(dirname(to), { recursive: true });
       cpSync(o.path!, to, { recursive: true });
@@ -926,7 +986,7 @@ export default async function plugin(bb: BbPluginApi) {
       moved++;
     }
     const what = [...notes, ...(moved ? [`${moved} output(s)`] : [])];
-    return what.length ? ` Kept ${what.join(", ")} in ${dir}.` : "";
+    return what.length ? ` Kept ${what.join(", ")} in ${into ? `${into.id}'s folder ${into.folder}` : dir}.` : "";
   }
 
   /** bb archives these threads in order (handoff predecessors first); each gets its Board row, a failure a notice. Skips what bb already archived. */
@@ -1581,7 +1641,9 @@ export default async function plugin(bb: BbPluginApi) {
   // included). Counted after the thread's cursor, so each turn counts once, and from the start for a new agent.
   const levelInfo = (a: Agent) => {
     const { tokens, level } = engine.xpOf(a.address);
-    return { level, xp: tokens, xpThis: tokensForLevel(level), xpNext: tokensForLevel(level + 1), form: formAt(a.mon, level, a.monPin)?.name ?? a.mon };
+    const form = formAt(a.mon, level, a.monPin);
+    // formDex: the browser's mons.ts doesn't know a pack's lines, so the sprite's number comes with the form
+    return { level, xp: tokens, xpThis: tokensForLevel(level), xpNext: tokensForLevel(level + 1), form: form?.name ?? a.mon, formDex: form?.dex ?? null };
   };
   const xpBusy = new Set<string>();
   const collectXp = async (threadId: string): Promise<void> => {
@@ -1620,6 +1682,13 @@ export default async function plugin(bb: BbPluginApi) {
 
   bb.background.service("clock", {
     async start(signal) {
+      // 2026-11-17: deliverables filed before they kept their own files get their folders (idempotent: a no-op once done)
+      try {
+        const b = engine.backfillFiles();
+        if (b.deliverables) bb.log.info(`deliverable files: ${b.deliverables} folder(s), ${b.copied} copied, ${b.reused} reused, ${b.tooBig} over the cap, ${b.failed} failed, ${b.missing.length} missing`);
+      } catch (e) {
+        bb.log.warn(`deliverable files: ${errText(e)}`);
+      }
       // bb waits 5 s for a stopped service, then fails the reload ("service clock did not stop", 2026-11-14, during a
       // pr-watch pass). So the clock stops waiting on a pass once it is stopped (a slow call's result is dropped), and
       // a pass checks the signal between steps and threads, so little of it runs on after that.
@@ -1874,6 +1943,7 @@ export default async function plugin(bb: BbPluginApi) {
       const direct = engine.directLines();
       const prs = engine.knownPrs();
       const handedOff = engine.handedOffPrs();
+      const assigned = engine.personaAssignments();
       return engine.projects().map((p) => {
         const lead = agents.find((a) => a.role === "lead" && a.project === p.slug && a.status !== "archived");
         return {
@@ -1882,7 +1952,7 @@ export default async function plugin(bb: BbPluginApi) {
           heldAt: p.heldAt,
           archivedAt: p.archivedAt,
           mode: p.mode,
-          lead: lead ? { address: lead.address, threadId: lead.threadId, status: lead.status, mon: lead.mon } : null,
+          lead: lead ? { address: lead.address, threadId: lead.threadId, status: lead.status, mon: lead.mon, persona: engine.personaOf(lead, assigned) } : null,
           monType: engine.accentType(p.slug), // the project accent: none with the setting off
           threads: agents.filter((a) => a.role === "thread" && a.project === p.slug).length,
           openPlans: engine.openPlans(p.slug),
@@ -1896,6 +1966,7 @@ export default async function plugin(bb: BbPluginApi) {
       });
     },
     async agents(): Promise<Agents> {
+      const assigned = engine.personaAssignments();
       return Promise.all(
         engine.agents().map(async (a) => {
           const t = (await bb.sdk.threads.get({ threadId: a.threadId, include: "environment" } as Parameters<typeof bb.sdk.threads.get>[0]).catch(() => null)) as
@@ -1919,6 +1990,7 @@ export default async function plugin(bb: BbPluginApi) {
             lastReport: engine.lastReport(a.address),
             provider: (t as { providerId?: string } | null)?.providerId ?? null,
             mon: a.mon,
+            persona: engine.personaOf(a, assigned), // null with the pokemon setting off or no pack
             ...levelInfo(a),
             model: ctx?.usage?.snapshot?.model ?? null,
             usedTokens: ctx?.usage?.usedTokens ?? null,
@@ -1936,12 +2008,15 @@ export default async function plugin(bb: BbPluginApi) {
       return engine.projectBook(slug, dayStart);
     },
     async scope() {
-      // each open task's planner (1.13.0): its live scoping thread, by bb's title for it (the address when bb can't say)
+      // each open task's planner (1.13.0): its live scoping thread, by bb's title for it (the address when bb can't say);
+      // with since when it is idle and its last report (2026-11-17), what the entry's status card says it is on
       const planner = async (taskId: string) => {
         const a = engine.taskPlanner(taskId);
         if (!a) return null;
         const t = (await bb.sdk.threads.get({ threadId: a.threadId }).catch(() => null)) as { title?: string | null } | null;
-        return { address: a.address, threadId: a.threadId, title: t?.title?.trim() || null, status: a.status };
+        const at = engine.lastReportAt(a.address);
+        const text = at === null ? null : engine.lastReport(a.address);
+        return { address: a.address, threadId: a.threadId, title: t?.title?.trim() || null, status: a.status, idleAt: a.idleAt, report: text !== null && at !== null ? { text, at } : null };
       };
       const projects = await Promise.all(
         engine.scopeView().map(async (p) => ({
@@ -1981,7 +2056,10 @@ export default async function plugin(bb: BbPluginApi) {
       return engine.projects().map((p) => ({ slug: p.slug, monType: engine.accentType(p.slug) }));
     },
     outputs(): Outputs {
-      return engine.outputs().map((o) => ({ id: o.id, title: o.title, kind: o.kind, path: o.path, url: o.url, hostId: o.hostId, note: o.note, project: o.project, author: o.author, at: o.at }));
+      return engine.outputs().map((o) => ({ id: o.id, title: o.title, kind: o.kind, path: o.path, url: o.url, hostId: o.hostId, note: o.note, project: o.project, author: o.author, at: o.at, gone: o.path !== null && !existsSync(o.path) }));
+    },
+    deliverableFolders(): DeliverableFolders {
+      return engine.deliverableFolders();
     },
     deliverables(): Deliverables {
       return engine.deliverables().map((d) => ({
@@ -2016,6 +2094,7 @@ export default async function plugin(bb: BbPluginApi) {
         next: engine.deliverableNext(d),
         ...(d.scope ? { scope: true } : {}),
         ...(d.scope_task ? { scopeTask: d.scope_task } : {}),
+        ...(d.folder ? { folder: d.folder } : {}),
       }));
     },
   });
@@ -2085,11 +2164,62 @@ export default async function plugin(bb: BbPluginApi) {
     engine.addRule({ text: b.text, project: b.project || null, kinds: b.kinds, expiresAt: b.expiresInDays ? Date.now() + b.expiresInDays * 86_400_000 : null, source: b.source }).id,
   );
   write(WRITES.ruleRevoke, ruleRevokeBody, (b) => engine.revokeRule(b.id));
+  write(OPEN_PRS_POST, openPrsPostBody, (b) => openPrs.post(b.key)); // Open PRs' Post: the prepared message, once
+  write(OPEN_PRS_COPIED, openPrsCopiedBody, (b) => openPrs.copied(b)); // Open PRs' Copy: that section's baseline (2026-11-18)
+  write(REVIEW_QUEUE_WRITE, queueActionSchema, (b) => reviewQueue.act(b)); // the review queue's actions: the owner's only
   write(WRITES.resend, resendBody, (b) => engine.resend(b.id).id);
   write(WRITES.priority, priorityBody, (b) => engine.setPriority(b.slug, b.priority));
   write(WRITES.hold, holdBody, (b) => engine.setHold(b.slug, b.held));
   // the owner's direct line to a lead (PLAN 3): an item, never a push; the CoS gets a copy
-  write(WRITES.directMessage, directMessageBody, (b) => engine.ownerMessage(b.slug, b.text, b.followUp ?? null).id);
+  write(WRITES.directMessage, directMessageBody, (b) => engine.ownerMessage(b.slug, b.text, b.followUp ?? null, b.images ?? []).id);
+  // a screenshot for a message to a lead (2026-11-17), one per write: checked by its bytes, then kept where the lead can
+  // open it. bb's own attachments first (the lead's bb project, so the lead's thread takes it as an image input); else
+  // the plugin's own folder. Only the branch and the size are logged, never the bytes.
+  // shared with the CoS bar's images (cosImage): checked, then kept for the thread `threadId`, which will be sent them
+  const keepImage = async (to: string, threadId: string, b: { name: string; data: string }) => {
+    const bytes = Buffer.from(b.data, "base64");
+    if (bytes.length > MAX_IMAGE_BYTES) throw new EngineError("invalid", `an image is at most ${MAX_IMAGE_BYTES / 1024 / 1024} MB`);
+    const mime = sniff(bytes);
+    if (!mime) throw new EngineError("invalid", "not a png, jpeg, gif or webp image");
+    const name = safeName(b.name, mime);
+    let kept: { path: string; sourceProject: string | null } | null = null;
+    let why = "";
+    try {
+      const projectId = ((await bb.sdk.threads.get({ threadId })) as { projectId?: string }).projectId;
+      if (!projectId) why = "no bb project";
+      else {
+        const up = await bb.sdk.projects.attachments.upload({ projectId, clientFile: new Uint8Array(bytes), filename: name, mimeType: mime });
+        if (up?.path && isAbsolute(up.path)) kept = { path: up.path, sourceProject: projectId };
+        else why = "no absolute path";
+      }
+    } catch (e) {
+      why = errText(e).slice(0, 200);
+    }
+    if (!kept) {
+      const dir = join(stateDir(), "direct-images");
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
+      const path = join(dir, `${Date.now()}-${randomUUID().slice(0, 8)}-${name}`);
+      writeFileSync(path, bytes, { mode: 0o600 });
+      kept = { path, sourceProject: null };
+    }
+    bb.log.info(`direct image for ${to}: ${bytes.length} bytes, ${kept.sourceProject ? "bb attachments" : `own folder (${why})`}`);
+    return { name, mime, size: bytes.length, path: kept.path, sourceProject: kept.sourceProject };
+  };
+  write(WRITES.directImage, directImageBody, async (b) => {
+    const lead = engine.agentByAddress(`lead:${b.slug}`);
+    if (!lead) throw new EngineError("bad_state", `${b.slug} has no live lead: start it first`);
+    return engine.addDirectImage(b.slug, await keepImage(b.slug, lead.threadId, b));
+  });
+  // the CoS bar's images (2026-11-17): its send is bb's own message to the CoS's thread, not a tracked item, so they wait
+  // here by id until the bar's send names them (a restart in between: attach them again)
+  const cosImages = new Map<string, DirectImage>();
+  write(WRITES.cosImage, cosImageBody, async (b) => {
+    const cos = engine.liveAt("cos");
+    if (!cos) throw new EngineError("not_found", "No Chief of Staff is running: start it from the Projects tab");
+    const id = `img-${randomUUID().slice(0, 12)}`;
+    cosImages.set(id, { id, ...(await keepImage("cos", cos.threadId, b)) });
+    return id;
+  });
   write(WRITES.directSeen, directSeenBody, (b) => engine.markDirectSeen(b.slug, b.upTo));
   write(WRITES.outputRemove, outputRemoveBody, (b) => engine.removeOutput(b.id));
   // pinned documents: the owner pins a pasted path or URL, or a deliverable (core/pins.ts); paths get the proof check
@@ -2107,12 +2237,14 @@ export default async function plugin(bb: BbPluginApi) {
   write(WRITES.watchDrop, watchDropBody, (b) => engine.watchDrop(null, b.id));
   write(WRITES.scopeThread, scopeThreadBody, (b) => engine.ownerScopeThread(b.threadId, { task: b.task ?? null, name: b.name ?? null }).task.id);
   write(WRITES.unscopeThread, unscopeThreadBody, (b) => engine.ownerUnscopeThread(b.threadId)?.id ?? null);
-  // A registered proof file's bytes, by proof id only (engine.proofFile decides). Read-only, so bb's "local" auth is the
-  // guard: a same-origin <img>/<video> sends no Origin header. Never HTML or SVG; nothing sniffed, nothing run.
+  // A registered proof file's bytes, by proof id only (engine.proofFile decides), or (2026-11-17) a recorded output's,
+  // by ?output=<output id> (engine.outputFile, the same rules). Read-only, so bb's "local" auth is the guard: a
+  // same-origin <img>/<video> sends no Origin header. Never HTML or SVG; nothing sniffed, nothing run.
   bb.http.route("GET", PROOF_ROUTE, async (c) => {
     let f: ReturnType<typeof engine.proofFile>;
     try {
-      f = engine.proofFile(String(c.req.query("id") ?? ""));
+      const output = c.req.query("output");
+      f = output ? engine.outputFile(output) : engine.proofFile(String(c.req.query("id") ?? ""));
     } catch (e) {
       return c.json({ ok: false, error: { kind: e instanceof EngineError ? e.kind : "error", message: errText(e) } }, 404);
     }
@@ -2271,10 +2403,15 @@ export default async function plugin(bb: BbPluginApi) {
 
   // Requested 2026-11-13: a quick message to the CoS from the Orchestrator page. It lands in the CoS's chat as their own
   // message (no sender thread), queued if the CoS is mid-turn.
-  startRoute(WRITES.cosMessage, cosMessageBody, async ({ text }) => {
+  // 2026-11-17: with the images the bar staged (cosImage), their paths end the text and each goes as bb's image input
+  startRoute(WRITES.cosMessage, cosMessageBody, async ({ text, images = [] }) => {
     const cos = engine.liveAt("cos");
     if (!cos) throw new EngineError("not_found", "No Chief of Staff is running: start it from the Projects tab");
-    const res = await bb.sdk.threads.send({ threadId: cos.threadId, mode: "queue-if-active", input: [{ type: "text", text, mentions: [] }] });
+    const imgs = images.map((id) => cosImages.get(id));
+    if (imgs.some((i) => !i)) throw new EngineError("invalid", "an image isn't one sent for this message: attach it again");
+    const kept = imgs as DirectImage[];
+    const res = await sendWithImages({ threadId: cos.threadId, mode: "queue-if-active" }, withImages(text, kept), kept, "the CoS bar's message");
+    for (const id of images) cosImages.delete(id);
     return { threadId: cos.threadId, delivery: res.delivery };
   });
 
@@ -2416,7 +2553,7 @@ export default async function plugin(bb: BbPluginApi) {
   startRoute(WRITES.roleStart, roleStartBody, async ({ role }) => {
     engine.checkStart(role, null);
     const folder = join(stateDir(), role);
-    const prompt = loadBrief(BRIEF_DIR, role, { pokemon: pokemonSentence(engine.monForStart(role, null)), folder, owner: ownerWords(cfg.ownerName).name });
+    const prompt = loadBrief(BRIEF_DIR, role, { pokemon: introSentence(engine.monForStart(role, null), engine.personaForStart(role, null)), folder, owner: ownerWords(cfg.ownerName).name });
     mkdirSync(folder, { recursive: true, mode: 0o700 });
     const { projectId, hostId } = await homeProject();
     engine.checkStart(role, null);

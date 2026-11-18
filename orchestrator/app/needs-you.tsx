@@ -9,15 +9,16 @@
 //   request finished and SETTLE_MS passed since both the response and the last release. Then the list moves, and the
 //   card that moves into the slot is armed afresh, so the second click of a double-click can't answer it.
 // - Arming gates options, "Send my answer" (the Other field) and the defer presets; Bring back answers nothing and is under the page lock only.
+// - On shadcn/ui since 2026-11-17: each card is a Card, the defer presets a DropdownMenu (portaled, no animation), and
+//   every size is the same in every state (answer-ui.tsx), so arming, pressing and marking move nothing.
 import { styleHref } from "./style-href.ts";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { Markdown, useBbNavigate } from "@get-bb/plugin-sdk/app";
 import { WRITES, type Card, type NeedsYou, type Preset, type answerBody, type deferBody, type interactionAnswerBody, type returnBody, type secretBody } from "../contract.ts";
 import { Blocks, untickedText } from "./blocks.tsx";
 import { QuestionCard, ixKey } from "./question-card.tsx";
-import { Details, OtherBox, Options, answerCss } from "./answer-ui.tsx";
+import { Details, META, OtherBox, Options, WHEN, answerCss } from "./answer-ui.tsx";
 import { cardBlockOrder } from "./less-text.ts";
-import { Badge } from "./affect/badge-clean.tsx";
 import type { Answers } from "../interactions.ts";
 import type { z } from "zod";
 import { ARM_MS, armed, track, type Seen } from "./gate.ts";
@@ -26,12 +27,13 @@ import { useViewKeys } from "./key-view.ts";
 import { changed, gate, gone, pruneGone, useGate, write, type Hide, type WriteKind } from "./store.ts";
 import { KIND_TONES, css } from "./palette.ts";
 import { ACCENT, accentTone, accentVars } from "./accent.ts";
-import { AlertIcon, DoneIcon, css as inboxCss } from "./affect/decision-inbox-clean.tsx";
-import { DropdownMenu } from "./affect/dropdown-menu-clean.tsx";
-import { EmptyState } from "./affect/empty-state-clean.tsx";
-import { TextArea } from "./affect/text-area-clean.tsx";
+import { ChevronDown, CircleAlert, CircleCheck } from "lucide-react";
+import { Card as Frame } from "./ui/card.tsx";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "./ui/dropdown-menu.tsx";
+import { Item, ItemGroup } from "./ui/item.tsx";
+import { cn } from "./ui/utils.ts";
 import { MonSprite } from "./mon.tsx";
-import { Btn, Kind, Muted, Section, Tag, Who, cx, when } from "./ui.tsx";
+import { Btn, EmptyState, Kind, ReadState, Section, Tag, Who, when } from "./ui.tsx";
 
 /** The device's zone, which the server works the defer presets out in. One value, so every read shares a cache entry. */
 export const ZONE: string = (() => {
@@ -156,18 +158,16 @@ export function CardView({ card, list, presets, isArmed, act, mon, monType = nul
   // notices change the card's height, so they show only while nothing holds the page
   const notice = busy ? null : (changed.get(card.id) ?? (gate.error?.where === card.id ? gate.error.message : null));
 
-  // One row of affectUI's decision inbox (its classes and CSS; never data-gone, always data-open, so it never folds or glides)
+  // A shadcn Card (it never folds or glides)
   return (
-    <article data-card={card.id} data-rev={card.rev} data-asker={card.asker} data-state={state} data-accent={monType ?? undefined} aria-busy={busy || undefined} className={cx("ui-dic__row", mine && "opacity-80")} style={accentVars(monType)}>
-      <div className="ui-dic__row-inner">
-        <div className="ui-dic__item" data-open="">
+    <Frame role="article" data-card={card.id} data-rev={card.rev} data-asker={card.asker} data-state={state} data-accent={monType ?? undefined} aria-busy={busy || undefined} className={cn("gap-0 p-4", mine && "opacity-80")} style={accentVars(monType)}>
           <header className="flex items-start gap-3">
             {/* always drawn at its fixed size (the role avatar until the board names the mon), so the card never changes height */}
             <MonSprite mon={mon} address={card.origin} size={28} />
             <div className="min-w-0 flex-1">
-              <h4 className="ui-dic__title">{card.title}</h4>
-              {/* affectUI's quiet line: where it comes from, who asked, and any state */}
-              <p className="orch-meta">
+              <h4 className="m-0 text-sm leading-5 font-semibold [overflow-wrap:anywhere]">{card.title}</h4>
+              {/* the quiet line: where it comes from, who asked, and any state */}
+              <p className={META}>
                 {/* the project in its accent (accent.ts) */}
                 <span style={accentTone(monType) ? { color: ACCENT, fontWeight: 600 } : undefined}>{card.project ?? "no project"}</span>
                 <span aria-hidden>·</span>
@@ -178,15 +178,23 @@ export function CardView({ card, list, presets, isArmed, act, mon, monType = nul
                     <span className="orch-mono">{card.asker}</span>
                   </>
                 ) : null}
-                {card.escalated ? <Badge tone="warning" data-escalated="">CoS didn't triage</Badge> : null}
-                {card.merge ? <Badge tone="purple" data-merge="">Merge</Badge> : null}
-                {card.returnedAt ? <Badge tone="neutral">Back</Badge> : null}
-                {card.queued ? <Badge tone="neutral" data-queued="">{`+${card.queued} next from ${card.asker}`}</Badge> : null}
-                {list === "deferred" ? <Badge tone="neutral">{card.deferredUntil ? `Deferred until ${when(card.deferredUntil)}` : "Deferred until you bring it back"}</Badge> : null}
+                {card.escalated ? (
+                  <Kind of="escalated" group="deferred" data-escalated="">
+                    CoS didn't triage
+                  </Kind>
+                ) : null}
+                {card.merge ? (
+                  <Kind of="merge" data-merge="">
+                    Merge
+                  </Kind>
+                ) : null}
+                {card.returnedAt ? <Tag>Back</Tag> : null}
+                {card.queued ? <Tag data-queued="">{`+${card.queued} next from ${card.asker}`}</Tag> : null}
+                {list === "deferred" ? <Tag>{card.deferredUntil ? `Deferred until ${when(card.deferredUntil)}` : "Deferred until you bring it back"}</Tag> : null}
               </p>
             </div>
             {/* one fixed slot: the mark replaces the time, so marking moves nothing */}
-            <span data-mark={mark ? "" : undefined} className={cx("orch-when", mark && "font-medium")} style={{ color: markColor }}>
+            <span data-mark={mark ? "" : undefined} className={cn(WHEN, mark && "font-medium")} style={{ color: markColor }}>
               {mark ?? when(card.askedAt)}
             </span>
           </header>
@@ -197,21 +205,23 @@ export function CardView({ card, list, presets, isArmed, act, mon, monType = nul
           ) : null}
           {/* a PR or merge card leads with its PR: the chip, its live state and the one-line verdict (2026-11-14) */}
           <Blocks blocks={card.blocks} prs={card.prs} only={order.lead} />
-          <p className="ui-dic__detail !mt-2 whitespace-pre-wrap">{card.question}</p>
+          <p data-question-text="" className="m-0 mt-2 text-sm whitespace-pre-wrap [overflow-wrap:anywhere]">
+            {card.question}
+          </p>
           {/* "Scoping done?" (1.11.0): the lead's summary and the PROJECT.md it is written in, above the fixed options */}
           {card.scopingDone ? (
-            <div data-scoping-done="" className="mt-2 rounded-md p-3 text-sm" style={{ boxShadow: "inset 0 0 0 1px var(--orch-line)" }}>
+            <div data-scoping-done="" className="mt-2 rounded-md border p-3 text-sm">
               <div className="min-w-0 [overflow-wrap:anywhere]">
                 <Markdown content={card.scopingDone.summary} />
               </div>
-              <p className="orch-muted m-0 mt-1 text-xs [overflow-wrap:anywhere]">
+              <p className="m-0 mt-1 text-xs text-muted-foreground [overflow-wrap:anywhere]">
                 Written in <span className="orch-mono">{card.scopingDone.projectMd}</span>
               </p>
             </div>
           ) : null}
           {/* no prose on the card (2026-11-14): at most one decision line; the context and the decisions open from More */}
           {order.line ? (
-            <p data-card-line="" className="orch-muted m-0 mt-1 truncate text-sm" title={order.line}>
+            <p data-card-line="" className="m-0 mt-1 truncate text-sm text-muted-foreground" title={order.line}>
               {order.line}
             </p>
           ) : null}
@@ -254,22 +264,25 @@ export function CardView({ card, list, presets, isArmed, act, mon, monType = nul
                 Bring back
               </Btn>
             ) : presets.length > 0 ? (
-              // affectUI's menu, in the top layer: opening it changes no card's height
-              <DropdownMenu
-                align="end"
-                aria-label="Defer until"
-                items={presets.map((p) => ({ label: p.label, disabled: busy, data: { "data-preset": p.id }, onSelect: () => act.defer(card, p.id) }))}
-                trigger={({ triggerProps }) => (
-                  <Btn tone="ghost" data-defer="" disabled={busy} {...triggerProps}>
-                    Defer ▾
+              // shadcn's menu, portaled and with no animation: opening it changes no card's height and moves nothing
+              <DropdownMenu modal={false}>
+                <DropdownMenuTrigger asChild>
+                  <Btn tone="ghost" data-defer="" disabled={busy}>
+                    Defer
+                    <ChevronDown aria-hidden />
                   </Btn>
-                )}
-              />
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" aria-label="Defer until">
+                  {presets.map((p) => (
+                    <DropdownMenuItem key={p.id} disabled={busy} data-preset={p.id} onSelect={() => act.defer(card, p.id)}>
+                      {p.label}
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuContent>
+              </DropdownMenu>
             ) : null}
           </footer>
-        </div>
-      </div>
-    </article>
+    </Frame>
   );
 }
 
@@ -370,11 +383,7 @@ export function NeedsYouView({ q, refetchAll, mons, threads, accents }: { q: Que
   if (!view) {
     return (
       <div ref={root}>
-        {q.error ? (
-          <EmptyState title="Can't read Needs you" text={q.error.message} icon={null} action={<Btn onClick={() => void q.refetch()}>Retry</Btn>} />
-        ) : (
-          <Muted>Loading…</Muted>
-        )}
+        <ReadState q={q} what="Needs you" />
       </div>
     );
   }
@@ -384,72 +393,72 @@ export function NeedsYouView({ q, refetchAll, mons, threads, accents }: { q: Que
   const prompts = view.interactions.filter((i) => i.questions.length === 0);
   return (
     <div ref={root} className="flex flex-col gap-4 pb-8">
-      <style href={styleHref("ui-decision-inbox-clean", inboxCss)} precedence="default">
-        {inboxCss}
-      </style>
       <style href={styleHref("orch-answer", answerCss)} precedence="default">
         {answerCss}
       </style>
-      {/* affectUI's decision inbox: a heading row with the count, then one row per card */}
-      <section className="ui-dic" data-clear={n === 0 || undefined}>
-        <header className="ui-dic__head">
-          {n > 0 ? <AlertIcon /> : <DoneIcon />}
-          <span data-count={String(n)}>{n > 0 ? `${n} ${n === 1 ? "needs" : "need"} your input` : "All caught up"}</span>
-          {q.error ? <span className="orch-danger ml-auto text-xs font-normal">Stale: {q.error.message}</span> : null}
-        </header>
-        <div className="ui-dic__card" data-list="cards">
+      {/* the count, then one Card per decision; when none waits, shadcn's empty state */}
+      <section className="flex flex-col gap-3" aria-label="Needs you">
+        {n > 0 ? (
+          <h3 className="m-0 flex items-center gap-2 text-sm font-semibold">
+            <CircleAlert className="size-4 text-(--warning-text)" aria-hidden />
+            <span data-count={String(n)}>{`${n} ${n === 1 ? "needs" : "need"} your input`}</span>
+            {q.error ? <span className="orch-danger ml-auto text-xs font-normal">Stale: {q.error.message}</span> : null}
+          </h3>
+        ) : (
+          <EmptyState title={<span data-count="0">All caught up</span>} text="Nothing waiting on you – new decisions show up here." icon={<CircleCheck />} action={q.error ? <span className="orch-danger text-xs">Stale: {q.error.message}</span> : undefined} />
+        )}
+        <div className="flex flex-col gap-3" data-list="cards">
           {view.cards.map((c) => (
             <CardView key={c.id} card={c} list="cards" presets={view.presets} isArmed={arming.isArmed(c.id, c.rev)} act={act} mon={mons.get(c.origin) ?? null} monType={c.project ? (accents?.get(c.project) ?? null) : null} />
           ))}
           {questions.map((i) => (
             <QuestionCard key={i.id} ix={i} isArmed={arming.isArmed(ixKey(i), 0)} mon={mons.get(i.address) ?? null} onSend={(a) => answerQuestion(i, a)} onOpen={() => navigate.toThread(i.threadId)} />
           ))}
-          {view.cards.length + questions.length === 0 && n > 0 ? <p className="orch-muted m-0 px-4 py-3.5">No cards to answer: the threads below wait on you.</p> : null}
-          <p className="ui-dic__empty">Nothing waiting on you – new decisions show up here.</p>
+          {view.cards.length + questions.length === 0 && n > 0 ? <p className="m-0 text-sm text-muted-foreground">No cards to answer: the threads below wait on you.</p> : null}
         </div>
       </section>
 
       {prompts.length > 0 ? (
         <Section title="Waiting on an agent" count={prompts.length}>
-          <ul className="orch-rows m-0 list-none p-0">
+          <ItemGroup className="divide-y">
             {prompts.map((i) => (
-              <li key={i.id} data-interaction={i.threadId}>
-                <button type="button" className="flex w-full cursor-pointer flex-wrap items-center gap-x-3 gap-y-1 rounded-md border-0 bg-transparent px-1 py-2 text-left text-inherit hover:bg-[var(--orch-wash)]" onClick={() => navigate.toThread(i.threadId)} title={i.threadId}>
+              <div key={i.id} role="listitem" data-interaction={i.threadId}>
+                <Btn tone="ghost" className="h-auto min-h-9 w-full flex-wrap justify-start gap-x-3 gap-y-1 px-1 py-2 text-left font-normal" onClick={() => navigate.toThread(i.threadId)} title={i.threadId}>
                   <Who address={i.address} nowrap />
                   <span className="min-w-0 flex-1 truncate">{i.title}</span>
                   <Tag>{i.kind}</Tag>
-                  {i.since ? <span className="orch-muted text-xs">{when(i.since)}</span> : null}
-                </button>
-              </li>
+                  {i.since ? <span className="text-xs text-muted-foreground">{when(i.since)}</span> : null}
+                </Btn>
+              </div>
             ))}
-          </ul>
+          </ItemGroup>
         </Section>
       ) : null}
 
       {view.triaging.length > 0 ? (
         <Section title="Being triaged by the CoS" count={view.triaging.length}>
-          <ul className="orch-rows m-0 list-none p-0">
+          <ItemGroup className="divide-y">
             {view.triaging.map((t) => (
-              <li key={t.id} data-triaging={t.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 py-2">
+              <Item key={t.id} role="listitem" size="sm" data-triaging={t.id} className="gap-x-3 gap-y-1 rounded-none px-0 py-2">
                 <Kind of="open">triaging</Kind>
                 <span className="min-w-0 flex-1">{t.title}</span>
-                <span className="orch-muted inline-flex items-center gap-1.5 text-xs">
+                <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
                   {t.project ?? "no project"} · <Who address={t.origin} nowrap />
                 </span>
-                <span className="orch-muted text-xs">due {when(t.dueAt)}</span>
-              </li>
+                <span className="text-xs text-muted-foreground">due {when(t.dueAt)}</span>
+              </Item>
             ))}
-          </ul>
+          </ItemGroup>
         </Section>
       ) : null}
 
       {view.deferred.length > 0 ? (
-        <section className="ui-dic">
-          <header className="ui-dic__head">
-            <span>Deferred</span>
+        <section className="flex flex-col gap-3" aria-label="Deferred">
+          <h3 className="m-0 flex items-center gap-2 text-sm font-semibold">
+            Deferred
             <Tag>{view.deferred.length}</Tag>
-          </header>
-          <div className="ui-dic__card" data-list="deferred">
+          </h3>
+          <div className="flex flex-col gap-3" data-list="deferred">
             {view.deferred.map((c) => (
               <CardView key={c.id} card={c} list="deferred" presets={view.presets} isArmed={arming.isArmed(c.id, c.rev)} act={act} mon={mons.get(c.origin) ?? null} monType={c.project ? (accents?.get(c.project) ?? null) : null} />
             ))}
