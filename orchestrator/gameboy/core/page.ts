@@ -8,6 +8,16 @@
 // Each flush that changed the save is also backed up to the server (POST save), and a new device restores the server
 // copy before the game boots.
 // All URLs are relative: the page lives at /api/v1/plugins/<id>/http/play, next to its routes.
+//
+// The AI player (core/player-page.ts, core/player.ts): with an endpoint and a key set, a "<name> plays" toggle shows in the
+// bar. While it's on, the page sends the game screen and a compact state to the server, presses what comes back and
+// shows "<name>: <buttons> (<confidence>): <why>" under the bar. Any key, touch or gamepad input of the owner's, the
+// toggle, a hidden tab, an error or a cap stops it, and the line says why.
+//
+// Cheats (core/cheats-page.ts): EmulatorJS's Cheats menu, hooked so that a cheat is on exactly while its box is ticked.
+
+import { CHEATS_JS } from "./cheats-page.ts";
+import { PLAYER_JS } from "./player-page.ts";
 
 export const EJS_VERSION = "4.2.3";
 export const EJS_DATA = `https://cdn.emulatorjs.org/${EJS_VERSION}/data/`;
@@ -25,6 +35,10 @@ export function playHtml(): string {
   #bar { display: flex; align-items: center; gap: 8px; padding: 6px 10px; min-height: 28px; flex: none; }
   #name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: .75; }
   #status { opacity: .7; white-space: nowrap; }
+  #aiwrap { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; cursor: pointer; }
+  #aiwrap[hidden] { display: none; }
+  #ailine { flex: none; padding: 0 10px 4px; min-height: 18px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: .9; }
+  body.ai #game { width: min(100%, calc((100vh - 62px) * 1.5)); }
   button { font: inherit; color: inherit; background: #26262d; border: 1px solid #3a3a44; border-radius: 6px; padding: 3px 10px; cursor: pointer; }
   button:hover { background: #30303a; }
   #pick { padding: 32px 16px; text-align: center; }
@@ -41,6 +55,7 @@ export function playHtml(): string {
     #wrap { align-items: stretch; }
     #game { width: 100%; aspect-ratio: auto; }
     #game .ejs_canvas { display: block; width: min(100%, calc((100vh - 40px - 150px) * 1.5)); height: auto; aspect-ratio: 3 / 2; margin: 0 auto; }
+    body.ai #game .ejs_canvas { width: min(100%, calc((100vh - 62px - 150px) * 1.5)); } /* the AI line's row */
     #game .ejs_virtualGamepad_parent { bottom: 0; }
     #game .ejs_virtualGamepad_left { left: 6px; bottom: 15px; }
     #game .ejs_virtualGamepad_right { right: 6px; bottom: 10px; }
@@ -58,13 +73,16 @@ export function playHtml(): string {
 </style>
 </head>
 <body>
-<div id="bar"><span id="name"></span><span id="status"></span><button id="replace" hidden>Replace ROM</button></div>
+<div id="bar"><span id="name"></span><span id="status"></span><label id="aiwrap" hidden><input type="checkbox" id="ai"><span id="ainame"></span></label><button id="replace" hidden>Replace ROM</button></div>
+<div id="ailine" hidden></div>
 <div id="pick" hidden>
   <p>Upload your own .gba ROM once. It is stored on this bb server, and saves follow it.</p>
   <button id="choose">Choose a .gba file</button>
 </div>
 <div id="wrap"><div id="game"></div></div>
 <input type="file" id="file" accept=".gba" hidden>
+<script>${PLAYER_JS}</script>
+<script>${CHEATS_JS}</script>
 <script>
 (() => {
   const MAX = ${32 * 1024 * 1024};
@@ -137,6 +155,7 @@ export function playHtml(): string {
   // the iframe) and a save state, which the next iframe loads at start so the game carries on where it was. The seen
   // mark is left alone: this browser's IndexedDB may not have the bytes yet, so the next load prefers the server copy.
   window.gameboySuspend = () => {
+    if (player) player.stop("the page closed");
     if (!(ejs && ejs.started && ejs.gameManager)) return null;
     const gm = ejs.gameManager;
     let state = null;
@@ -163,8 +182,9 @@ export function playHtml(): string {
   // ---- pause while the browser tab or app window is hidden (bb unmounts the page when its pane navigates away)
   let pausedByUs = false;
   function applyVisibility() {
-    if (!(ejs && ejs.started)) return;
     const hidden = document.visibilityState === "hidden";
+    if (hidden && player) player.stop("the tab was hidden");
+    if (!(ejs && ejs.started)) return;
     if (hidden && !ejs.paused) {
       ejs.pause();
       pausedByUs = true;
@@ -195,6 +215,80 @@ export function playHtml(): string {
   }
   for (const t of ["touchstart", "touchend", "touchcancel"]) $("game").addEventListener(t, onFastTouch, { capture: true, passive: false });
 
+  // ---- the AI player: the toggle, the line, and what the loop reads and presses (core/player-page.ts)
+  let player = null;       // gbPlayer.createLoop's loop, made on the first toggle
+  let romBlob = null;      // the ROM, for the state reader's name tables
+  let romBytes = null;     // its bytes, also what undoes a cheat's ROM patches (read before boot)
+  let aiName = "AI";
+  let aiSession = "";
+  const aiLine = (t) => {
+    $("ailine").textContent = t;
+    $("ailine").hidden = !t;
+    document.body.classList.toggle("ai", !!t);
+  };
+  const aiPressed = (on) => { $("ai").checked = on; };
+  const timeout = (p, ms, what) => Promise.race([p, new Promise((_, no) => setTimeout(() => no(new Error(what)), ms))]);
+  // the game's own screen (EmulatorJS's screenshot: the core's frame, nothing of the page), scaled up by whole pixels to
+  // at least 280 px a side, since vision models commonly refuse smaller images
+  async function aiShot(gm) {
+    const png = await timeout(gm.screenshot(), 3000, "no screenshot");
+    const bmp = await createImageBitmap(new Blob([png], { type: "image/png" }));
+    const k = Math.max(2, Math.ceil(280 / Math.min(bmp.width, bmp.height)));
+    const c = document.createElement("canvas");
+    c.width = bmp.width * k;
+    c.height = bmp.height * k;
+    const x = c.getContext("2d");
+    x.imageSmoothingEnabled = false;
+    x.drawImage(bmp, 0, 0, c.width, c.height);
+    const blob = await new Promise((ok) => c.toBlob(ok, "image/png"));
+    return b64(new Uint8Array(await blob.arrayBuffer()));
+  }
+  function aiLoop() {
+    return gbPlayer.createLoop({
+      name: aiName,
+      gm: () => (ejs && ejs.started && ejs.gameManager) || null,
+      shot: aiShot,
+      read: (gm) => gbPlayer.readState(gm.getState(), romBytes),
+      post,
+      say: aiLine,
+      onStop: (why) => { aiPressed(false); aiLine(aiName + " stopped: " + why); },
+      wait: (ms) => new Promise((ok) => setTimeout(ok, ms)),
+      // n emulator frames (at most 100 ms a frame, so a paused game can't hold a button forever)
+      waitFrames: (gm, n) => new Promise((ok) => {
+        const start = gm.getFrameNum(), until = Date.now() + n * 100;
+        const tick = () => (gm.getFrameNum() - start >= n || Date.now() > until ? ok() : setTimeout(tick, 8));
+        tick();
+      }),
+      session: () => aiSession,
+    });
+  }
+  $("ai").onchange = async () => {
+    if (!$("ai").checked) return player && player.stop("you turned it off");
+    if (!(ejs && ejs.started && ejs.gameManager)) { aiPressed(false); return aiLine(aiName + ": the game isn't running yet"); }
+    try {
+      if (!romBytes && romBlob) romBytes = new Uint8Array(await romBlob.arrayBuffer());
+    } catch {}
+    aiSession = crypto.randomUUID();
+    player = player || aiLoop();
+    aiPressed(true);
+    aiLine(aiName + " is looking at the screen…");
+    player.start();
+  };
+  // any input of the owner's stops it: keys anywhere on the page, a touch or click on the game (the gamepad and the touch
+  // pad also reach the loop's own hook on simulateInput)
+  // (Space on the focused toggle is the toggle's own: its change event turns the player off)
+  document.addEventListener("keydown", (e) => { if (player && player.running && !(e.target === $("ai") && e.key === " ")) player.stop("you pressed a key"); }, true);
+  for (const t of ["pointerdown", "touchstart"]) $("game").addEventListener(t, () => { if (player && player.running) player.stop("you touched the game"); }, { capture: true, passive: true });
+  async function aiSetup() {
+    try {
+      const i = await (await fetch("player/info", { cache: "no-store" })).json();
+      if (!i.ready) return; // not set up: no toggle (the turn route answers with what to set)
+      aiName = i.name;
+      $("ainame").textContent = aiName + " plays";
+      $("aiwrap").hidden = false;
+    } catch {}
+  }
+
   // ---- boot
   async function main() {
     const info = await (await fetch("rom/info", { cache: "no-store" })).json();
@@ -209,6 +303,9 @@ export function playHtml(): string {
     const romRes = await fetch("rom.gba?v=" + sha);
     if (!romRes.ok) throw new Error("ROM download failed (HTTP " + romRes.status + ")");
     const rom = await romRes.blob();
+    romBlob = rom;
+    romBytes = new Uint8Array(await rom.arrayBuffer());
+    aiSetup();
 
     // the server's save for this ROM, read before boot so it can be written before the core loads the game
     let serverSave = null;
@@ -256,6 +353,7 @@ export function playHtml(): string {
       get: () => ejs,
       set: (v) => {
         ejs = v;
+        gbCheats.hook(v, { rom: () => romBytes });
         // Registered before EmulatorJS's own exit handler (unload), which flushes and then unmounts /data/saves. With
         // IDBFS autoPersist the unmount syncs an empty tree and deletes the save from IndexedDB (EmulatorJS 4.2.3), so
         // the save would never survive a reload. Keep the mount (the page is going away anyway), so the unload flush's

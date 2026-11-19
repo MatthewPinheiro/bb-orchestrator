@@ -209,7 +209,7 @@ export interface Rule {
   id: string;
   text: string;
   project: string | null; // null: every project
-  kinds: string[]; // decision kinds it settles: "question", "plan"; never "merge"
+  kinds: string[]; // decision kinds it settles: "question", "plan"; never "merge". Or exactly ["practice"]: a standing instruction that settles nothing (isPractice)
   expiresAt: number | null;
   grantedBy: "person";
   source: string;
@@ -218,6 +218,9 @@ export interface Rule {
   /** Set on a rule made from the owner's answers: it settles the cards it matches by itself (rules.ts). */
   match: RuleMatch | null;
 }
+
+/** A standing practice (2026-11-19): an instruction from the owner that leads, the CoS and threads follow. It settles no card and is never cited. */
+export const isPractice = (r: Pick<Rule, "kinds">): boolean => r.kinds.includes("practice");
 
 export function oneLine(s: string, max: number, what: string): string {
   const t = s.trim();

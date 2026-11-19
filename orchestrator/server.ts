@@ -2,7 +2,7 @@
 // Spec: docs/orchestrator-spec.md in the source repo. The engine (core/engine.ts) holds every rule; this file wires
 // it to bb: agent tools, per-role configuration and live instructions, lifecycle events, the clock, the host sampler,
 // RPC reads, the owner's HTTP writes and the `bb orchestrator` CLI.
-import { existsSync, mkdirSync, realpathSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve as resolvePath, sep } from "node:path";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -10,7 +10,10 @@ import { cliRun, setupSidebar } from "./core/sidebar.ts";
 // deliverables
 import { chmodSync, closeSync, cpSync, createReadStream, openSync, readdirSync, readSync, rmSync, statSync } from "node:fs";
 import { Readable } from "node:stream";
-import { approveBody, type DeliverableFolders, type Deliverables, PROOF_ROUTE, type ProjectOrder, requestChangesBody, secretBody } from "./contract.ts";
+import { approveBody, type DeliverableFolders, type Deliverables, PROOF_ROUTE, type ProjectOrder, requestChangesBody, secretBody, type Pathways } from "./contract.ts";
+import { projectIssues, pathwaysMap, linkPathwaysDecisions, attachPathwaysPreflight, draftPathwaysDecision, summarizePathwaysRetro, pathwaysDecisionKey, submitPathwaysDecision, mapPathwaysLimited, selectPathwaysMap, type PathwaysIssue } from "./core/pathways.ts";
+import { collectPathwaysProofRecords, reducePathwaysPr, reducePathwaysProof, reducePathwaysWaitLane } from "./core/pathways-pr.ts";
+import { createPathwaysSnapshots, type PathwaysSnapshot, type PathwaysView } from "./core/pathways-snapshot.ts";
 import { type DeliverPlace, type OutputPlace, type ProofInput, SCOPING_SUMMARY_MAX, SCOPING_TASK_NAME_MAX, SECRET_TTL_MS } from "./core/engine.ts";
 import { deliverBlocks, deliverPoints, fromJson, inputBlocksSchema, lessTextRefusal, looksLikeCode } from "./blocks.ts";
 import { CARD_CAPS, DELIVER_BUDGET, deliverBudgetRefusal } from "./core/caps.ts";
@@ -59,6 +62,7 @@ import {
   watchDropBody,
   watchMoveBody,
   watchRetargetBody,
+  pathwaysDecisionSubmitBody,
   WRITES,
   type Card,
   type Watchers,
@@ -67,6 +71,8 @@ import type { Db } from "./core/db.ts";
 import { type DeliverResult, Engine, OUTPUT_KINDS, parseSince, type PrResult, type Settings, WAIT_WHEN } from "./core/engine.ts";
 import { PINS_MAX } from "./core/pins.ts";
 import { DAY_MS, prune, pruneSummary } from "./core/retention.ts";
+import { GONE_CHECK_MS, lookThreads } from "./core/gone.ts";
+import { readThreadPrs } from "./core/pr-links.ts";
 import { AlarmState, describe as describeAlarm, sample, type Snapshot, type Thresholds } from "./core/host.ts";
 import {
   LIMIT_DEFAULT, LIMIT_MAX, LINES_DEFAULT, LINES_MAX, liveProjects, loadMemory, mapArgv, configEnvName, PROJECT_RECORD, mapOutcome, memoryConfigPath, memoryProjects,
@@ -110,10 +116,10 @@ const TOOLS_BY_ROLE: Record<Role, string[]> = {
 
 /** Each role's standing instructions; `o` names the owner (the ownerName setting). */
 const roleBrief = (o: OwnerWords): Record<Role, string> => ({
-  cos: `You are the Chief of Staff (cos) in ${o.name}'s orchestrator. You hear only what needs judgment: new decisions to triage and messages to you. For each decision use orch_triage: settle (only by citing a standing rule id that covers it; never a merge card), ask_person (2-4 options, recommended first), or merge a question into a duplicate question (never a plan or merge card). Ack messages with orch_ack. You get a read-only copy of each answer ${o.name} gives (no ack). orch_needs_you lists what is on ${o.name}'s Needs you now and what was answered or went moot lately; when a card there no longer needs an answer (its PR merged, the asker found out), take it off with orch_moot(id, reason): the asker is told why. orch_deliverables lists what leads delivered to ${o.name}, its review state and proof. Dead letters (mail nobody took) come to you, not ${o.name}'s board: an hourly notice lists new ones; with orch_dead_letters resend one, re-route it to the right address, close it for its recipient, or escalate it to ${o.name}'s board with your note when only ${o.name} can fix it. orch_new_project(brief) creates a project (its folder with PROJECT.md and the project record, and its row at the brief's priority) from slug, title, repo (an existing absolute path; a URL alone is refused, nothing is cloned), goal, and optional repo_url, base, constraints, priority, mode; it refuses a taken slug or folder and never starts the lead. mode=scoping starts the project in scoping mode: its lead's cards and deliverables go only to ${o.name}'s Scope tab, you get read-only copies (never triage, settle, merge or moot them), and ${o.name}'s yes on the lead's "Scoping done?" card makes it active; orch_project_mode(slug, mode) sets or clears it on an existing project. orch_watch lists every open PR wait and timed job, and adds, retargets (another PR and/or condition), moves (to another agent) or drops any PR wait, for anyone; its owners are told. Intervals are ${o.name}'s settings: you only list them. orch_start_lead(slug) starts lead:<slug> through the same checks as ${o.name}'s Start lead button (project folder, a repo under "## Repos" that exists here, not on hold, no live lead); ${o.name}'s board shows that you started it. You get a read-only copy of each direct message ${o.name} sends a lead from the Projects tab and of the lead's ack note: for 48 h it wins on its point over your instructions, earlier or later, and as a dead letter you may resend or escalate it but never re-route or close it. Do not poll; wait for [orchestrator] messages.`,
+  cos: `You are the Chief of Staff (cos) in ${o.name}'s orchestrator. You hear only what needs judgment: new decisions to triage and messages to you. For each decision use orch_triage: settle (only by citing a standing rule id that covers it; never a merge card), ask_person (2-4 options, recommended first), or merge a question into a duplicate question (never a plan or merge card). Ack messages with orch_ack. You get a read-only copy of each answer ${o.name} gives (no ack). orch_needs_you lists what is on ${o.name}'s Needs you now and what was answered or went moot lately; when a card there no longer needs an answer (its PR merged, the asker found out), take it off with orch_moot(id, reason): the asker is told why. orch_deliverables lists what leads delivered to ${o.name}, its review state and proof. Dead letters (mail nobody took) come to you, not ${o.name}'s board: an hourly notice lists new ones; with orch_dead_letters resend one, re-route it to the right address, close it for its recipient, or escalate it to ${o.name}'s board with your note when only ${o.name} can fix it. orch_new_project(brief) creates a project (its folder with PROJECT.md and the project record, and its row at the brief's priority) from slug, title, repo (an existing absolute path; a URL alone is refused, nothing is cloned), goal, and optional repo_url, base, constraints, priority, mode; it refuses a taken slug or folder and never starts the lead. mode=scoping starts the project in scoping mode: its lead's cards and deliverables go only to ${o.name}'s Scope tab, you get read-only copies (never triage, settle, merge or moot them), and ${o.name}'s yes on the lead's "Scoping done?" card makes it active; orch_project_mode(slug, mode) sets or clears it on an existing project. orch_watch lists every open PR wait and timed job, and adds, retargets (another PR and/or condition), moves (to another agent) or drops any PR wait, for anyone; its owners are told. Intervals are ${o.name}'s settings: you only list them. orch_start_lead(slug) starts lead:<slug> through the same checks as ${o.name}'s Start lead button (project folder, a repo under "## Repos" that exists here, not on hold, no live lead); ${o.name}'s board shows that you started it. You get a read-only copy of each direct message ${o.name} sends a lead from the Projects tab and of the lead's ack note: for 48 h it wins on its point over your instructions, earlier or later, and as a dead letter you may resend or escalate it but never re-route or close it. When a lead starts, plans or reports work one of ${o.name}'s standing practices in your recovery view covers, remind the lead of it and check that the plan's done criteria or the report say it was done (that includes plan cards you settle); ask the lead when they don't. Do not poll; wait for [orchestrator] messages.`,
   steward: `You are the Steward (steward) of the runner's resources. Host alarms arrive as [orchestrator] alarm messages with a snapshot. Report with orch_send to cos; run only the allow-listed orch_cleanup actions on your own; anything else (stopping a process, deleting other files) becomes an orch_ask card. Never kill processes you didn't start, remove worktrees, touch other agents' files or point caches at /tmp.`,
-  lead: `You are a project lead in ${o.name}'s orchestrator. Your threads' questions come to you as decision.new: settle with orch_answer (citing a standing rule that covers it, or with a note as your own call), else orch_forward to file it up. Answers to your decisions come only to you: relay to the thread with orch_send(ref=<decision id>) unless you withhold it, and ack. An answer to carry out only once a PR gets somewhere ("merge when approved"): ack it with pr and when, and the orchestrator brings it back to you then and reminds you daily; arm no watcher of your own. Use orch_ask for your own questions (2-4 options, recommended first; it never blocks). While your project is scoping (orch_inbox says so), your cards and deliverables go only to ${o.name}'s Scope tab: ask ${o.name} there, start no build threads (read-only investigation is fine), and end it with orch_ask(scoping_done={summary, project_md}) once the goal, constraints and first plan are in PROJECT.md. To scope only part of a project, open a scoping task (orch_scope_task), start its scoping thread with orch_spawn_thread(scope_task) and file its cards with scope_task (${o.name} sees who plans each task: you, or its scoping thread); orch_ask(scoping_done={summary, doc, task}) proposes closing it, and ${o.name}'s yes closes only that task. Threads start only from a plan card ${o.name} approved: orch_ask(kind=plan, threads=<n>, options with the go option first) lists each thread (title, goal, model, done criteria); once the answer is its go, start each with orch_spawn_thread(plan=<id>). Threads you start any other way are flagged. Resolve a finished thread with orch_resolve: it retires the role and archives the thread once its worktree is clean (nothing uncommitted, its branch in its base branch or pushed) and its PR is merged, its branch is merged into its base, its PR was closed unmerged after its report, or ${o.name} has read its final report, or pass handed_off {pr, owner} when its open PR now belongs to someone else; a dirty worktree is refused with the reason. To swap a thread to another provider, have it write handoff-<UTC date>.md in its worktree, then orch_handoff. ${o.Name} sees only your deliverables and your questions: orch_deliver (finished work with proof) and orch_ask. Bundle your threads' work into deliverables that prove the result (screenshots, video, test output, PR), not into narration. Write them for a 10-second read: visuals first; each decision or finding is one line plus a short why (points); a one-line summary; no file:line, SHAs, logs or tool names at the top, those go in text or doc proof under Details (a PR review: a verdicts block for every PR, the recommended decisions, then 2-4 findings; proof that something works: screenshots or video of it happening, checks; a root cause: rca, a screenshot of the failure, a diagram of where it sits). Never message ${o.name} any other way. ${o.Name} may write to you directly from the Projects tab (a direct message, kind owner.message): answer it only with orch_ack(id, outcome, note), at once even for long work; the note is what ${o.name} reads on the row ("done" means taken, so say whether it is finished) and the CoS gets a copy. For 48 h it wins on its point over a CoS instruction, earlier or later; only ${o.name}'s own later word changes it. If the CoS says ${o.name} changed their mind, file one card with both instructions as options; say in your note what you set aside, and tell the CoS. orch_inbox lists those still in force. A direct message is never an approval: a merge, a production change or a public push still needs its own card citing the message id, and it can't be acked with pr and when. On deliverable.changes: fix it, then orch_deliver(revises=<id>). On deliverable.next: do what ${o.name} asked, then ack it with an outcome and a note saying what you did; the note shows on the deliverable. orch_output only records a file (for example one you then give as proof); it never reaches ${o.name}. Publish orch_status (goal, numbered steps with the current one, what you wait on, blockers) when you start, at each step change and whenever what you wait on changes: it is your project page's step bar, and stale after 2 h. When a thread finishes and at each milestone, include update (working_on: 1-3 bullets, at, needs) in orch_status: it is the Lead status card on your project and replaces the last one. Write it for ${o.name}, in plain words, about the task and what is done: 1-3 short bullets of at most 12 words each; no SHAs, run ids, file paths, flag internals or tool names unless ${o.name} needs them to act. Good: 'Search fix merged; preview ready for Robin to test'. Bad: 'Rebased 4087 onto main at 3f2a1c9, CI run 88123 green'.`,
-  thread: `You are a worker thread in ${o.name}'s orchestrator. Ask your lead with orch_ask (2-4 options, recommended first); it returns at once with an id, so carry on or end your turn: the answer comes as a message. Message only your lead (orch_send). When an answer or message is handled, close it with orch_ack(id, outcome); replying to its sender with ref=<its id> closes it as replied, and an ack after that still records the real outcome. Report finished work with orch_report (with the PR URL when there is one). Use orch_output to record a finished artefact (a doc, video, image, report or link) so your lead can put it in a deliverable as proof; ${o.name} sees only what your lead delivers.`,
+  lead: `You are a project lead in ${o.name}'s orchestrator. Your threads' questions come to you as decision.new: settle with orch_answer (citing a standing rule that covers it, or with a note as your own call), else orch_forward to file it up. Answers to your decisions come only to you: relay to the thread with orch_send(ref=<decision id>) unless you withhold it, and ack. An answer to carry out only once a PR gets somewhere ("merge when approved"): ack it with pr and when, and the orchestrator brings it back to you then and reminds you daily; arm no watcher of your own. Use orch_ask for your own questions (2-4 options, recommended first; it never blocks). While your project is scoping (orch_inbox says so), your cards and deliverables go only to ${o.name}'s Scope tab: ask ${o.name} there, start no build threads (read-only investigation is fine), and end it with orch_ask(scoping_done={summary, project_md}) once the goal, constraints and first plan are in PROJECT.md. To scope only part of a project, open a scoping task (orch_scope_task), start its scoping thread with orch_spawn_thread(scope_task) and file its cards with scope_task (${o.name} sees who plans each task: you, or its scoping thread); orch_ask(scoping_done={summary, doc, task}) proposes closing it, and ${o.name}'s yes closes only that task. Threads start only from a plan card ${o.name} approved: orch_ask(kind=plan, threads=<n>, options with the go option first) lists each thread (title, goal, model, done criteria); once the answer is its go, start each with orch_spawn_thread(plan=<id>). Threads you start any other way are flagged. Put each of ${o.name}'s standing practices in your recovery view that applies into your plan cards' done criteria and your threads' briefs, and check your threads' reports against it.Resolve a finished thread with orch_resolve: it retires the role and archives the thread once its worktree is clean (nothing uncommitted, its branch in its base branch or pushed) and its PR is merged, its branch is merged into its base, its PR was closed unmerged after its report, or ${o.name} has read its final report, or pass handed_off {pr, owner} when its open PR now belongs to someone else; a dirty worktree is refused with the reason. To swap a thread to another provider, have it write handoff-<UTC date>.md in its worktree, then orch_handoff. ${o.Name} sees only your deliverables and your questions: orch_deliver (finished work with proof) and orch_ask. Bundle your threads' work into deliverables that prove the result (screenshots, video, test output, PR), not into narration. Write them for a 10-second read: visuals first; each decision or finding is one line plus a short why (points); a one-line summary; no file:line, SHAs, logs or tool names at the top, those go in text or doc proof under Details (a PR review: a verdicts block for every PR, the recommended decisions, then 2-4 findings; proof that something works: screenshots or video of it happening, checks; a root cause: rca, a screenshot of the failure, a diagram of where it sits). Never message ${o.name} any other way. ${o.Name} may write to you directly from the Projects tab (a direct message, kind owner.message): answer it only with orch_ack(id, outcome, note), at once even for long work; the note is what ${o.name} reads on the row ("done" means taken, so say whether it is finished) and the CoS gets a copy. For 48 h it wins on its point over a CoS instruction, earlier or later; only ${o.name}'s own later word changes it. If the CoS says ${o.name} changed their mind, file one card with both instructions as options; say in your note what you set aside, and tell the CoS. orch_inbox lists those still in force. A direct message is never an approval: a merge, a production change or a public push still needs its own card citing the message id, and it can't be acked with pr and when. On deliverable.changes: fix it, then orch_deliver(revises=<id>). On deliverable.next: do what ${o.name} asked, then ack it with an outcome and a note saying what you did; the note shows on the deliverable. orch_output only records a file (for example one you then give as proof); it never reaches ${o.name}. Publish orch_status (goal, numbered steps with the current one, what you wait on, blockers) when you start, at each step change and whenever what you wait on changes: it is your project page's step bar, and stale after 2 h. When a thread finishes and at each milestone, include update (working_on: 1-3 bullets, at, needs) in orch_status: it is the Lead status card on your project and replaces the last one. Write it for ${o.name}, in plain words, about the task and what is done: 1-3 short bullets of at most 12 words each; no SHAs, run ids, file paths, flag internals or tool names unless ${o.name} needs them to act. Good: 'Search fix merged; preview ready for Robin to test'. Bad: 'Rebased 4087 onto main at 3f2a1c9, CI run 88123 green'.`,
+  thread: `You are a worker thread in ${o.name}'s orchestrator. Ask your lead with orch_ask (2-4 options, recommended first); it returns at once with an id, so carry on or end your turn: the answer comes as a message. Message only your lead (orch_send). When an answer or message is handled, close it with orch_ack(id, outcome); replying to its sender with ref=<its id> closes it as replied, and an ack after that still records the real outcome. Report finished work with orch_report (with the PR URL when there is one). Follow each of ${o.name}'s standing practices in your recovery view that applies to your work, and say in your report what you did for it. Use orch_output to record a finished artefact (a doc, video, image, report or link) so your lead can put it in a deliverable as proof; ${o.name} sees only what your lead delivers.`,
 });
 
 function errText(e: unknown): string {
@@ -194,6 +200,18 @@ export default async function plugin(bb: BbPluginApi) {
     // 2026-11-18: the CodeRabbit review queue posts nothing while this is on. Going live is the owner's own choice.
     reviewQueueDryRun: { type: "boolean", label: "Review queue: dry-run (nothing is posted to GitHub)", description: "On: the queue checks and picks a PR and shows what it would post, and posts nothing. Keep it on while another CodeRabbit scheduler runs; turn it off only once you've decided the queue should post \"@coderabbitai review\" for you.", default: true },
     slackToken: { type: "string", secret: true, label: "Open PRs: Slack token for Post", description: "Empty: Post copies the text and opens reviewChannel. Set: Post sends it to reviewChannel after a preview and a confirm. To post as yourself, use a user token: create a Slack app (api.slack.com/apps), add the User Token Scopes chat:write, channels:read, groups:read (for a private channel) and users:read (to turn @handles into mentions), install it to your workspace, and paste its User OAuth Token (xoxp-…). A bot token (xoxb-…) with the same scopes works too; invite the bot to the channel." },
+    // the Game Boy tab's AI player (gameboy/core/player.ts): off until an endpoint and a key are set
+    aiPlayerEndpoint: { type: "string", label: "Game Boy AI player: decision API endpoint", description: "The full URL the server POSTs each turn to: the game screen (a PNG) and a compact game state, with one typed choice question for the next input. See gameboy/README.md for what it must accept. Empty: the AI player is off and its toggle hidden.", default: "" },
+    aiPlayerModel: { type: "string", label: "Game Boy AI player: model", description: "Sent as the request's model. Empty: no model field.", default: "" },
+    aiPlayerKeyFile: { type: "string", label: "Game Boy AI player: key file (a dotenv file on this machine)", description: "The path of a dotenv file that holds the API key (~/ is the home folder). It is read by the server on each turn; the key never goes to the page or a log.", default: "" },
+    aiPlayerKeyName: { type: "string", label: "Game Boy AI player: the key's name in that file", default: "" },
+    aiPlayerKey: { type: "string", secret: true, label: "Game Boy AI player: API key (instead of a key file)", description: "Optional. Kept by bb as a secret and read only by the server. The key file is the usual way; this wins when both are set." },
+    aiPlayerHeaders: { type: "string", label: "Game Boy AI player: extra request headers", description: "One Name: value per line, sent with each call, for an API that wants an opt-in header to take images. Authorization and Content-Type are set by the plugin.", default: "", experimental_multiline: true },
+    aiPlayerName: { type: "string", label: "Game Boy AI player: its name", description: "The toggle reads \"<name> plays\", and the line under the game \"<name>: <buttons> (<confidence>): <why>\". Empty: AI.", default: "" },
+    aiPlayerGapSeconds: { type: "number", label: "Game Boy AI player: seconds between calls (at least)", default: 3 },
+    aiPlayerSessionCalls: { type: "number", label: "Game Boy AI player: calls per session (one toggle-on)", default: 100 },
+    aiPlayerDayCalls: { type: "number", label: "Game Boy AI player: calls per day (UTC)", default: 500 },
+    linearApiKey: { type: "string", secret: true, label: "Pathways: Linear personal API key" },
   });
   // The retired name of cosCompactTokens: never carried over, only unset (retireClearSetting).
   const retired = bb.settings.define({
@@ -222,7 +240,7 @@ export default async function plugin(bb: BbPluginApi) {
   const O = ownerWords(cfg.ownerName);
   registerCloud(bb, () => cfg);
   const dataDir = dirname(bb.storage.database().name);
-  registerGameboy(bb, join(dataDir, "gameboy"));
+  registerGameboy(bb, join(dataDir, "gameboy"), () => cfg);
   /** The state folder: the setting, else state/ beside the plugin's database. */
   const stateDir = () => cfg.stateDir.trim() || join(dataDir, "state");
   /** The projects folder: the setting (`~` is the home folder), else projects/ beside the plugin's database. */
@@ -736,7 +754,7 @@ export default async function plugin(bb: BbPluginApi) {
 
   bb.agents.registerTool({
     name: "orch_inbox",
-    description: "Your recovery view: unread items, decisions waiting for you, your own open decisions, and the standing rules you may cite. With batchInbox on: ALL unread oldest first with full bodies, ids, refs and an ack-through cursor; reading never acknowledges. The CoS may inspect wakes or retry_wake by recipient.",
+    description: "Your recovery view: unread items, decisions waiting for you, your own open decisions, the standing rules you may cite, and the standing practices to follow (they settle nothing). With batchInbox on: ALL unread oldest first with full bodies, ids, refs and an ack-through cursor; reading never acknowledges. The CoS may inspect wakes or retry_wake by recipient.",
     presentation: { label: { pending: "Reading the inbox", completed: "Read the inbox" } },
     parameters: z.object({
       id: z.string().regex(/^i-[a-f0-9]+$/).optional().describe("Read the complete text of one item addressed to you, including passive INFO"),
@@ -793,9 +811,10 @@ export default async function plugin(bb: BbPluginApi) {
 
   /**
    * One pr-watch pass. `fake` (address → reading) is the proof hook: injected readings, labelled on the Board. `seen`
-   * collects a real pass's readings, so the PR waits they cover keep bb's reading (waitPass).
+   * collects a real pass's readings, so the PR waits they cover keep bb's reading (waitPass); `byEnv`, the same by
+   * environment (linkPass).
    */
-  async function prPass(fake: Record<string, PrResult> | null, signal?: AbortSignal, seen?: PrResult[]): Promise<string> {
+  async function prPass(fake: Record<string, PrResult> | null, signal?: AbortSignal, seen?: PrResult[], byEnv?: Map<string, PrResult>): Promise<string> {
     const live = engine.agents().filter((a) => a.role === "thread" || a.role === "lead");
     for (const a of live) {
       if (signal?.aborted) return "stopped";
@@ -809,6 +828,7 @@ export default async function plugin(bb: BbPluginApi) {
       : await unlessAborted(prFetch([...new Set(agents.map((a) => a.environmentId!))]), signal);
     if (!res) return "stopped";
     if (seen && !fake) seen.push(...Object.values(res));
+    if (byEnv && !fake) for (const [env, r] of Object.entries(res)) byEnv.set(env, r);
     const changedFor: string[] = [];
     for (const a of agents) {
       const r = res[a.environmentId!];
@@ -817,6 +837,34 @@ export default async function plugin(bb: BbPluginApi) {
     if (changedFor.length) await flush();
     const summary = agents.map((a) => `${a.address}: ${res[a.environmentId!]?.outcome ?? "no reading"}`).join("; ");
     return `${changedFor.length ? `changed: ${changedFor.join(", ")}` : "no change"} (${summary || "no agents with an environment"})`;
+  }
+
+  /**
+   * After a real pr-watch pass: the PRs of live environments bb's readings (`bb`, by environment) didn't show, read by
+   * URL with gh (core/pr-links.ts): an environment's other PRs until merged or closed, and a PR a thread reported once
+   * its head commit is the environment's HEAD (bb git's status). Its gh readings join `covered`, so waitPass doesn't
+   * read them again.
+   */
+  const prChecked = new Map<string, string>();
+  let lastNoHead = "";
+  async function linkPass(bbReadings: Map<string, PrResult>, covered: PrResult[], signal?: AbortSignal): Promise<void> {
+    const r = await readThreadPrs(engine, bbReadings, covered, {
+      heads: async (ids) => {
+        const rows = (await bb.sdk.plugins.callRpc({ pluginId: "bb--git", method: "status", input: { keys: ids.slice(0, 200) }, outputSchema: z.record(z.string(), z.any()) })) as Record<string, { outcome?: string; workspace?: { checkout?: { headSha?: string | null } } }>;
+        return Object.fromEntries(ids.map((id) => [id, rows[id]?.outcome === "available" ? (rows[id]!.workspace?.checkout?.headSha ?? null) : null]));
+      },
+      read: (url) => openPrs.readWait(url, signal),
+    }, prChecked, signal);
+    if (r.linked.length) bb.log.info(`pr-links: linked ${r.linked.join(", ")}`);
+    if (r.failed) bb.log.warn(`pr-links: ${r.failed} gh read(s) failed`);
+    // nothing that leaves a report unlinked stays silent (2026-11-19); a missing HEAD is logged when the list changes
+    if (r.headsError) bb.log.warn(`pr-links: bb git status failed, no reported PR was compared: ${r.headsError}`);
+    const noHead = r.noHead.join(", ");
+    if (noHead && noHead !== lastNoHead) bb.log.info(`pr-links: no HEAD from bb git for ${noHead}; their reported PRs wait for one`);
+    if (!r.headsError) lastNoHead = noHead;
+    if (r.noHeadRef.length) bb.log.warn(`pr-links: gh read without a head commit, not compared: ${r.noHeadRef.join(", ")}`);
+    if (r.unmatched.length) bb.log.info(`pr-links: not linked, the PR's head isn't the environment's HEAD: ${r.unmatched.join("; ")}`);
+    if (r.read) await flush();
   }
 
   /**
@@ -1747,13 +1795,18 @@ export default async function plugin(bb: BbPluginApi) {
             const rows = await bb.sdk.threads.queuedMessages.list({ threadId: to.threadId });
             if (!rows.some((r) => r.id === wake.queued_id)) engine.batch.missingQueue(wake.queued_id);
           }
+          // every agent, stopped ones too: a thread bb no longer has is noted here, and retired on the next not-found (core/gone.ts)
+          const threads = await lookThreads(engine, engine.agents(), (threadId) => bb.sdk.threads.get({ threadId }), signal);
           for (const a of engine.agents()) {
             if (signal.aborted) return;
-            if (a.status === "stopped") continue;
-            const t = await bb.sdk.threads.get({ threadId: a.threadId }).catch(() => null);
+            const t = threads.get(a.threadId);
+            if (!t) continue;
             // bb reports an archived thread's last status (e.g. idle); keep it archived, so a Start can replace it
-            if (t) engine.setStatus(a.threadId, (t as { archivedAt?: number | null }).archivedAt ? "archived" : t.status);
-            if (t && !a.environmentId) engine.setEnvironment(a.threadId, (t as unknown as ThreadInfo).environmentId ?? null);
+            const archived = !!(t as { archivedAt?: number | null }).archivedAt;
+            // a stopped agent stays stopped until it runs again; only bb's archive ends it
+            if (a.status === "stopped" && !archived) continue;
+            engine.setStatus(a.threadId, archived ? "archived" : t.status);
+            if (!a.environmentId) engine.setEnvironment(a.threadId, (t as unknown as ThreadInfo).environmentId ?? null);
           }
         } catch (e) {
           bb.log.warn(`reconcile: ${errText(e)}`);
@@ -1764,6 +1817,7 @@ export default async function plugin(bb: BbPluginApi) {
       let lastPlace = 0;
       let lastXp = 0;
       let lastPrune = 0;
+      let lastThreads = Date.now(); // the reconcile below looks first
       const pass = async () => {
         try {
           engine.tick();
@@ -1775,7 +1829,9 @@ export default async function plugin(bb: BbPluginApi) {
           if (cfg.prPollMinutes > 0 && Date.now() - lastPrCheck > cfg.prPollMinutes * 60_000) {
             lastPrCheck = Date.now();
             const seen: PrResult[] = [];
-            await prPass(null, signal, seen).catch((e) => bb.log.warn(`pr-watch: ${errText(e)}`));
+            const byEnv = new Map<string, PrResult>();
+            await prPass(null, signal, seen, byEnv).catch((e) => bb.log.warn(`pr-watch: ${errText(e)}`));
+            if (!signal.aborted) await linkPass(byEnv, seen, signal).catch((e) => bb.log.warn(`pr-links: ${errText(e)}`));
             if (!signal.aborted) await waitPass(seen, signal).catch((e) => bb.log.warn(`pr-wait: ${errText(e)}`));
             mark("pr-watch");
           }
@@ -1793,6 +1849,13 @@ export default async function plugin(bb: BbPluginApi) {
             mark("layout");
             await placeSections();
             await pruneProjectSections();
+          }
+          if (signal.aborted) return;
+          if (Date.now() - lastThreads > GONE_CHECK_MS) {
+            lastThreads = Date.now();
+            // a second not-found, apart from the first, retires the agent (core/gone.ts)
+            await lookThreads(engine, engine.agents(), (threadId) => bb.sdk.threads.get({ threadId }), signal);
+            await flush();
           }
           if (signal.aborted) return;
           if (Date.now() - lastPrune > DAY_MS && (cfg.retentionDays > 0 || cfg.activityRetentionDays > 0)) {
@@ -1923,6 +1986,24 @@ export default async function plugin(bb: BbPluginApi) {
   });
 
   const providerOf = new Map<string, string | null>();
+  const pathwaysSnapshotFile = (slug: string) => join(stateDir(), "pathways", `${slug}.json`);
+  const pathwaysSnapshots = createPathwaysSnapshots({
+    now: () => Date.now(),
+    maxAgeMs: 60_000,
+    read: (slug) => {
+      try {
+        return JSON.parse(readFileSync(pathwaysSnapshotFile(slug), "utf8")) as PathwaysSnapshot;
+      } catch {
+        return null;
+      }
+    },
+    write: (slug, snapshot) => {
+      const file = pathwaysSnapshotFile(slug);
+      mkdirSync(dirname(file), { recursive: true });
+      writeFileSync(`${file}.tmp`, JSON.stringify(snapshot));
+      renameSync(`${file}.tmp`, file);
+    },
+  });
   bb.rpc.register(rpcContract, {
     async config() {
       return {
@@ -2086,6 +2167,71 @@ export default async function plugin(bb: BbPluginApi) {
       );
       return { projects, badge: projects.reduce((n, p) => n + p.cards.length, 0) };
     },
+    async pathways({ slug, refresh }): Promise<PathwaysView> {
+      const failure = (error: string): PathwaysView => ({ error, map: null, retro: null, fetchedAt: null, refreshing: false });
+      const apiKey = cfg.linearApiKey?.trim();
+      if (!apiKey) return failure("Set the Pathways Linear API key in Orchestrator plugin settings.");
+      if (!engine.project(slug)) return failure("Pathways project not found.");
+      let linearProjectId: string | undefined;
+      let linearMapIssue: string | undefined;
+      try {
+        const record = JSON.parse(readFileSync(join(projectsDir(), slug, projectRecord()), "utf8")) as { linearProjectId?: unknown; linearMapIssue?: unknown };
+        linearProjectId = typeof record.linearProjectId === "string" ? record.linearProjectId.trim() : undefined;
+        linearMapIssue = typeof record.linearMapIssue === "string" ? record.linearMapIssue.trim() : undefined;
+      } catch {
+        return failure("Set the Pathways Linear project link in this project's record.");
+      }
+      if (!linearProjectId) return failure("Set linearProjectId in this project's record for Pathways.");
+      const read = async (): Promise<Pathways> => { try {
+        const request = async <T,>(query: string, id: string, after: string | null = null): Promise<T> => {
+          const response = await fetch("https://api.linear.app/graphql", { method: "POST", headers: { Authorization: apiKey, "Content-Type": "application/json" }, body: JSON.stringify({ query, variables: { id, after } }) });
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          const result = await response.json() as { data?: T; errors?: unknown[] };
+          if (result.errors?.length || !result.data) throw new Error("GraphQL error");
+          return result.data;
+        };
+        const summary = await projectIssues((after) => request<{ project: { issues: { nodes: { identifier: string; parent: { identifier: string } | null; labels: { nodes: { name: string }[] } }[]; pageInfo: { hasNextPage: boolean; endCursor: string | null } } } | null }>(`query($id: String!, $after: String) { project(id: $id) { issues(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { identifier parent { identifier } labels { nodes { name } } } } } }`, linearProjectId, after));
+        if (!summary) return failure("Pathways Linear project not found. Check linearProjectId.");
+        const mapIndex = selectPathwaysMap(summary, linearMapIssue);
+        if (!mapIndex) return failure(linearMapIssue ? `Pathways map issue ${linearMapIssue} not found in the linked Linear project.` : "No Pathways map issue (label wayfinder:map) found in the linked Linear project.");
+        const ids = [mapIndex.identifier, ...summary.filter((issue) => issue.parent?.identifier === mapIndex.identifier).map((issue) => issue.identifier)];
+        const detailQuery = `query($id: String!) { issue(id: $id) { identifier title url description updatedAt state { type name } priority estimate assignee { name } labels { nodes { name } } parent { identifier } attachments { nodes { id url } } relations { nodes { type relatedIssue { identifier title url state { type } } } } inverseRelations { nodes { type issue { identifier title url state { type } } } } } }`;
+        const issues = await mapPathwaysLimited(ids, 8, async (id) => (await request<{ issue: PathwaysIssue | null }>(detailQuery, id)).issue);
+        if (issues.some((issue) => !issue)) return failure("Pathways Linear issue details were missing. Try Refresh.");
+        const map = pathwaysMap(issues[0]!, issues.slice(1) as PathwaysIssue[]);
+        const decisions = engine.decisions(5000).filter((decision) => decision.project === slug);
+        linkPathwaysDecisions(map, issues.slice(1) as PathwaysIssue[], decisions.map((decision) => ({ id: decision.id, state: decision.state, title: decision.request.title, context: decision.request.context, project: decision.project, prUrls: (decision.request.blocks ?? []).flatMap((block) => block.kind === "pr" ? [block.url] : []) })));
+        for (const ticket of map.tickets) if (ticket.readiness.state === "needs decision" || ticket.displayState === "blocked") ticket.decisionDraft = draftPathwaysDecision(ticket);
+        const deliverables = engine.deliverables().filter((deliverable) => deliverable.project === slug);
+        const waits = engine.openWaits();
+        const linked = map.tickets.flatMap((ticket) => ticket.prLink.urls.map((url) => ({ ticket, url })));
+        await mapPathwaysLimited(linked, 8, async ({ ticket, url }) => {
+          const reading = await openPrs.readPathways(url).catch(() => ({ outcome: "unavailable" as const }));
+          const pr = reducePathwaysPr(url, reading, Date.now());
+          const proof = reducePathwaysProof(pr, collectPathwaysProofRecords(url, deliverables));
+          const mergeDecision = decisions.find((decision) => decision.orchestrator.action === "merge" && decision.request.blocks?.some((block) => block.kind === "pr" && block.url.replace(/\/+$/, "").toLowerCase() === url));
+          const waitLane = reducePathwaysWaitLane(pr, proof, waits.filter((wait) => wait.prUrl.replace(/\/+$/, "").toLowerCase() === url), mergeDecision ? { id: mergeDecision.id, state: mergeDecision.state, createdAt: Date.parse(mergeDecision.created_at) } : null);
+          ticket.prs.push({ pr, proof, waitLane });
+        });
+        for (const ticket of map.tickets) {
+          ticket.prs.sort((a, b) => a.pr.url.localeCompare(b.pr.url));
+          const primary = ticket.prs.filter(({ pr }) => pr.state !== "merged" && pr.state !== "closed").sort((a, b) => ({ unavailable: 0, blocked: 1, ready: 2, merged: 3, closed: 4 })[a.pr.state] - ({ unavailable: 0, blocked: 1, ready: 2, merged: 3, closed: 4 })[b.pr.state])[0];
+          ticket.pr = primary?.pr ?? null;
+          ticket.proof = primary?.proof ?? null;
+          ticket.waitLane = primary?.waitLane ?? null;
+        }
+        attachPathwaysPreflight(map, issues.slice(1) as PathwaysIssue[]);
+        const retroLibrary = join(projectsDir(), slug, "library");
+        let retroDoc: string | null = null;
+        if (existsSync(retroLibrary)) retroDoc = readdirSync(retroLibrary).filter((name) => /retro/i.test(name) && /\.md$/i.test(name)).sort()[0] ?? null;
+        const retro = { ...summarizePathwaysRetro(map, decisions.map((decision) => ({ id: decision.id, title: decision.request.title, state: decision.state })), Date.now()), doc: retroDoc ? join(retroLibrary, retroDoc) : null, hostId: retroDoc ? await onlyHost().catch(() => null) : null };
+        return { error: null, map, retro };
+      } catch (error) {
+        const reason = error instanceof Error && (/^HTTP \d+$/.test(error.message) || error.message === "GraphQL error") ? error.message : "network error";
+        return failure(`Pathways Linear request failed: ${reason}. Check the connection and try Refresh.`);
+      } };
+      return pathwaysSnapshots.view(slug, refresh ?? false, read);
+    },
     directHistory({ slug, before, limit }) {
       return engine.directHistory(slug, before ?? null, limit ?? 30);
     },
@@ -2215,6 +2361,22 @@ export default async function plugin(bb: BbPluginApi) {
     }
   };
   // a code typed into "Other" goes the masked field's way (looksLikeCode)
+  write(WRITES.pathwaysDecision, pathwaysDecisionSubmitBody, (b) => {
+    const lead = engine.agentByAddress(`lead:${b.slug}`);
+    if (!lead || lead.role !== "lead" || lead.project !== b.slug) throw new EngineError("not_found", "Live project lead not found");
+    const prior = engine.decisionByRequestKey(lead.address, pathwaysDecisionKey(b.ticketId, b.question));
+    if (prior) return prior.id;
+    const project = engine.project(b.slug);
+    const ticket = pathwaysSnapshots.peek(b.slug)?.value.map?.tickets.find((item) => item.identifier === b.ticketId);
+    if (!project || !ticket) throw new EngineError("not_found", "Project or ticket not found; refresh Pathways");
+    if (ticket.readiness.state !== "needs decision" && ticket.displayState !== "blocked") throw new EngineError("bad_state", "Ticket has no recorded decision blocker");
+    const draft = draftPathwaysDecision(ticket);
+    if (b.question !== draft.question) throw new EngineError("conflict", "Ticket question changed; refresh Pathways");
+    draft.options = b.options;
+    const id = submitPathwaysDecision(draft, { existing: (key) => engine.decisionByRequestKey(lead.address, key)?.id ?? null, create: (key, value) => engine.ask(lead, { title: value.title, question: value.question, context: value.context, options: value.options, key }).id });
+    pathwaysSnapshots.markStale(b.slug);
+    return id;
+  });
   write(WRITES.answer, answerBody, (b) =>
     b.option === null && looksLikeCode(b.text) ? keepSecret(b.id, b.rev, b.text!, b.via, true) : engine.personAnswer(b.id, b.rev, b.option, b.text, b.via).rev,
   );
@@ -2807,9 +2969,11 @@ export default async function plugin(bb: BbPluginApi) {
             if (self && !mayRead(self, d)) throw new EngineError("forbidden", `${self.address} reads only its own decisions`);
             return out(JSON.stringify(d, null, 2));
           }
-          case "prune":
-            if (self) throw new EngineError("forbidden", "not from an agent");
+          case "prune": {
+            const why = pruneRefusal(self, rest.includes("--dry-run"));
+            if (why) throw new EngineError("forbidden", why);
             return out(runPrune(rest.includes("--dry-run")));
+          }
           case "tick":
             engine.tick();
             await flush();
@@ -2891,6 +3055,17 @@ export default async function plugin(bb: BbPluginApi) {
     announcing = false;
     if (changeTimer) clearTimeout(changeTimer);
   });
+}
+
+/**
+ * Why `bb orchestrator prune` is refused to this caller, or null. The owner (no agent) runs either. The Steward may run
+ * the dry run, which only counts (2026-11-19, for its prune pass). A real prune never comes from an agent: it deletes
+ * the owner's record, and it already runs once a day under the owner's retention settings.
+ */
+export function pruneRefusal(self: Agent | null, dryRun: boolean): string | null {
+  if (!self || (dryRun && self.role === "steward")) return null;
+  const rule = "only the Steward may run `bb orchestrator prune --dry-run` (it counts, and deletes nothing); the real prune runs once a day under the owner's retention settings, or from the owner's terminal";
+  return self.role === "steward" ? `the Steward may run only \`bb orchestrator prune --dry-run\`: ${rule}` : rule;
 }
 
 /** An agent reads a decision it asked or started; a lead also its project's; the CoS every one (it triages them). */

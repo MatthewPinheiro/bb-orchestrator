@@ -137,6 +137,17 @@ plugin's mobile channel is on (`mobileEnabled`), the orchestrator sends no card 
 so in Activity. Desktop and web then get only the CoS thread's notifications. To get cards on desktop and web, turn mobile push off
 (`bb plugin config push-notifications set mobileEnabled false`), then switch `pushNeedsYou` off and on.
 
+### The Pathways tab
+
+Pathways shows a read-only Linear dependency map for one project at a time. Set the Orchestrator's `linearApiKey`, then
+set `linearProjectId` in that project's `project.json` to its Linear project ID. The project card opens its map in one
+click. Set `linearMapIssue` to an identifier such as `ENG-123` to use that issue and its direct sub-issues regardless
+of labels; otherwise Pathways uses the `wayfinder:map` label. Each ticket shows every open PR explicitly linked in its
+Linear attachments or description, with separate state, proof and wait lane. Merged and closed PRs leave the forward
+view. The page never writes to Linear; the included [pathways-linear skill](orchestrator/skills/pathways-linear/SKILL.md)
+tells agents how to build and update a map in Linear with a key you give them.
+Wheel or pinch to zoom the map, drag to pan, and use +, −, or Fit to reset its view.
+
 ### The Cloud tab
 
 The Cloud tab is always on the page. It stays empty until the machine has a config file that says which AWS accounts

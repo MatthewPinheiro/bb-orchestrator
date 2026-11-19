@@ -415,6 +415,25 @@ export const MIGRATIONS: string[] = [
   // Speed (2026-11-18): the batched inbox's backfill (BatchInbox.sync) looks for open items on every flush and every
   // inbox read; nearly all items are closed, so by state it reads a few rows instead of scanning them all.
   `CREATE INDEX items_state ON items (state)`,
+  // PR links (2026-11-19): an environment can hold more than one PR (a second PR after the first merged, or one the
+  // thread reported from another branch: core/pr-links.ts), so a PR's row is keyed by environment and URL. prFor reads the
+  // newest open one as the thread's PR; the others stay readable by URL.
+  `CREATE TABLE prs_v2 (
+     environment_id TEXT NOT NULL,
+     thread_id TEXT NOT NULL,
+     url TEXT NOT NULL,
+     number INTEGER,
+     state TEXT,
+     attention TEXT,
+     checks TEXT,
+     sig TEXT NOT NULL,
+     seen_at INTEGER NOT NULL,
+     PRIMARY KEY (environment_id, url)
+   );
+   INSERT INTO prs_v2 SELECT environment_id, thread_id, url, number, state, attention, checks, sig, seen_at FROM prs WHERE url IS NOT NULL;
+   DROP TABLE prs;
+   ALTER TABLE prs_v2 RENAME TO prs;
+   CREATE INDEX prs_url ON prs (url)`,
 ];
 
 export function migrate(db: Db): void {

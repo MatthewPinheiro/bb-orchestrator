@@ -16,6 +16,7 @@ import {
   parsePrView,
   parseRepoArea,
   parseRequired,
+  parseDismissStaleReviews,
   parseSearch,
   parseWaitReading,
   rawPr,
@@ -63,7 +64,7 @@ const VIEW = {
   reviewRequests: [{ __typename: "User", login: "rev-c" }, { __typename: "Team", name: "Reviewers", slug: "reviewers" }],
 };
 const RULES = [{ type: "deletion" }, { type: "pull_request", parameters: { required_approving_review_count: 2, dismiss_stale_reviews_on_push: true } }];
-const wait = (p: Partial<{ state: string; isDraft: boolean; reviewDecision: string; checks: unknown[]; mergeable: string; mergeStateStatus: string }>, url = ELSEWHERE) => ({
+const wait = (p: Partial<{ state: string; isDraft: boolean; reviewDecision: string; checks: unknown[]; mergeable: string; mergeStateStatus: string; headRefOid: string }>, url = ELSEWHERE) => ({
   url,
   number: Number(url.split("/").pop()),
   state: p.state ?? "OPEN",
@@ -72,6 +73,7 @@ const wait = (p: Partial<{ state: string; isDraft: boolean; reviewDecision: stri
   statusCheckRollup: p.checks ?? [run("SUCCESS")],
   mergeable: p.mergeable ?? "MERGEABLE",
   mergeStateStatus: p.mergeStateStatus ?? "BLOCKED",
+  ...(p.headRefOid ? { headRefOid: p.headRefOid } : {}),
 });
 
 // ---------------------------------------------------------------- the argument lists
@@ -81,7 +83,9 @@ test("every gh call is a fixed, read-only argument list: only search, pr view, p
   assert.deepEqual(ghArgs.view(PR), ["pr", "view", PR, "--json", "url,body,isDraft,headRefName,headRefOid,baseRefName,reviewDecision,mergeable,mergeStateStatus,statusCheckRollup,reviews,author,reviewRequests"]);
   assert.deepEqual(ghArgs.files(PR), ["pr", "view", PR, "--json", "headRefOid,files"]);
   assert.deepEqual(ghArgs.merged("acme-co/widgets"), ["pr", "list", "--repo", "acme-co/widgets", "--state", "merged", "--search", "sort:updated-desc", "--limit", "40", "--json", "files,reviews"]);
-  assert.deepEqual(ghArgs.wait(ELSEWHERE), ["pr", "view", ELSEWHERE, "--json", "url,number,state,isDraft,reviewDecision,statusCheckRollup,mergeable,mergeStateStatus"]);
+  // headRefOid: a PR a thread reported links to it only when its head commit is the environment's HEAD (pr-links.ts)
+  assert.deepEqual(ghArgs.wait(ELSEWHERE), ["pr", "view", ELSEWHERE, "--json", "url,number,state,isDraft,reviewDecision,statusCheckRollup,mergeable,mergeStateStatus,headRefOid"]);
+  assert.deepEqual(ghArgs.pathwaysWait(ELSEWHERE), ["pr", "view", ELSEWHERE, "--json", "url,number,title,state,isDraft,createdAt,baseRefName,headRefOid,commits,reviews,reviewDecision,statusCheckRollup,mergeable,mergeStateStatus"]);
   assert.deepEqual(ghArgs.codeowners("acme-co/widgets", ".github/CODEOWNERS"), ["api", "--method", "GET", "-H", "Accept: application/vnd.github.raw+json", "repos/acme-co/widgets/contents/.github/CODEOWNERS"]);
   assert.deepEqual(ghArgs.rules("acme-co/widgets", "release/2026"), ["api", "--method", "GET", "repos/acme-co/widgets/rules/branches/release/2026"]);
   const all = [ghArgs.openPrs("dev-one"), ghArgs.view(PR), ghArgs.files(PR), ghArgs.merged("acme-co/widgets"), ghArgs.wait(PR), ...CODEOWNERS_PATHS.map((p) => ghArgs.codeowners("acme-co/widgets", p)), ghArgs.rules("acme-co/widgets", "main")];
@@ -194,7 +198,18 @@ test("files, CODEOWNERS and merged PRs keep their shapes; bots aren't reviewers"
 // ---------------------------------------------------------------- PR waits read through gh
 
 test("a gh wait reading maps to bb's words: merged, closed, draft, checks, review, and ready only when GitHub can merge", () => {
-  const pr = (d: unknown) => (parseWaitReading(d) as Extract<BbPrReading, { outcome: "available" }>).pullRequest;
+  const pr = (d: unknown, rules: unknown = null) => (parseWaitReading(d, rules) as Extract<BbPrReading, { outcome: "available" }>).pullRequest;
+  assert(ghArgs.pathwaysWait(PR).at(-1)?.includes("headRefOid"));
+  assert.equal(pr({ ...wait({}), headRefOid: "abcdef0123456789" }).sha, "abcdef0123456789");
+  assert.equal(pr({ ...wait({}), headRefOid: "abcdef0123456789", commits: [{ oid: "abcdef0123456789", committedDate: "2026-11-18T19:25:29Z" }] }).headCommittedAt, Date.parse("2026-11-18T19:25:29Z"));
+  assert.equal(pr({ ...wait({}), title: "A PR" }).title, "A PR");
+  assert.deepEqual(pr({ ...wait({}), headRefOid: "bbbb", createdAt: "2026-11-18T00:00:00Z", reviews: [review("rev-a", "APPROVED", "aaaa")], statusCheckRollup: [{ ...run("", "IN_PROGRESS"), startedAt: "2026-11-18T01:00:00Z" }] }).reviews, [{ login: "rev-a", state: "APPROVED", sha: "aaaa", submittedAt: Date.parse("2026-01-01T00:00:00Z") }]);
+  assert.equal(pr({ ...wait({}), statusCheckRollup: [{ ...run("", "IN_PROGRESS"), startedAt: "2026-11-18T01:00:00Z" }] }).checksPendingSince, Date.parse("2026-11-18T01:00:00Z"));
+  assert.equal(pr({ ...wait({}), baseRefName: "main" }, RULES).staleReviewDismissal, true);
+  assert.equal(pr({ ...wait({}), baseRefName: "main" }, RULES).requiredApprovals, 2);
+  assert.equal(parseDismissStaleReviews([{ type: "pull_request", parameters: { dismiss_stale_reviews_on_push: false } }]), false);
+  assert.equal(parseDismissStaleReviews(null), null);
+  assert.equal(pr(wait({ isDraft: true })).draft, true);
   assert.equal(pr(wait({ state: "MERGED" })).state, "merged");
   assert.equal(pr(wait({ state: "CLOSED" })).state, "closed");
   assert.equal(pr(wait({ isDraft: true })).state, "draft");
@@ -206,6 +221,8 @@ test("a gh wait reading maps to bb's words: merged, closed, draft, checks, revie
   assert.equal(pr(wait({ mergeStateStatus: "BLOCKED" })).mergeability!.state, "blocked");
   assert.equal(pr(wait({ mergeable: "CONFLICTING", mergeStateStatus: "CLEAN" })).mergeability!.state, "conflicts", "a conflict wins");
   assert.deepEqual(parseWaitReading({ message: "Could not resolve" }), { outcome: "unavailable", message: "gh gave no PR state" });
+  assert.equal(pr(wait({ headRefOid: "0123abcd" })).headRefOid, "0123abcd", "the head commit, for a thread's PR link");
+  assert.equal("headRefOid" in pr(wait({})), false, "none when gh gave none");
 });
 
 test("only waits no available bb reading covered are read with gh; an unavailable bb reading covers nothing", () => {

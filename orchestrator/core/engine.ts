@@ -18,7 +18,7 @@ import type { StartedBy } from "./start.ts";
 import { MOOT_MIN_SHARED, MOOT_WINDOW_MS, sharedWords } from "./moot.ts";
 import { cardRefusal } from "./caps.ts";
 import { type DirectImage, type ImageType, MAX_IMAGE_BYTES, MAX_IMAGES, withImages, wordsOf } from "./direct-images.ts";
-import type { BbPrReading } from "./open-prs.ts";
+import { type BbPrReading, PR_URL_RE } from "./open-prs.ts";
 import type { WaitView } from "./watchers.ts";
 import { type LeadStatus, normalizeStatus, sameWait, type StatusParams, STATUS_STALE_MS, statusLine } from "./status.ts";
 import { backfillEvents, buildHistory, buildSummary, logEvent, logSince, SUMMARY_DONE_MS, type DecisionLite, type EventIn, type EventRow, type HistoryInput, type ProjectHistory, type ProjectSummary, type SummaryInput } from "./history.ts";
@@ -43,6 +43,8 @@ export type WaitWhen = (typeof WAIT_WHEN)[number];
 export const STALE_WAKE_MS = 24 * 3_600_000;
 /** How long mail to an address no agent holds yet (a new project's lead, the first CoS) waits for one before it is a dead letter. */
 export const UNHELD_GRACE_MS = 24 * 3_600_000;
+/** How far apart bb's two "no such thread" answers must be before an agent is retired for it (threadNotFound). */
+export const GONE_CONFIRM_MS = 5 * 60_000;
 /** A project's direct line on the Projects row (contract.ts directLineSchema). */
 export interface DirectLine {
   messages: { id: string; text: string; at: number; followUp: string | null; state: string; outcome: string | null; note: string | null; answeredAt: number | null; unread: boolean; images?: { name: string }[] }[];
@@ -84,6 +86,7 @@ import {
   type Role,
   ROLES,
   type Rule,
+  isPractice,
   type ScopingTask,
   type ScopingTaskState,
 } from "./model.ts";
@@ -247,6 +250,14 @@ export interface PrRow {
   review: string | null;
   seenAt: number;
 }
+
+type PrsRow = { environment_id: string; thread_id: string; url: string | null; number: number | null; state: string | null; attention: string | null; checks: string | null; sig: string; seen_at: number };
+const prRow = (r: PrsRow | undefined): PrRow | null => {
+  if (!r) return null;
+  // the signature is v2|url|state|checks|review|merge|queued (prSeen)
+  const review = r.sig.startsWith("v2|") ? r.sig.split("|")[4] || null : null;
+  return { environmentId: r.environment_id, threadId: r.thread_id, url: r.url, number: r.number, state: r.state, attention: r.attention, checks: r.checks, review, seenAt: r.seen_at };
+};
 
 interface RuleRow {
   id: string;
@@ -661,6 +672,8 @@ export class Engine {
   private inflight = new Set<string>();
   /** The connection's write count at the last flush's change notice (changedSinceFlush); -1: none yet. */
   private flushWrites = -1;
+  /** When bb first answered "no such thread" for an agent's thread, by thread id (threadNotFound). A reload starts over. */
+  private notFoundAt = new Map<string, number>();
 
   private db: Db;
   private ports: Ports;
@@ -1208,9 +1221,10 @@ export class Engine {
   /**
    * A thread's runtime state. "stopped" (set by the orchestrator's stop) sticks until the thread runs again. A worker
    * thread bb archived is retired at once: archived by hand (agent-v2's threads 4, 6 and 7, 2026-11-15), its role
-   * stayed live for good, so it still counted as an open thread of its lead.
+   * stayed live for good, so it still counted as an open thread of its lead. `gone`: bb no longer has the thread at all
+   * (threadNotFound), which is retired the same way.
    */
-  setStatus(threadId: string, status: string): void {
+  setStatus(threadId: string, status: string, gone = false): void {
     const cur = this.agentByThread(threadId);
     if (!cur) return;
     if (cur.status === "stopped" && status !== "active" && status !== "archived") return;
@@ -1223,9 +1237,33 @@ export class Engine {
       tx(this.db, () => {
         this.retire(threadId);
         // an "archived" row: the thread is gone already, so the Board offers no Archive button for it
-        this.boardAdd("archived", "orchestrator", cur.project, `${cur.address} retired: its thread was archived in bb`, "Its role is retired; mail still waiting for it is a dead letter.", threadId);
+        this.boardAdd("archived", "orchestrator", cur.project, `${cur.address} retired: ${gone ? "bb no longer has its thread" : "its thread was archived in bb"}`, "Its role is retired; mail still waiting for it is a dead letter.", threadId);
       });
     }
+  }
+
+  /**
+   * bb answered "no such thread" for an agent's thread (2026-11-19: a stopped agent whose thread bb had deleted stayed
+   * live for days; bb sends no archive event for it). The first answer is only noted. Another at least GONE_CONFIRM_MS
+   * later retires it as an archived thread is (setStatus). Returns whether it was retired. Only bb's clear not-found
+   * comes here (core/gone.ts): a failed lookup is no answer, and a found thread clears the note (threadFound).
+   */
+  threadNotFound(threadId: string): boolean {
+    if (!this.agentByThread(threadId)) return false;
+    const first = this.notFoundAt.get(threadId);
+    if (first === undefined) {
+      this.notFoundAt.set(threadId, this.now());
+      return false;
+    }
+    if (this.now() - first < GONE_CONFIRM_MS) return false;
+    this.notFoundAt.delete(threadId);
+    this.setStatus(threadId, "archived", true);
+    return true;
+  }
+
+  /** bb has the thread after all: an earlier not-found no longer counts. */
+  threadFound(threadId: string): void {
+    this.notFoundAt.delete(threadId);
   }
 
   /** Who supervises an address: a thread's lead, a lead's CoS. */
@@ -2703,6 +2741,7 @@ export class Engine {
     const r = this.db.prepare(`SELECT * FROM rules WHERE id = ?`).get(ruleId) as RuleRow | undefined;
     if (!r) throw new EngineError("not_found", `no standing rule ${ruleId}${d.orchestrator.at_level === "lead" ? " (to answer as your own call, send an empty rule_id and a note saying why)" : ""}`);
     const rule = toRule(r);
+    if (isPractice(rule)) throw new EngineError("forbidden", `${ruleId} is a standing practice from ${this.owner.name}, not a rule: it settles nothing${d.orchestrator.at_level === "lead" ? " (to answer as your own call, send an empty rule_id and a note saying why)" : ""}`);
     if (rule.revokedAt !== null) throw new EngineError("forbidden", `rule ${ruleId} was revoked`);
     if (rule.expiresAt !== null && rule.expiresAt <= this.now()) throw new EngineError("forbidden", `rule ${ruleId} has expired`);
     if (rule.project !== null && rule.project !== d.project) throw new EngineError("forbidden", `rule ${ruleId} covers ${rule.project}, not ${d.project ?? "no project"}`);
@@ -2724,7 +2763,7 @@ export class Engine {
   private ruleSettles(d: Decision): boolean {
     if (d.state !== "open" || d.orchestrator.scope) return false; // a scoping card is the owner's to answer, in the pane
     const hits = this.liveRules(d.project).flatMap((r) => {
-      if (!r.match || !r.kinds.includes(d.kind)) return [];
+      if (!r.match || isPractice(r) || !r.kinds.includes(d.kind)) return [];
       const m = matchRule(r.match, d);
       return "option" in m ? [{ r, option: m.option }] : [];
     });
@@ -3246,8 +3285,10 @@ export class Engine {
   // ---------------------------------------------------------------- rules (rows come only from the owner)
 
   addRule(p: { text: string; project: string | null; kinds: string[]; expiresAt: number | null; source: string; match?: RuleMatch | null }): Rule {
-    const kinds = p.kinds.filter((k) => k === "question" || k === "plan");
-    if (kinds.length === 0) throw new EngineError("invalid", "a rule covers questions and/or plans (never merges)");
+    // a practice settles nothing, so it never shares a row with the kinds that settle, nor matches cards
+    if (p.kinds.includes("practice") && (p.kinds.some((k) => k !== "practice") || p.match)) throw new EngineError("invalid", "a practice stands alone: its only kind is practice (never with question or plan), and it matches no cards");
+    const kinds = p.kinds.includes("practice") ? ["practice"] : p.kinds.filter((k) => k === "question" || k === "plan");
+    if (kinds.length === 0) throw new EngineError("invalid", "a rule covers questions and/or plans (never merges), or is a practice");
     if (p.project !== null && !PROJECT_RE.test(p.project)) throw new EngineError("invalid", `bad project ${p.project}`);
     const id = `r-${hex(3)}`;
     this.db
@@ -3267,8 +3308,13 @@ export class Engine {
   }
 
   liveRules(project: string | null): Rule[] {
+    return this.allLiveRules().filter((r) => r.project === null || r.project === project);
+  }
+
+  /** Every rule not revoked or expired, whatever its project. */
+  private allLiveRules(): Rule[] {
     const t = this.now();
-    return this.rules().filter((r) => r.revokedAt === null && (r.expiresAt === null || r.expiresAt > t) && (r.project === null || r.project === project));
+    return this.rules().filter((r) => r.revokedAt === null && (r.expiresAt === null || r.expiresAt > t));
   }
 
   // ---------------------------------------------------------------- rules from answers (2026-11-16)
@@ -4204,14 +4250,10 @@ export class Engine {
     return searchAnswered(this.db, q);
   }
 
+  /** The thread's PR in an environment: the newest open one (PR numbers grow), else the newest. The others stay readable by URL (prByUrl). */
   prFor(environmentId: string | null): PrRow | null {
     if (!environmentId) return null;
-    const r = this.db.prepare(`SELECT * FROM prs WHERE environment_id = ?`).get(environmentId) as
-      | { environment_id: string; thread_id: string; url: string | null; number: number | null; state: string | null; attention: string | null; checks: string | null; sig: string; seen_at: number }
-      | undefined;
-    // the signature is v2|url|state|checks|review|merge|queued (prSeen)
-    const review = r?.sig.startsWith("v2|") ? r.sig.split("|")[4] || null : null;
-    return r ? { environmentId: r.environment_id, threadId: r.thread_id, url: r.url, number: r.number, state: r.state, attention: r.attention, checks: r.checks, review, seenAt: r.seen_at } : null;
+    return prRow(this.db.prepare(`SELECT * FROM prs WHERE environment_id = ? ORDER BY state IN ('open','draft') DESC, number DESC, seen_at DESC LIMIT 1`).get(environmentId) as PrsRow | undefined);
   }
 
   /**
@@ -4223,13 +4265,20 @@ export class Engine {
    * any push to the base, and bb then derives another attention ("review requested", "blocked", none) until the next
    * reading flips back: PR 1100 sent 45 notices at an unchanged head (2026-11-13/14). An unknown mergeability keeps the
    * last known one, and the notice says only what the signature holds, so two notices in a row never read the same.
+   *
+   * Each PR has its own row in the environment (prFor reads the newest open one). `linking`: the first reading of a PR
+   * the thread reported from another branch (core/pr-links.ts) links it quietly, with no Board row, notice or log line,
+   * since it is old news to the thread that opened it; its later changes are news as any PR's are.
    */
-  prSeen(a: Agent, environmentId: string, res: PrResult, label = ""): boolean {
+  prSeen(a: Agent, environmentId: string, res: PrResult, label = "", linking = false): boolean {
+    // the environment's PRs are its live holder's: a handoff successor shares the environment, and an unchanged reading
+    // below writes nothing, so the rows kept naming the retired predecessor (2026-11-19). Quiet: the PR didn't change.
+    this.db.prepare(`UPDATE prs SET thread_id = ? WHERE environment_id = ? AND thread_id <> ?`).run(a.threadId, environmentId, a.threadId);
     if (res.outcome !== "available") return false;
     const pr = res.pullRequest;
     // bb reads this PR now: a PR wait's own gh reading of it is older news (bb's reading is kept when it has one)
     this.db.prepare(`DELETE FROM pr_readings WHERE url = ?`).run(pr.url.replace(/\/+$/, ""));
-    const old = this.db.prepare(`SELECT url, state, checks, attention, sig FROM prs WHERE environment_id = ?`).get(environmentId) as
+    const old = this.db.prepare(`SELECT url, state, checks, attention, sig FROM prs WHERE environment_id = ? AND url = ?`).get(environmentId, pr.url) as
       | { url: string | null; state: string | null; checks: string | null; attention: string | null; sig: string }
       | undefined;
     const legacy = old !== undefined && !old.sig.startsWith("v2|"); // written before 1.3.0: url|state|attention|checks
@@ -4239,17 +4288,18 @@ export class Engine {
     // the first reading after the upgrade only rewrites the signature: a changed format, or an old merge word for the same state, is no news
     const was = old && !legacy ? old.sig.split("|") : null;
     const reworded = !!was && [...was.slice(0, 5), approvalWord(was[2] ?? null, was[4] || null, was[5] || null) ?? "", ...was.slice(6)].join("|") === sig;
-    const quiet = reworded || (legacy && old.url === pr.url && old.state === pr.state && old.checks === checks);
+    const linked = linking && !old;
+    const quiet = linked || reworded || (legacy && old.url === pr.url && old.state === pr.state && old.checks === checks);
     return tx(this.db, () => {
       this.db
         .prepare(
           `INSERT INTO prs (environment_id, thread_id, url, number, state, attention, checks, sig, seen_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-           ON CONFLICT(environment_id) DO UPDATE SET thread_id = excluded.thread_id, url = excluded.url, number = excluded.number, state = excluded.state,
+           ON CONFLICT(environment_id, url) DO UPDATE SET thread_id = excluded.thread_id, number = excluded.number, state = excluded.state,
              attention = excluded.attention, checks = excluded.checks, sig = excluded.sig, seen_at = excluded.seen_at`,
         )
         .run(environmentId, a.threadId, pr.url, pr.number ?? null, pr.state, shown, checks, sig, this.now());
       // the log keeps the PR's state changes (opened, merged, closed), not its checks or review
-      if (!old || old.url !== pr.url || old.state !== pr.state)
+      if (!linked && (!old || old.url !== pr.url || old.state !== pr.state))
         this.event({ kind: "pr", project: a.project, address: a.address, threadId: a.threadId, value: pr.state, ref: pr.url, note: pr.number != null ? String(pr.number) : null });
       this.checkWaits(pr.url);
       if (quiet) return false;
@@ -4263,6 +4313,38 @@ export class Engine {
       this.ports.changed();
       return true;
     });
+  }
+
+  /**
+   * The PRs of live environments that bb's readings this pass (`bb`, by environment) didn't cover, to read by URL with gh
+   * (core/pr-links.ts). `linked`: an environment's other PR, not merged or closed yet, where bb answered for the
+   * environment (another PR, or none). Where bb didn't answer (a machine that's off) nothing is read, as before: the
+   * environment's own PR must not go back and forth between bb's reading and gh's. Not linked: a PR a live thread
+   * reported (orch_report pr, any holder of its address) that no row of its environment holds, and that no other live
+   * environment holds either (bb read it there, on its own branch: it is that thread's PR).
+   */
+  prsToRead(bb: ReadonlyMap<string, PrResult>): { agent: Agent; url: string; linked: boolean }[] {
+    const skip = new Set([...bb.values()].flatMap((r) => (r.outcome === "available" ? [r.pullRequest.url.trim().replace(/\/+$/, "")] : [])));
+    const live = new Map(this.agents().filter((a) => (a.role === "thread" || a.role === "lead") && a.environmentId && a.status !== "archived").map((a) => [a.environmentId!, a]));
+    const out: { agent: Agent; url: string; linked: boolean }[] = [];
+    const held = this.db.prepare(`SELECT environment_id, url, state FROM prs`).all() as { environment_id: string; url: string; state: string | null }[];
+    for (const r of held) {
+      const a = live.get(r.environment_id);
+      const answered = bb.get(r.environment_id)?.outcome;
+      if (a && (answered === "available" || answered === "absent") && !skip.has(r.url) && r.state !== "merged" && r.state !== "closed") out.push({ agent: a, url: r.url, linked: true });
+    }
+    const liveHeld = new Set(held.filter((r) => live.has(r.environment_id)).map((r) => r.url));
+    const reports = this.db.prepare(`SELECT DISTINCT from_address, ref FROM board WHERE kind = 'pr' AND from_address LIKE 'thread:%' AND ref IS NOT NULL`).all() as { from_address: string; ref: string }[];
+    const byAddress = new Map([...live.values()].filter((a) => a.role === "thread").map((a) => [a.address, a]));
+    const seen = new Set<string>();
+    for (const r of reports) {
+      const a = byAddress.get(r.from_address);
+      const url = r.ref.trim().replace(/\/+$/, "");
+      if (!a || !PR_URL_RE.test(url) || skip.has(url) || liveHeld.has(url) || seen.has(`${a.threadId} ${url}`)) continue;
+      seen.add(`${a.threadId} ${url}`);
+      out.push({ agent: a, url, linked: false });
+    }
+    return out;
   }
 
   /** When the thread last reported finished work (orch_report), or null. */
@@ -4996,8 +5078,8 @@ export class Engine {
   /** The live state of a PR proof, from pr-watch's readings, when one has this URL. */
   prByUrl(url: string): PrRow | null {
     const bare = url.replace(/\/+$/, "");
-    const r = this.db.prepare(`SELECT environment_id FROM prs WHERE url = ? OR url = ? ORDER BY seen_at DESC LIMIT 1`).get(bare, `${bare}/`) as { environment_id: string } | undefined;
-    return r ? this.prFor(r.environment_id) : null;
+    // this URL's own row: its environment may hold a newer PR (prFor), which isn't the one asked about
+    return prRow(this.db.prepare(`SELECT * FROM prs WHERE url = ? OR url = ? ORDER BY seen_at DESC LIMIT 1`).get(bare, `${bare}/`) as PrsRow | undefined);
   }
 
   // ---------------------------------------------------------------- the clock
@@ -5202,10 +5284,18 @@ export class Engine {
       for (const w of waits) lines.push(`- ${w.ref}: until ${w.prUrl} is ${WHEN_WORDS[w.when]} (bound ${ago(this.now() - w.createdAt)} ago)`);
     }
     if (a.role === "lead" || a.role === "cos") {
-      const rules = this.liveRules(a.project);
+      const rules = this.liveRules(a.project).filter((r) => !isPractice(r));
       if (rules.length) {
         lines.push(`Standing rules you may cite:`);
         for (const r of rules) lines.push(`- ${r.id} (${r.project ?? "all projects"}; ${r.kinds.join("/")}${r.match ? "; settles the cards it matches by itself" : ""}): ${JSON.stringify(r.text)}`);
+      }
+    }
+    if (a.role === "lead" || a.role === "cos" || a.role === "thread") {
+      // the CoS reminds every lead of theirs, so it sees every project's practices; a lead or thread sees its project's
+      const practices = (a.role === "cos" ? this.allLiveRules() : this.liveRules(a.project)).filter(isPractice);
+      if (practices.length) {
+        lines.push(`Standing practices from ${this.owner.name} (follow each one that applies to your work; they settle no card):`);
+        for (const r of practices) lines.push(`- ${r.id} (${r.project ?? "all projects"}): ${JSON.stringify(r.text)}`);
       }
     }
     return { text: lines.join("\n"), count: items.length + owed.length };
@@ -5291,5 +5381,10 @@ export class Engine {
 
   decisions(limit = 100): Decision[] {
     return (this.db.prepare(`SELECT json FROM decisions ORDER BY id DESC LIMIT ?`).all(limit) as { json: string }[]).map((r) => JSON.parse(r.json));
+  }
+
+  decisionByRequestKey(asker: string, key: string): Decision | null {
+    const row = this.db.prepare(`SELECT json FROM decisions WHERE asker = ? AND json_extract(json, '$.request_key') = ? AND state IN ('open','asked') ORDER BY id DESC LIMIT 1`).get(asker, key) as { json: string } | undefined;
+    return row ? JSON.parse(row.json) as Decision : null;
   }
 }

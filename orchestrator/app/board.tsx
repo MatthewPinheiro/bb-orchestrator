@@ -296,13 +296,18 @@ export function BoardView({ q, refetchAll }: { q: Query; refetchAll: () => void 
   );
 }
 
-const KINDS = ["question", "plan"] as const;
+const KINDS = ["question", "plan", "practice"] as const;
+type RuleKind = (typeof KINDS)[number];
+
+/** A practice stands alone (it settles nothing): ticking it clears question and plan, and ticking either clears it. */
+const tick = (s: Record<RuleKind, boolean>, k: RuleKind, on: boolean): Record<RuleKind, boolean> =>
+  !on ? { ...s, [k]: false } : k === "practice" ? { question: false, plan: false, practice: true } : { ...s, [k]: true, practice: false };
 
 export function RulesView({ q, refetchAll }: { q: Query; refetchAll: () => void }) {
   useGate();
   const [text, setText] = useState("");
   const [project, setProject] = useState("");
-  const [kinds, setKinds] = useState<Record<(typeof KINDS)[number], boolean>>({ question: true, plan: false });
+  const [kinds, setKinds] = useState<Record<RuleKind, boolean>>({ question: true, plan: false, practice: false });
   const [days, setDays] = useState("");
   const [source, setSource] = useState("");
   const [invalid, setInvalid] = useState<string | null>(null);
@@ -346,7 +351,7 @@ export function RulesView({ q, refetchAll }: { q: Query; refetchAll: () => void 
           <div className="flex flex-wrap items-center gap-4">
             {KINDS.map((k) => (
               <Label key={k} className="min-h-6 cursor-pointer font-normal">
-                <Checkbox name={`kind-${k}`} data-kind={k} checked={kinds[k]} onCheckedChange={(c) => setKinds((s) => ({ ...s, [k]: c === true }))} />
+                <Checkbox name={`kind-${k}`} data-kind={k} checked={kinds[k]} onCheckedChange={(c) => setKinds((s) => tick(s, k, c === true))} />
                 {k}
               </Label>
             ))}

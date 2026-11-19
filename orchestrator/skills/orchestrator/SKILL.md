@@ -120,7 +120,7 @@ Settings (`bb plugin config orchestrator set <key> <value>`): `batchInbox` (fals
 `diskPath` (/), `cosCompactTokens` (0 = off, the default: Claude Code compacts on its own; a token count opts in), `stateDir` (empty: state/ in the plugin's data folder),
 `ownerName` (empty: agents say "the owner"), `cosTitle` (Chief of Staff), `projectsDir`, `projectRecord` (project.json),
 `memoryConfig` (empty: memory off), `memoryConfigEnv` (MEMORY_CONFIG), `memoryUnits`, `memoryTimers`, `dreamsEnabled` (false),
-`hiddenTabs` (empty: every tab shows; Scope still shows while something waits in it or the owner is on it), `retentionDays` and `activityRetentionDays` (0 = keep forever; `bb orchestrator prune [--dry-run]`, owner only).
+`hiddenTabs` (empty: every tab shows; Scope still shows while something waits in it or the owner is on it), `retentionDays` and `activityRetentionDays` (0 = keep forever; `bb orchestrator prune [--dry-run]`, owner only; the Steward may run `bb orchestrator prune --dry-run`, which only counts).
 
 ## CodeRabbit review queue (read-only for agents)
 
@@ -131,6 +131,13 @@ agent tool for it. A thread titled "CodeRabbit queue picker" is the queue's own 
 alone, it is archived once it answers. Never post
 `@coderabbitai review` yourself, and never change `reviewQueueDryRun` (on by default): going live is the owner's own
 decision, on a card. Keep it on while another CodeRabbit scheduler runs.
+
+## Pathways (read-only for agents)
+
+The Pathways tab maps a project's linked Linear project (`linearProjectId` in its record; docs in USAGE.md). Agents may
+read the same facts through the `pathways` RPC: the map, first path, owner actions, linked PR state and the retro
+summary. Draft decision on the page is the owner's own action; there is no agent tool for it. To build or change a map
+in Linear, follow the `pathways-linear` skill, and only with a Linear key the owner gave you for it.
 
 ## External fleet integration (opt-in; operator CLI)
 

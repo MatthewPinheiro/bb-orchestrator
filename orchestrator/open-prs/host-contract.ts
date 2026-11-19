@@ -18,12 +18,24 @@ const reading = z.union([
     outcome: z.literal("available"),
     pullRequest: z.object({
       url: z.string(),
+      title: z.string().optional(),
+      draft: z.boolean().optional(),
+      sha: z.string().optional(),
+      headCommittedAt: z.number().optional(),
+      createdAt: z.number().optional(),
+      checksPendingSince: z.number().optional(),
+      reviews: z.array(z.object({ login: z.string(), state: z.string(), sha: z.string(), submittedAt: z.number().nullable() })).optional(),
+      staleReviewDismissal: z.boolean().nullable().optional(),
+      requiredApprovals: z.number().nullable().optional(),
       number: z.number().optional(),
       state: z.string(),
       attention: z.string().optional(),
       checks: z.object({ state: z.string().optional() }).optional(),
       review: z.object({ state: z.string().optional() }).optional(),
       mergeability: z.object({ state: z.string().optional(), mergeable: z.string().nullable().optional(), mergeStateStatus: z.string().nullable().optional() }).optional(),
+      // the PR's head commit: core/pr-links.ts links a reported PR only when it is the environment's HEAD. bb parses a host
+      // call's output with this schema, which drops a field it doesn't name (2026-11-19: no reported PR ever linked).
+      headRefOid: z.string().optional(),
     }),
   }),
   z.object({ outcome: z.literal("absent") }),
@@ -47,4 +59,5 @@ export const prHostDefs = {
   },
   // one PR wait's PR, read by its URL (a PR no live environment shows)
   "prs.wait": { input: z.object({ url: z.string().regex(PR_URL_RE) }).strict(), output: reading, experimental_retryable: true },
+  "prs.pathways": { input: z.object({ url: z.string().regex(PR_URL_RE) }).strict(), output: reading, experimental_retryable: true },
 } as const;

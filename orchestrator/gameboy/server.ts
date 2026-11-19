@@ -2,20 +2,25 @@
 // user's uploaded ROM and its save backups, as files under the orchestrator's data directory:
 //   gameboy/rom/<sha256>.gba + rom/current.json   the one ROM (never under its uploaded name)
 //   gameboy/saves/<sha256>.sav + .json            the latest save backup for that ROM; .prev.sav is the one before it
+//   gameboy/player-day.json                       the AI player's calls today (its daily cap survives a reload)
 // Writes (POST) need bb's page as Origin, like the orchestrator's: bb's "local" auth lets a request without an Origin
 // through, and this refuses it. Bodies are JSON with base64 data, because "local" auth wants application/json.
+// The AI player (core/player.ts): GET player/info says whether it's set up; POST player/turn takes the game screen and
+// the compact state, asks the owner's decision API, and returns the pick. Its key never leaves this process.
 import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { ROM_MAX_BYTES, SAVE_MAX_BYTES, SHA256, bodyTooLarge, checkRomUpload, checkSaveUpload, writeOriginProblem } from "./core/rom.ts";
 import { playHtml } from "./core/page.ts";
+import { createPlayer, type DayCount, type PlayerSettings, SCREEN_MAX_BYTES } from "./core/player.ts";
 
 type RomInfo = { name: string; size: number; sha256: string; uploadedAt: number };
 type SaveInfo = { size: number; updatedAt: number };
 
 /** The tab's routes. `dir` is where its ROM and saves live (the orchestrator's data directory + /gameboy). */
-export function registerGameboy(bb: BbPluginApi, dir: string) {
+export function registerGameboy(bb: BbPluginApi, dir: string, settings: () => PlayerSettings) {
   const romDir = join(dir, "rom");
   const saveDir = join(dir, "saves");
   mkdirSync(romDir, { recursive: true, mode: 0o700 });
@@ -116,5 +121,30 @@ export function registerGameboy(bb: BbPluginApi, dir: string) {
     const info: SaveInfo = { size: r.bytes.length, updatedAt: Date.now() };
     atomic(join(saveDir, `${r.rom}.json`), JSON.stringify(info));
     return c.json({ ok: true, result: info });
+  });
+
+  const dayFile = join(dir, "player-day.json");
+  const player = createPlayer({
+    settings,
+    fetch: (url, init) => fetch(url, init),
+    readFile: (path) => readFileSync(path, "utf8"),
+    home: homedir(),
+    now: Date.now,
+    loadDay: () => readJson<DayCount>(dayFile),
+    saveDay: (d) => atomic(dayFile, JSON.stringify(d)),
+    log: (line) => bb.log.warn(line),
+  });
+
+  bb.http.route("GET", "/gameboy/player/info", (c) => {
+    c.header("cache-control", "no-store");
+    return c.json(player.info());
+  });
+
+  bb.http.route("POST", "/gameboy/player/turn", async (c) => {
+    const body = await writeBody(c, SCREEN_MAX_BYTES + 64 * 1024);
+    if (body instanceof Response) return body;
+    const r = await player.turn(body);
+    c.header("cache-control", "no-store");
+    return c.json(r.body, r.status as 200);
   });
 }
