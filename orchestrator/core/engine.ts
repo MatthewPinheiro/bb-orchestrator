@@ -3113,7 +3113,7 @@ export class Engine {
       // the owner reads the CoS's wording, so it gets the asker's caps; a context left out is the asker's, already checked
       const tooLong = cardRefusal({ question: p.question, context: p.context ?? "", options: d.kind === "plan" ? [] : options, kind: d.kind });
       if (tooLong) throw new EngineError("invalid", tooLong);
-      this.putAsk(d, "cos", p.title ?? d.request.title, p.question, p.context ?? d.request.context, options, d.kind === "plan" ? false : p.allowText);
+      this.putAsk(d, "cos", p.title ?? d.request.title, p.question, p.context ?? d.request.context, options, p.allowText);
       d.orchestrator.triage.triaged_at = iso(this.now());
       d.orchestrator.triage.by = by.address;
       this.save(d, "ask", by.address, null, null);
@@ -4118,7 +4118,7 @@ export class Engine {
 
   /** A card from a scoping project's lead, or one filed into a scoping task: straight to the owner in its Scope pane, and a read-only copy to the CoS. */
   private fileInScope(d: Decision, by: string): void {
-    this.putAsk(d, by, d.request.title, d.request.question, d.request.context, d.request.options, d.kind !== "plan");
+    this.putAsk(d, by, d.request.title, d.request.question, d.request.context, d.request.options, true);
     d.orchestrator.scope = true;
     this.save(d, "ask", "engine", "scoping: in the owner's Scope pane", null);
     if (!this.agentByAddress("cos")) return;
@@ -5407,7 +5407,6 @@ export class Engine {
         if (d.state !== "open" || d.orchestrator.at_level !== "cos") return;
         this.putAsk(d, "engine", d.request.title, d.request.question, `${d.request.context}\n\n*CoS didn't triage this within ${Math.round(this.settings.escalateMs / 60000)} min; it is as the asker wrote it.*`.trim(), d.request.options, true);
         d.orchestrator.triage.escalated_at = iso(t);
-        if (d.kind === "plan") d.ask!.allow_text = false;
         this.save(d, "ask", "engine", "CoS didn't triage", null);
         this.upOrHold(d);
       });
