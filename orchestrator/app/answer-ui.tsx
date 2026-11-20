@@ -11,7 +11,7 @@ import { ChevronRight } from "lucide-react";
 import { Markdown } from "@get-bb/plugin-sdk/app";
 import { Badge } from "./ui/badge.tsx";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "./ui/collapsible.tsx";
-import { Textarea } from "./ui/textarea.tsx";
+import { ReplyButton, ReplyComposer, ReplyField } from "./reply-composer.tsx";
 import { cn } from "./ui/utils.ts";
 import { Btn } from "./ui.tsx";
 import { pickedClass, reservesBadgeRow } from "./option-tiles.ts";
@@ -124,31 +124,37 @@ export function Fold({ label, className, children, ...data }: { label: ReactNode
   );
 }
 
-/** "Other": always open. ⌘/Ctrl+Enter sends from inside it; the Send button is for phones. */
+/**
+ * "Other": always open, as the reply box (reply-composer.tsx, 2026-11-20). ⌘/Ctrl+Enter sends from inside it; the
+ * Send pill is for phones. It grows with the text now (the owner's model, X's reply box): the fixed height it had so
+ * typing never moved the cards below gave way to it.
+ */
 export function OtherBox({ value, onChange, onSend, disabled, placeholder, sendLabel = "Send" }: { value: string; onChange: (v: string) => void; onSend: () => void; disabled: boolean; placeholder: string; sendLabel?: string }) {
   return (
-    <div className="relative mt-3">
-      <Textarea
-        data-note=""
-        aria-label="Your own answer"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-            e.preventDefault();
-            if (!disabled && value.trim() !== "") onSend();
-          }
-        }}
-        // a fixed height: typing never grows the card and moves the ones below
-        className="field-sizing-fixed h-16 min-h-16 resize-none pr-20"
-        rows={2}
-        maxLength={4000}
-        placeholder={placeholder}
-      />
-      <Btn size="sm" className="absolute right-2 bottom-2 h-7" data-note-send="" disabled={disabled || value.trim() === ""} onClick={onSend}>
-        {sendLabel}
-      </Btn>
-    </div>
+    <ReplyComposer
+      className="mt-3"
+      field={
+        <ReplyField
+          data-note=""
+          aria-label="Your own answer"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+              e.preventDefault();
+              if (!disabled && value.trim() !== "") onSend();
+            }
+          }}
+          maxLength={4000}
+          placeholder={placeholder}
+        />
+      }
+      actions={
+        <ReplyButton data-note-send="" disabled={disabled || value.trim() === ""} onClick={onSend}>
+          {sendLabel}
+        </ReplyButton>
+      }
+    />
   );
 }
 
