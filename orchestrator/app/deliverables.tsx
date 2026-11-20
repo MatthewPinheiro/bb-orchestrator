@@ -24,6 +24,7 @@ import { GALLERY, Points, SHOT } from "./visual-blocks.tsx";
 import { prKind } from "./palette.ts";
 import { openInBb } from "./open-proof.ts";
 import { ProofLink } from "./proof-link.tsx";
+import { ImagePopout } from "./image-popout.tsx";
 import { gate, useGate, write } from "./store.ts";
 import { APPROVE_MS, pressApprove } from "./keys.ts";
 import { keyState, say, emitKeys } from "./key-state.ts";
@@ -104,10 +105,10 @@ export function ProofView({ p }: { p: Proof }) {
   if (p.kind === "image")
     return (
       <figure className="m-0" data-proof={p.id}>
-        {/* full size in a bb pane */}
-        <ProofLink open={p} fallback={file} className={cn(SHOT, "inline-block max-w-full")}>
-          <img src={proofSrc(p.id)} alt={p.caption} loading="lazy" decoding="async" className="block h-auto max-h-80 w-auto max-w-full cursor-zoom-in" />
-        </ProofLink>
+        {/* one click pops it out full size (image-popout.tsx); Open ↗ there still opens it as a bb pane */}
+        <ImagePopout src={proofSrc(p.id)} caption={p.caption} extra={openLink} className={cn(SHOT, "inline-block max-w-full")}>
+          <img src={proofSrc(p.id)} alt={p.caption} loading="lazy" decoding="async" className="block h-auto max-h-80 w-auto max-w-full" />
+        </ImagePopout>
         {caption}
       </figure>
     );

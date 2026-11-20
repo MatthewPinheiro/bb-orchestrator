@@ -20,6 +20,7 @@ import { styleHref } from "./style-href.ts";
 import { answerCss } from "./answer-ui.tsx";
 import { VoiceMic } from "../voice/app/voice-mic.tsx";
 import { StartHere } from "./start-here.tsx";
+import { ImagePopout } from "./image-popout.tsx";
 
 export type FeedFilter = "all" | "needs" | "delivered" | "alerts";
 const FILTERS: { id: FeedFilter; label: string }[] = [
@@ -438,12 +439,15 @@ function PostView({ p, now, faces, cosTitle, opened, armed, check, after, onOpen
         ) : null}
         {p.self ? <MsgState m={p.self} after={after} /> : null}
         {p.deliverable?.thumb ? (
-          <Button type="button" variant="ghost" className="k-media block h-auto w-full p-0 text-left font-normal whitespace-normal" onClick={onOpen} data-thumb={p.deliverable.thumb}>
-            <img src={proofSrc(p.deliverable.thumb)} alt="" loading="lazy" decoding="async" />
-            <span className="flex items-center gap-1.5 px-3 py-2 text-xs text-muted-foreground">
+          <div className="k-media" data-thumb={p.deliverable.thumb}>
+            {/* the picture pops out full size on one click (image-popout.tsx); the line under it opens the post */}
+            <ImagePopout src={proofSrc(p.deliverable.thumb)} caption={p.title ?? "Screenshot"} className="block">
+              <img src={proofSrc(p.deliverable.thumb)} alt={p.title ?? "Screenshot"} loading="lazy" decoding="async" />
+            </ImagePopout>
+            <Button type="button" variant="ghost" className="flex h-auto w-full items-center justify-start gap-1.5 rounded-none px-3 py-2 text-left text-xs font-normal whitespace-normal text-muted-foreground" onClick={onOpen} data-thumb-open="">
               <ImageIcon className="size-3.5" aria-hidden />1 of {p.deliverable.shots} screenshot{p.deliverable.shots === 1 ? "" : "s"}
-            </span>
-          </Button>
+            </Button>
+          </div>
         ) : null}
         {p.card && p.card.options.length ? (
           <div className="mt-2.5 flex flex-col gap-2" data-poll="">
