@@ -533,7 +533,7 @@ export default async function plugin(bb: BbPluginApi) {
 
   bb.agents.registerTool({
     name: "orch_ask",
-    description: `File a question with 2-4 options, the recommended one FIRST. A thread's goes to its lead; a lead's or the Steward's to the CoS and on to ${O.name}. Returns the decision id at once; never blocks. The answer arrives later as an [orchestrator] message.`,
+    description: `File a question with 2-4 options, the recommended one FIRST. A thread's goes to its lead; a lead's or the Steward's to the CoS and on to ${O.name}. Returns the decision id at once; never blocks. The answer arrives later as an [orchestrator] message. When an answer or a direct message from ${O.name} makes your open card stale, revise it (revises=<its id>, why, and the full new card) instead of filing another.`,
     presentation: { label: { pending: "Filing a question", completed: "Filed a question" } },
     parameters: z.object({
       title: z.string().min(1).max(60).describe("Short label, ends in ? where natural"),
@@ -555,12 +555,15 @@ export default async function plugin(bb: BbPluginApi) {
       scope_task: SCOPE_TASK.optional().describe(
         `Lead only: an open scoping task's id (st-…) or name (orch_scope_task). The card goes only to ${O.name}'s Scope tab, under that task: no CoS triage, no standing rule; the CoS gets a read-only copy. Leave it out for the normal route. Refused for a task that is done, dropped or unknown`,
       ),
+      revises: z.string().optional().describe(`The id of your own unanswered card to replace with this title, question, context and options (same id, same place on ${O.name}'s Needs you; an answer to the old version is refused). A plan keeps exactly one go; threads may change`),
+      why: z.string().max(300).optional().describe("With revises: one line on what made the card stale (the CoS reads it)"),
     }),
     execute: (p, { threadId }) =>
       run(threadId, (a) => {
         if (p.merge && !p.blocks?.some((b) => b.kind === "pr")) throw new EngineError("invalid", "a merge card needs a pr block (the PR's URL, and a one-line verdict as its note)");
         const done = p.scoping_done === undefined ? null : scopingDoneIn(p.scoping_done);
-        const d = engine.ask(a, { title: p.title, question: p.question, context: p.context, options: p.options, kind: p.kind, threads: p.threads, action: p.merge ? "merge" : null, key: p.key ?? null, blocks: p.blocks, scopingDone: done, scopeTask: p.scope_task ?? null });
+        const d = engine.ask(a, { title: p.title, question: p.question, context: p.context, options: p.options, kind: p.kind, threads: p.threads, action: p.merge ? "merge" : null, key: p.key ?? null, blocks: p.blocks, scopingDone: done, scopeTask: p.scope_task ?? null, revises: p.revises ?? null, why: p.why ?? null });
+        if (p.revises) return `Revised ${d.id} (revision ${d.orchestrator.revised?.count ?? 1}) in place${d.state === "asked" ? `: ${O.name} sees the new version` : ""}. The answer will come as a message; don't wait on it.`;
         if (d.orchestrator.scope) return `Filed ${d.id} in ${O.name}'s Scope pane (${scopeWhere(a.project, d.orchestrator.scope_task)}: no CoS triage, no standing rule; the CoS gets a read-only copy). The answer will come as a message; don't wait on it.`;
         return `Filed ${d.id} (${d.orchestrator.at_level === "lead" ? `with ${`lead:${a.project}`}` : "with the CoS"}). The answer will come as a message; don't wait on it.`;
       }),
@@ -2073,6 +2076,7 @@ export default async function plugin(bb: BbPluginApi) {
     // the file the summary is in: the project's PROJECT.md, or a scoping task's doc (1.12.0)
     scopingDone: d.orchestrator.scoping_done ? { summary: d.orchestrator.scoping_done.summary, projectMd: d.orchestrator.scoping_done.project_md ?? d.orchestrator.scoping_done.doc ?? "" } : null,
     scopeTask: d.orchestrator.scope_task ?? null,
+    revised: d.orchestrator.revised?.count ?? 0,
   });
 
   const providerOf = new Map<string, string | null>();

@@ -76,7 +76,7 @@ export interface ScopingTask {
 export interface HistoryEntry {
   at: string;
   rev: number;
-  event: "add" | "notify" | "ask" | "answer" | "relay" | "ack" | "merge" | "withdraw" | "defer" | "return" | "import";
+  event: "add" | "notify" | "ask" | "answer" | "relay" | "ack" | "merge" | "withdraw" | "defer" | "return" | "import" | "revise";
   state: string;
   by: string;
   note: string | null;
@@ -164,6 +164,8 @@ export interface Decision {
      * (1.12.0): the file is doc, and the yes closes only that task.
      */
     scoping_done?: { summary: string; project_md?: string; doc?: string; task?: string } | null;
+    /** The asker revised it while unanswered (orch_ask revises): how many times, the last time, and why. */
+    revised?: { count: number; at: string; why: string } | null;
     /** A flagged board deliverable's card: its answer approves or sends back that revision. */
     board_review?: { deliverable: string; rev: number } | null;
   };

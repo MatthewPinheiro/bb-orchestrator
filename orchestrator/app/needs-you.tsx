@@ -190,6 +190,11 @@ export function CardView({ card, list, presets, isArmed, act, mon, monType = nul
                     Merge
                   </Kind>
                 ) : null}
+                {card.revised ? (
+                  <span className="rounded border bg-muted px-1.5 text-muted-foreground" data-revised="" title="Its asker revised it">
+                    rev {card.revised + 1}
+                  </span>
+                ) : null}
                 {card.returnedAt ? <Tag>Back</Tag> : null}
                 {card.queued ? <Tag data-queued="">{`+${card.queued} next from ${card.asker}`}</Tag> : null}
                 {list === "deferred" ? <Tag>{card.deferredUntil ? `Deferred until ${when(card.deferredUntil)}` : "Deferred until you bring it back"}</Tag> : null}

@@ -40,6 +40,7 @@ export const cardSchema = z.object({
   scopingDone: z.object({ summary: z.string(), projectMd: z.string() }).nullable().optional(),
   // the scoping task it waits under in the Scope tab (1.12.0), or none for the whole project
   scopeTask: z.string().nullable().optional(),
+  revised: z.number().optional(), // times its asker revised it while unanswered: drawn as "rev N+1"
 });
 export type Card = z.infer<typeof cardSchema>;
 

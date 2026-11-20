@@ -348,6 +348,15 @@ function parsePoints(points: unknown): { points?: Point[] } {
   return { points: r.data };
 }
 
+/** A plan's go and thread count: exactly one go option (the recommended one unless another is marked), 1 to 10 threads. */
+function planOf(options: Opt[], threads: number): { threads: number; go: string } {
+  const gos = options.filter((o) => o.go);
+  if (gos.length > 1) throw new EngineError("invalid", "a plan has exactly one go option");
+  if (gos.length === 0) options[0]!.go = true;
+  if (!Number.isInteger(threads) || threads < 1 || threads > 10) throw new EngineError("invalid", "a plan starts 1 to 10 threads");
+  return { threads, go: options.find((o) => o.go)!.id };
+}
+
 export interface AskInput {
   title: string;
   question: string;
@@ -367,6 +376,9 @@ export interface AskInput {
   scopingDone?: { summary: string; projectMd?: string; doc?: string; task?: string | null } | null;
   /** A lead's scoping task (1.12.0, its id or an open task's name): the card goes to the owner's Scope pane under it. */
   scopeTask?: string | null;
+  /** Revise this open card of the asker's own (its decision id) instead of filing a new one; `why` says what made it stale. */
+  revises?: string | null;
+  why?: string | null;
 }
 
 /** The "Scoping done?" card's options, fixed so the owner's yes can't be misread: option 1 makes the project active. */
@@ -2774,9 +2786,55 @@ export class Engine {
     }));
   }
 
+  /**
+   * The asker revises its own unanswered card (2026-11-20: an answer or a direct message from the owner made its options
+   * stale, and only the CoS could withdraw it). Same id; the save bumps rev, so an answer to the old rev is refused as
+   * changed. On the owner's Needs you (or Scope pane) it is updated in place and the CoS gets a read-only copy; still
+   * waiting for triage, the CoS is told to triage this version; with a thread's lead, the lead is told.
+   */
+  private revise(by: Agent, id: string, input: AskInput): Decision {
+    const why = oneLine(input.why ?? "", 300, "why (what made the card stale)");
+    return tx(this.db, () => {
+      const d = this.mustDecision(id);
+      if (d.orchestrator.asker !== by.address) throw new EngineError("forbidden", `only ${d.orchestrator.asker}, who asked ${id}, revises it`);
+      if (d.state !== "open" && d.state !== "asked") throw new EngineError("bad_state", `${id} is ${d.state}${d.withdrawn ? ` (${d.withdrawn.moot ? "moot" : "withdrawn"}: ${d.withdrawn.reason})` : ""}: only an unanswered card can be revised; ask again with a new card`);
+      if (d.orchestrator.scoping_done) throw new EngineError("invalid", `${id} is a "Scoping done?" card: its options are fixed`);
+      if ((input.kind ?? d.kind) !== d.kind || (input.action ?? d.orchestrator.action) !== d.orchestrator.action) throw new EngineError("invalid", `${id} is a ${d.orchestrator.action === "merge" ? "merge card" : d.kind}: a revision keeps its kind`);
+      const options = this.options(input.options, 2);
+      const tooLong = cardRefusal({ question: input.question, context: input.context, options, kind: d.kind });
+      if (tooLong) throw new EngineError("invalid", tooLong);
+      if (d.kind === "plan") d.orchestrator.plan = planOf(options, input.threads ?? d.orchestrator.plan?.threads ?? 1);
+      else if (options.some((o) => o.go)) throw new EngineError("invalid", "only a plan has a go option");
+      const r = d.request;
+      r.title = oneLine(input.title, 60, "title");
+      r.question = oneLine(input.question, 600, "question");
+      r.context = (input.context ?? "").slice(0, 8192);
+      r.options = options;
+      if (input.blocks !== undefined) r.blocks = parseBlocks(input.blocks);
+      if (d.orchestrator.at_level !== "lead") this.gate(d);
+      const n = (d.orchestrator.revised?.count ?? 0) + 1;
+      d.orchestrator.revised = { count: n, at: iso(this.now()), why };
+      // on the owner's screen: the asker's new wording replaces the CoS's; same place in the list, no new push
+      if (d.ask) d.ask = { ...d.ask, title: r.title, question: r.question, context: r.context, options: options.map((o, i) => ({ ...o, recommended: i === 0 })) };
+      this.save(d, "revise", by.address, why, null);
+      const card = `${d.id} ${JSON.stringify(r.title)}`;
+      if (d.orchestrator.at_level === "lead") {
+        if (this.agentByAddress(`lead:${d.project}`)) this.put({ recipient: `lead:${d.project}`, sender: by.address, kind: "notice", ref: d.id, body: `${by.address} revised ${card} (revision ${n}): ${JSON.stringify(why)}. This version replaces the one you had: ${this.describe(d, "lead")}`, key: `revise:${d.id}:${n}`, needsAck: false });
+      } else if (this.agentByAddress("cos")) {
+        const body =
+          d.state === "asked"
+            ? `${by.address} revised ${card} (revision ${n}), already on ${this.owner.name}'s ${d.orchestrator.scope ? "Scope pane" : "Needs you"}: ${JSON.stringify(why)}. Read-only copy: it was updated in place there, with the asker's new wording; nothing for you to do. Question: ${JSON.stringify(r.question)} Options: ${options.map((o) => `${o.id}) ${JSON.stringify(o.label)}`).join(" ")}.`
+            : `${by.address} revised ${card} (revision ${n}) before you triaged it: ${JSON.stringify(why)}. Triage this version, not the one you had: ${this.describe(d, "cos")}`;
+        this.put({ recipient: "cos", sender: by.address, kind: d.state === "asked" ? "copy" : "notice", ref: d.id, body, key: `revise:${d.id}:${n}`, needsAck: false });
+      }
+      return this.mustDecision(d.id);
+    });
+  }
+
   /** File a question. A thread's goes to its lead; a lead's or the Steward's to the CoS. Never blocks. */
   ask(by: Agent, input: AskInput): Decision {
     if (by.role === "cos") throw new EngineError("forbidden", `the CoS asks ${this.owner.name} through triage(ask_person)`);
+    if (input.revises) return this.revise(by, input.revises, input);
     const t = this.now();
     // a scoping project's lead, or a lead filing into one of its scoping tasks, files into the owner's Scope pane; its
     // threads still ask it, as always
@@ -2792,12 +2850,7 @@ export class Engine {
     let plan: { threads: number; go: string } | null = null;
     if (kind === "plan") {
       if (by.role !== "lead") throw new EngineError("forbidden", "only a lead files a plan card");
-      const gos = options.filter((o) => o.go);
-      if (gos.length > 1) throw new EngineError("invalid", "a plan has exactly one go option");
-      if (gos.length === 0) options[0]!.go = true; // the recommended option is the go unless another is marked
-      const threads = input.threads ?? 1;
-      if (!Number.isInteger(threads) || threads < 1 || threads > 10) throw new EngineError("invalid", "a plan starts 1 to 10 threads");
-      plan = { threads, go: options.find((o) => o.go)!.id };
+      plan = planOf(options, input.threads ?? 1);
     } else if (options.some((o) => o.go)) throw new EngineError("invalid", "only a plan has a go option");
     const atCos = by.role !== "thread";
     const asker = by.address;
