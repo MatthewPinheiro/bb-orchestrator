@@ -1381,7 +1381,7 @@ export default async function plugin(bb: BbPluginApi) {
       "image, video or text (a file path), doc (a path or URL), pr or link (a URL). A file must be inside your worktree, one of your threads' worktrees, " +
       `${sharedRoots().join(" or ")}; text at most 256 KB; images png/jpg/gif/webp/avif, videos mp4/webm/mov. ` +
       `The summary, points and blocks together show at most ${DELIVER_BUDGET} characters. ` +
-      `${O.Name} approves it (maybe with a next action: deliverable.next, do it and ack with a note) or requests changes; on deliverable.changes, fix it and call this again with revises=<id>.`,
+      `${O.Name} approves it (maybe with a next action: deliverable.next, do it and ack with a note) or requests changes; on deliverable.changes, fix it and call this again with revises=<id>. When a new deliverable makes one of yours still in review out of date, deliver it with revises=<that id>; if it's a different topic that still makes the old one moot, withdraw the old one (orch_deliver_withdraw).`,
     presentation: { label: { pending: `Delivering to ${O.name}`, completed: `Delivered to ${O.name}` } },
     parameters: z.object({
       title: z.string().min(1).max(120),
@@ -1404,7 +1404,7 @@ export default async function plugin(bb: BbPluginApi) {
         )
         .min(1)
         .max(20),
-      revises: z.string().optional().describe(`The id of your deliverable ${O.name} sent back with changes`),
+      revises: z.string().optional().describe(`The id of your deliverable ${O.name} sent back with changes, or one still in review that this one replaces (same id, rev + 1)`),
       scope_task: SCOPE_TASK.optional().describe(`An open scoping task's id or name: ${O.name} reviews it in the Scope tab under that task, not on Deliverables; the CoS gets a read-only copy. A revision stays in its task while the task is open`),
       board: DELIVER_BOARD.optional().describe(
         `A review a Multiplayer board triggered: {id: the board (mb-…, its channel id or link), record: your review record (rr-…), flag: one line when it needs ${O.name} (couldn't verify, interview pending)}. ${O.Name} reviews it on that board, never on Deliverables; a flag also files a Needs you card. A revision keeps its board`,

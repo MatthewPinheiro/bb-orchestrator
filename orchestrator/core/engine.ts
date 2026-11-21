@@ -5068,7 +5068,8 @@ export class Engine {
       if (input.revises) {
         d = this.mustDeliverable(input.revises);
         if (d.lead !== by.address) throw new EngineError("forbidden", `${d.id} is ${d.lead}'s deliverable`);
-        if (d.state !== "changes") throw new EngineError("bad_state", `${d.id} is ${d.state}: revise only a deliverable ${this.owner.name} sent back with changes`);
+        // still in review too (2026-11-21): a newer deliverable on the same topic replaces it in place, not beside it
+        if (d.state !== "changes" && d.state !== "review") throw new EngineError("bad_state", `${d.id} is ${d.state}: revise only a deliverable still in review or one ${this.owner.name} sent back with changes`);
         // an old-schema lead revises without board: the revision stays on its board
         if (!board && d.board) {
           board = { id: d.board.id, ...(d.board.record ? { record: d.board.record } : {}) };
