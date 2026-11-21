@@ -1,5 +1,5 @@
 // An image in a card pops out full-size on one click (2026-11-20, the owner: no side panel step first). What matters: the
-// picture is an anchor whose plain click opens the in-page dialog (not bb's file preview pane), a modifier or middle click
+// picture is an anchor whose plain click opens the in-page viewer (not bb's file preview pane), a modifier or middle click
 // keeps the browser's own behaviour on the full-size href, and every card that draws a proof image inline uses it: the
 // deliverable card, a past deliverable's files, and the Home feed's screenshot (whose line under it still opens the post).
 import assert from "node:assert/strict";
@@ -12,7 +12,7 @@ import { cleanTsx, importTsx } from "./tsx-render.ts";
 after(cleanTsx);
 
 type Any = ComponentType<any>; // eslint-disable-line @typescript-eslint/no-explicit-any
-const mod = await importTsx<{ ImagePopout: Any; popsOut: (e: object) => boolean; swipedDown: (dx: number, dy: number) => boolean }>("app/image-popout.tsx");
+const mod = await importTsx<{ ImagePopout: Any; popsOut: (e: object) => boolean }>("app/image-popout.tsx");
 const src = (f: string) => readFileSync(new URL(`../${f}`, import.meta.url), "utf8");
 
 test("the card's picture is a zoom-in anchor to the full-size image that says it opens a dialog, with the dialog closed until clicked", () => {
@@ -32,34 +32,35 @@ test("only a plain left click pops it out; cmd, ctrl, shift, alt and middle clic
   assert.equal(mod.popsOut({ ...base, button: 1 }), false, "middle click");
 });
 
-test("the dialog is Radix's (focus trap, Esc, backdrop), titled by the caption, with focus back on the picture and no Open link", () => {
+test("a plain click loads the viewer (PhotoSwipe, photo-viewer.ts) only then, and gives focus back to the picture when it closes", () => {
   const s = src("app/image-popout.tsx");
-  assert.match(s, /DialogPrimitive\.Title[^>]*>\{caption/);
-  assert.match(s, /onCloseAutoFocus=\{\(e\) => \{\s*e\.preventDefault\(\);\s*trigger\.current\?\.focus\(\);/);
-  assert.match(s, /stopPropagation/, "the overlay's clicks don't reach the card under it");
-  assert.doesNotMatch(s, /\{extra\}|>\s*Open ↗/, "the overlay has no Open link (2026-11-21); the right-click menu replaces it");
+  assert.match(s, /await import\("\.\/photo-viewer\.ts"\)/, "loaded on the first click: the card and its tests never load PhotoSwipe");
+  assert.match(s, /onClosed: \(\) => trigger\.current\?\.focus\(\)/);
+  assert.match(s, /e\.stopPropagation\(\);\s*void open\(\)/, "the click doesn't reach the card under it (a phone's post opens on a tap)");
+  assert.doesNotMatch(s, /Open ↗|DialogPrimitive/, "no Radix dialog and no Open link any more");
 });
 
-test("a tall picture never traps you: it fits the screen, the close button floats top-right in the safe area at 44 px, a tap or a swipe down closes it", () => {
-  const s = src("app/image-popout.tsx");
-  assert.match(s, /data-popout-frame="" className="[^"]*\bmin-h-0\b[^"]*\bflex-1\b/, "the picture's box is what's left above the caption");
-  assert.match(s, /data-popout-image=""[\s\S]{0,200}className="[^"]*\bmax-h-full max-w-full\b[^"]*\bobject-contain\b/);
-  const close = s.slice(s.indexOf("<DialogPrimitive.Close"), s.indexOf("</DialogPrimitive.Close>"));
-  assert.match(close, /\bfixed\b/);
-  assert.match(close, /top-\[max\(0\.5rem,env\(safe-area-inset-top\)\)\]/);
-  assert.match(close, /right-\[max\(0\.5rem,env\(safe-area-inset-right\)\)\]/);
-  assert.match(close, /\bsize-11\b/, "44 px tap target");
-  assert.match(s, /onClick=\{\(\) => \(touchOnly\(\) \? setOpen\(false\)/, "a tap on the picture closes it on a touch screen");
-  assert.equal(mod.swipedDown(0, 120), true);
-  assert.equal(mod.swipedDown(10, 40), false, "too short");
-  assert.equal(mod.swipedDown(150, 100), false, "more sideways than down");
-  assert.equal(mod.swipedDown(0, -200), false, "up");
+test("the viewer feels like Photos: pinch, double-tap and wheel zoom, drag down to close; a labelled dialog with the caption and the two opens", () => {
+  const v = src("app/photo-viewer.ts");
+  assert.match(v, /from "photoswipe"/);
+  assert.doesNotMatch(v, /closeOnVerticalDrag:\s*false|pinchToClose:\s*false/, "drag down (and pinch in) to close stay on (PhotoSwipe's defaults)");
+  assert.match(v, /wheelToZoom: true/);
+  assert.match(v, /secondaryZoomLevel:/, "double-tap or click zooms in");
+  assert.match(v, /setAttribute\("aria-label", o\.caption \|\| "Image"\)/, "the dialog is named by the caption");
+  assert.match(v, /name: "popout-caption"/);
+  assert.match(v, /title: "Open in side panel"[\s\S]{0,400}if \(o\.sidePanel\?\.\(\)\) pswp\.close\(\);\s*else window\.open\(o\.src/, "bb declining the pane falls back to a new tab");
+  assert.match(v, /title: "Open in new tab"/);
+  assert.match(v, /for \(const \[k, v\] of Object\.entries\(PORTAL\)\) host\.setAttribute/, "it sits in a host carrying the plugin's overlay attributes");
+  const css = src("app/photo-viewer.css");
+  assert.match(css, /@media \(hover: none\) and \(pointer: coarse\)[\s\S]*\.pswp__button--close[\s\S]*clip-path: inset\(50%\)/, "on touch the X is for screen readers only; drag down closes");
+  assert.match(css, /safe-area-inset-bottom/);
+  assert.equal(JSON.parse(src("package.json")).dependencies.photoswipe, "5.4.4", "pinned");
 });
 
-test("a right-click (long-press on touch) on the picture, in the card and in the overlay, offers the side panel and a new tab", () => {
+test("a right-click (long-press on touch) on the card's picture offers the side panel and a new tab", () => {
   const s = src("app/image-popout.tsx");
   assert.match(s, /ContextMenu as MenuPrimitive/, "Radix's ContextMenu from radix-ui, already a dependency");
-  assert.equal((s.match(/<ImageMenu /g) ?? []).length, 2, "on the card's picture and the overlay's");
+  assert.match(s, /<ImageMenu src=\{src\} sidePanel=\{sidePanel\}>\s*<a/);
   assert.match(s, />\s*Open in side panel\s*</);
   assert.match(s, />\s*Open in new tab\s*</);
   assert.match(s, /if \(sidePanel\(\)\) onPicked\?\.\(\);\s*else window\.open\(src/, "bb declining the pane falls back to a new tab");
