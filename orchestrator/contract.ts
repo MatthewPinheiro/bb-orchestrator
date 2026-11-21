@@ -486,7 +486,7 @@ export const feedPostSchema = z.object({
   isNew: z.boolean(),
   outcome: z.string().nullable(),
   card: z.object({ id: z.string(), rev: z.number(), options: z.array(opt), allowText: z.boolean(), merge: z.boolean() }).nullable(),
-  deliverable: z.object({ id: z.string(), rev: z.number(), state: z.string(), shots: z.number(), thumb: z.string().nullable() }).nullable(),
+  deliverable: z.object({ id: z.string(), rev: z.number(), state: z.string(), shots: z.number(), thumb: z.string().nullable(), thumbFile: z.object({ hostId: z.string().nullable(), path: z.string().nullable() }).nullable().optional() }).nullable(),
   status: z.object({ steps: z.array(z.object({ title: z.string(), state: z.string() })), needs: z.string().nullable() }).nullable(),
   url: z.string().nullable(),
   prompt: z.object({ threadId: z.string(), id: z.string() }).nullable(),

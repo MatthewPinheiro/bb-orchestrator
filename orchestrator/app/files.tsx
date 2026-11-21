@@ -234,6 +234,7 @@ export function FileRow2({ f, host, after, onDeliverable, noProject }: { f: File
 /** A deliverable's file as a full item: an image or a video inline at full width, else its row. */
 export function FileFull({ f, host, after }: { f: FileItem; host: string | null; after: () => void }) {
   const [broken, setBroken] = useState(false);
+  const navigate = useBbNavigate();
   if (servable(f, "image") && !broken)
     return (
       <figure className="m-0" data-file={f.key} data-file-kind="images">
@@ -241,11 +242,7 @@ export function FileFull({ f, host, after }: { f: FileItem; host: string | null;
           src={routeOf(f)!}
           caption={f.caption ?? f.name}
           className={cn(SHOT, "block")}
-          extra={
-            <ProofLink open={openable(f, host)} fallback={routeOf(f)} className="text-sm font-medium underline-offset-2 hover:underline">
-              Open ↗
-            </ProofLink>
-          }
+          sidePanel={() => openInBb(navigate, openable(f, host))}
         >
           <img src={routeOf(f)} alt={f.caption ?? f.name} loading="lazy" decoding="async" onError={() => setBroken(true)} className="block h-auto w-full" />
         </ImagePopout>

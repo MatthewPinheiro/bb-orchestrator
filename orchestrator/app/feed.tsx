@@ -21,6 +21,7 @@ import { answerCss } from "./answer-ui.tsx";
 import { VoiceMic } from "../voice/app/voice-mic.tsx";
 import { StartHere } from "./start-here.tsx";
 import { ImagePopout } from "./image-popout.tsx";
+import { openInBb } from "./open-proof.ts";
 
 export type FeedFilter = "all" | "needs" | "delivered" | "alerts";
 const FILTERS: { id: FeedFilter; label: string }[] = [
@@ -376,6 +377,7 @@ function PostView({ p, now, faces, cosTitle, opened, armed, check, after, onOpen
   const busy = gate.lock !== null;
   const chip = chipOf(p);
   const phone = useTouchPhone();
+  const navigate = useBbNavigate();
   // nothing on the actions row but Open: no reply line, no review, no note
   const onlyOpen = !p.line && p.deliverable?.state !== "review" && !p.held;
   const answer = (option: string) => {
@@ -441,7 +443,7 @@ function PostView({ p, now, faces, cosTitle, opened, armed, check, after, onOpen
         {p.deliverable?.thumb ? (
           <div className="k-media" data-thumb={p.deliverable.thumb}>
             {/* the picture pops out full size on one click (image-popout.tsx); the line under it opens the post */}
-            <ImagePopout src={proofSrc(p.deliverable.thumb)} caption={p.title ?? "Screenshot"} className="block">
+            <ImagePopout src={proofSrc(p.deliverable.thumb)} caption={p.title ?? "Screenshot"} className="block" sidePanel={p.deliverable.thumbFile ? () => openInBb(navigate, p.deliverable!.thumbFile!) : undefined}>
               <img src={proofSrc(p.deliverable.thumb)} alt={p.title ?? "Screenshot"} loading="lazy" decoding="async" />
             </ImagePopout>
             <Button type="button" variant="ghost" className="flex h-auto w-full items-center justify-start gap-1.5 rounded-none px-3 py-2 text-left text-xs font-normal whitespace-normal text-muted-foreground" onClick={onOpen} data-thumb-open="">

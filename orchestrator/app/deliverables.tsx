@@ -105,8 +105,8 @@ export function ProofView({ p }: { p: Proof }) {
   if (p.kind === "image")
     return (
       <figure className="m-0" data-proof={p.id}>
-        {/* one click pops it out full size (image-popout.tsx); Open ↗ there still opens it as a bb pane */}
-        <ImagePopout src={proofSrc(p.id)} caption={p.caption} extra={openLink} className={cn(SHOT, "inline-block max-w-full")}>
+        {/* one click pops it out full size (image-popout.tsx); a right-click opens it in bb's side panel or a new tab */}
+        <ImagePopout src={proofSrc(p.id)} caption={p.caption} sidePanel={() => openInBb(navigate, p)} className={cn(SHOT, "inline-block max-w-full")}>
           <img src={proofSrc(p.id)} alt={p.caption} loading="lazy" decoding="async" className="block h-auto max-h-80 w-auto max-w-full" />
         </ImagePopout>
         {caption}
