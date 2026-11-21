@@ -46,8 +46,8 @@ test("Home's Needs you is today's Needs you list, read once, and every count of 
   assert.doesNotMatch(app, /id: "needs-you", subPath/, "no Needs you tab");
   assert.match(app, /body=\{filter === "needs" \? <NeedsYouView q=\{needs\}/);
   assert.match(feed, /input: \{ cursor: null, filter \}, enabled: filter !== "all" && !body \}/, "the feed's needs page isn't read as well");
-  assert.match(app, /needs: needs\.data\?\.badge \|\| undefined,/, "the Sidebar's count");
-  assert.match(feed, /f\.id === "needs" && needs\?\.badge \?/, "the phone's Tabs count");
+  assert.match(app, /needs: owner\.needs \|\| undefined,/, "the Sidebar's count");
+  assert.match(app, /counts=\{\{ needs: owner\.needs, delivered: owner\.delivered, projects: owner\.scope \}\}/, "the phone bar's badges: the same numbers as the Sidebar's");
   assert.match(feed, /f === "needs" \? needs\?\.badge/, "the header's count");
 });
 

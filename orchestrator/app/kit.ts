@@ -405,5 +405,24 @@ export const inReview = (all: Deliverables | undefined): Deliverable[] => (all ?
 
 /** In review in a scoping project's Scope pane (1.11.0): not on Deliverables until the project is active. */
 export const inScope = (d: Deliverable) => d.state === "review" && !!d.scope;
+
+/**
+ * What waits on the owner, by where it lives (2026-11-21, the owner: "mine says 6 on the plugin on the side but when i
+ * click into the app, 'needs you' 'delivered' or anything doesn't say anything"). The rail badge is `total`, and every
+ * count the page draws is one of the parts, so they always add up to it: Needs you (cards and prompts), Delivered (in
+ * review), and Scope in Projects (its cards and its scoping deliverables in review). Each item is in exactly one part.
+ */
+export function ownerCounts(needs: { badge: number } | undefined, all: Deliverables | undefined, scope: Scope | undefined): { needs: number; delivered: number; scope: number; total: number } {
+  const n = needs?.badge ?? 0;
+  const delivered = inReview(all).length;
+  const scoping = (scope?.badge ?? 0) + (all ?? []).filter((d) => inScope(d) && !!scope?.projects.some((p) => p.slug === d.project)).length;
+  return { needs: n, delivered, scope: scoping, total: n + delivered + scoping };
+}
+
+/** The rail badge's words: where its number lives, so the owner can see which tab it comes from. */
+export function ownerCountsLabel(c: { needs: number; delivered: number; scope: number }): string {
+  const parts = [c.needs ? `${c.needs} in Needs you` : "", c.delivered ? `${c.delivered} in Delivered` : "", c.scope ? `${c.scope} in Projects (Scope)` : ""].filter(Boolean);
+  return parts.join(", ");
+}
 /** What the Deliverables tab lists: a board's reviews never (they live on the Multiplayer tab), a scoping one once decided. */
 export const onDeliverablesTab = (d: Deliverable) => !d.board && !inScope(d);

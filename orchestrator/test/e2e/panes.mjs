@@ -70,6 +70,16 @@ async function openBeside(page, view) {
   await page.locator(`[data-page-sidebar] [data-beside="${view}"]`).first().click();
   await page.waitForTimeout(1500);
 }
+// the Sidebar as its rail, by its toggle; then a pane beside by Ctrl+click on a rail item (the rail has no Open beside).
+// Since 1.37.1 the Sidebar folds only by its toggle: two panes at 1180 need it
+async function railBeside(page, view) {
+  if (!(await page.locator("[data-page-sidebar][data-rail]").count())) {
+    await page.locator("[data-sidebar-toggle]").first().click();
+    await page.waitForTimeout(800);
+  }
+  await page.locator(`[data-page-sidebar] [data-nav="${view}"]`).first().click({ modifiers: ["Control"] });
+  await page.waitForTimeout(1200);
+}
 async function filter(page, f) {
   await page.locator(`[data-page-sidebar] [data-feed-filter="${f}"]`).first().click();
   await page.waitForTimeout(1200);
@@ -382,7 +392,7 @@ try {
   // 1180 × 820, touch: two panes, focus marked
   {
     const page = await open("tablet");
-    await openBeside(page, "projects");
+    await railBeside(page, "projects");
     await check("tablet 1180: two panes drawn, one marked focused", async () => {
       const ps = await panes(page);
       must(ps.length === 2 && ps.filter((p) => p.focused).length === 1, say(ps));

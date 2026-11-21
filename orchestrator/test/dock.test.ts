@@ -106,3 +106,15 @@ test("an edge with no room is never offered: that part of the pane is the centre
   assert.equal(zoneAt(390, 150, 400, 300, null, noLeft), "right", "the others still are");
   assert.equal(zoneAt(10, 150, 400, 300, null, () => false), "center", "no room anywhere: the whole pane is the centre");
 });
+
+test("the ghost stays inside the window: right of and below the pointer, flipped to its left or above where it would cross the edge", async () => {
+  const { ghostAt, GHOST_OFFSET } = await import("../app/drag.ts");
+  const [w, h, vw, vh] = [120, 28, 1440, 900];
+  assert.deepEqual(ghostAt(600, 400, w, h, vw, vh), { left: 600 + GHOST_OFFSET, top: 400 + GHOST_OFFSET }, "in the middle: the usual offset");
+  for (const [x, y] of [[1430, 400], [600, 890], [1435, 895], [1440 - GHOST_OFFSET - w + 1, 900 - GHOST_OFFSET - h + 1]]) {
+    const g = ghostAt(x, y, w, h, vw, vh);
+    assert.ok(g.left >= 0 && g.left + w <= vw && g.top >= 0 && g.top + h <= vh, `pointer at ${x},${y}: ghost at ${JSON.stringify(g)} leaves the window`);
+    assert.ok(!(x >= g.left && x <= g.left + w && y >= g.top && y <= g.top + h), `pointer at ${x},${y}: the ghost covers the point being dropped on`);
+  }
+  assert.deepEqual(ghostAt(1430, 400, w, h, vw, vh), { left: 1430 - GHOST_OFFSET - w, top: 400 + GHOST_OFFSET }, "only the axis that crosses flips");
+});

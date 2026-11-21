@@ -1,5 +1,6 @@
 // Drag to dock (feel spec part 3): a pane by its header, or a Sidebar item, dropped on a pane's edge or centre. Pointer events, no library.
 import type { Edge } from "./layout.ts";
+import { PORTAL } from "./ui/utils.ts";
 
 /** Within this share of a pane's nearest edge the drop is that edge; deeper in, the centre. */
 export const EDGE_SHARE = 0.3;
@@ -12,6 +13,13 @@ export const LONG_PRESS_MS = 400;
 export const LONG_PRESS_PX = 8;
 /** The ghost's top-left sits this far right of and below the pointer. */
 export const GHOST_OFFSET = 12;
+
+/** The ghost's top-left for a pointer at (x, y): right of and below it, or left of and above it where the window ends. */
+export function ghostAt(x: number, y: number, w: number, h: number, vw: number, vh: number): { left: number; top: number } {
+  const left = x + GHOST_OFFSET + w <= vw ? x + GHOST_OFFSET : x - GHOST_OFFSET - w;
+  const top = y + GHOST_OFFSET + h <= vh ? y + GHOST_OFFSET : y - GHOST_OFFSET - h;
+  return { left: Math.max(0, left), top: Math.max(0, top) };
+}
 
 /** The drop zone at (fx, fy), each a 0..1 share of the pane's width and height. */
 export function edgeAt(fx: number, fy: number): Edge {
@@ -93,6 +101,8 @@ export function dragFrom(e: { clientX: number; clientY: number; pointerId: numbe
   let ghost: HTMLDivElement | null = null;
   let preview: HTMLDivElement | null = null;
   let label: HTMLSpanElement | null = null;
+  let size: { w: number; h: number } | null = null;
+  let hints: HTMLElement[] = [];
   let shown = false;
   let hit: { target: string; edge: Edge } | null = null;
   let entered: string | null = null;
@@ -120,6 +130,8 @@ export function dragFrom(e: { clientX: number; clientY: number; pointerId: numbe
     if (src.dim) src.dim.style.opacity = "0.5";
     cover = document.createElement("div");
     cover.dataset.dragCover = "";
+    // bb scopes the plugin's styles to these marks, so outside the plugin's root the preview would have no fill
+    for (const [k, v] of Object.entries(PORTAL)) cover.setAttribute(k, v);
     Object.assign(cover.style, { position: "fixed", inset: "0", zIndex: "2147483647", contain: "strict", userSelect: "none", touchAction: "none" });
     ghost = document.createElement("div");
     ghost.dataset.dockGhost = "";
@@ -135,6 +147,9 @@ export function dragFrom(e: { clientX: number; clientY: number; pointerId: numbe
     preview.append(label);
     cover.append(preview, ghost);
     document.body.append(cover);
+    // the one-time hint would sit over the panes it explains; it comes back when the drag ends
+    hints = Array.from(document.querySelectorAll<HTMLElement>("[data-drag-hint]"));
+    for (const h of hints) h.style.visibility = "hidden";
     over("no");
     // the panes' own frames and the set of panes, not what changes inside a pane
     mo.observe(box, { childList: true });
@@ -146,7 +161,7 @@ export function dragFrom(e: { clientX: number; clientY: number; pointerId: numbe
   const draw = () => {
     frame = 0;
     if (!on || !ghost || !preview || !label) return;
-    ghost.style.transform = `translate(${x + GHOST_OFFSET}px, ${y + GHOST_OFFSET}px)`;
+    ghost.style.transform = place(x, y);
     if (cancelled) return;
     if (stale) measure();
     const f = rects.find((p) => x >= p.r.left && x <= p.r.right && y >= p.r.top && y <= p.r.bottom);
@@ -176,6 +191,11 @@ export function dragFrom(e: { clientX: number; clientY: number; pointerId: numbe
       shown = true;
       if (!reduced()) preview.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 80, easing: "ease-out" });
     }
+  };
+  const place = (px: number, py: number) => {
+    if (ghost && !size) size = { w: ghost.offsetWidth, h: ghost.offsetHeight };
+    const g = ghostAt(px, py, size?.w ?? 0, size?.h ?? 0, window.innerWidth, window.innerHeight);
+    return `translate(${g.left}px, ${g.top}px)`;
   };
   const schedule = () => {
     if (!frame) frame = requestAnimationFrame(draw);
@@ -219,7 +239,7 @@ export function dragFrom(e: { clientX: number; clientY: number; pointerId: numbe
     ghost = null;
     if (!g) return;
     if (reduced()) return g.remove();
-    fade(g, [{ transform: g.style.transform, opacity: 1 }, { transform: `translate(${x0 + GHOST_OFFSET}px, ${y0 + GHOST_OFFSET}px)`, opacity: 0 }], 150, "ease-in");
+    fade(g, [{ transform: g.style.transform, opacity: 1 }, { transform: place(x0, y0), opacity: 0 }], 150, "ease-in");
   };
   const hidePreview = (out: boolean) => {
     const p = preview;
@@ -257,6 +277,10 @@ export function dragFrom(e: { clientX: number; clientY: number; pointerId: numbe
     if (src.grab) src.grab.style.cursor = "";
     html.removeAttribute("data-orch-drag");
     release();
+    // after the drop's own render, so a hint the first drop retires never shows again for a frame
+    const back = hints;
+    hints = [];
+    if (back.length) requestAnimationFrame(() => back.forEach((h) => (h.style.visibility = "")));
     if (on) {
       // the release makes a click on whatever is under it; it is the drag's, not a press
       window.addEventListener("click", swallow, { capture: true, once: true });

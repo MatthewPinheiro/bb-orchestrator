@@ -29,7 +29,7 @@ test("a hidden Scope tab shows, in its place, while something waits in it, and h
   // the page passes what waits in Scope (its open cards and its scoping deliverables to review, the number drawn on the
   // tab) and the views its panes are on, so the rule is wired, not only defined
   assert.match(app, /const visible = shownTabs\(VIEWS, new Set\(config\.data\?\.hiddenTabs \?\? \[\]\), scopeWaiting, new Set\(panes\(layout\.root\)\.map\(\(p\) => p\.route\.view\)\), inUse, PLACES\);/);
-  assert.match(app, /const scopeWaiting = \(scope\.data\?\.badge \?\? 0\) \+ \(deliverables\.data \?\? \[\]\)\.filter\(\(d\) => inScope\(d\) && /);
+  assert.match(app, /const scopeWaiting = owner\.scope;/, "the rail badge's Scope part (kit.ts ownerCounts: its cards and scoping deliverables)");
   assert.match(app, /projects: scopeWaiting \|\| /, "what waits in Scoping is the number the nav draws on Projects, where its group now is");
 });
 

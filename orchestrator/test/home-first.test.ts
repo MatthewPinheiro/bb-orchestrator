@@ -50,13 +50,14 @@ test("the page wires it: Home is the bare page, first; a feed link redirects", (
   assert.equal(fromPath("", VIEWS).view, "home", "the bare page is Home");
 });
 
-test("Home's filters are shadcn parts: the page Sidebar's sub-items on web, Tabs on the phone", () => {
+test("Home's filters live in the nav: the page Sidebar's sub-items on web, the bar and its More on a phone", () => {
   const feed = readFileSync(new URL("../app/feed.tsx", import.meta.url), "utf8");
   const nav = readFileSync(new URL("../app/page-nav.tsx", import.meta.url), "utf8");
   assert.doesNotMatch(feed, /role="tablist"|role="tab"/, "no hand-made tabs");
   assert.match(nav, /<SubLink key=\{f\.id\} active=\{view === "home" && filter === f\.id\}/);
-  assert.match(feed, /const tabs = \(\s*<Tabs value=\{filter\} onValueChange=\{\(v\) => onFilter\(v as FeedFilter\)\}/);
-  assert.match(feed, /\) : filtersInNav \? \([\s\S]*?\) : \(\s*<div className="flex shrink-0 items-center gap-1 border-b px-2 py-2" data-home-header="">\s*\{tabs\}/, "the Tabs only on a phone");
+  // 2026-11-21: the phone bar holds Needs you and Delivered and More holds the feed and Alerts, so a filter row on the
+  // page would repeat the bar's labels (one row of tabs at most, and no label repeats between levels)
+  assert.doesNotMatch(feed, /<Tabs |\{tabs\}/, "no filter row on the page");
   assert.doesNotMatch(feed, /useState<FeedFilter>/, "each pane's route holds its filter, so the navigation and keys can set it");
   assert.match(app, /const filter = \(route\.params\.filter \?\? "all"\) as FeedFilter;/, "per pane, not per page (split panes, 2026-11-20)");
 });

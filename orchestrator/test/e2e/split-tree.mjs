@@ -62,6 +62,16 @@ async function openBeside(page, view) {
   await page.locator(`[data-page-sidebar] [data-beside="${view}"]`).first().click();
   await page.waitForTimeout(1200);
 }
+// the Sidebar as its rail, by its toggle; then a pane beside by Ctrl+click on a rail item (the rail has no Open beside).
+// Since 1.37.1 the Sidebar folds only by its toggle: two panes at 1180 need it
+async function railBeside(page, view) {
+  if (!(await page.locator("[data-page-sidebar][data-rail]").count())) {
+    await page.locator("[data-sidebar-toggle]").first().click();
+    await page.waitForTimeout(800);
+  }
+  await page.locator(`[data-page-sidebar] [data-nav="${view}"]`).first().click({ modifiers: ["Control"] });
+  await page.waitForTimeout(1200);
+}
 async function headerButton(page, i, what) {
   await pane(page, i).locator(`[data-${what}]`).click();
   await page.waitForTimeout(500);
@@ -93,7 +103,21 @@ try {
       return say(ps);
     });
     await shot(page, "split-down");
-    await check("Split right puts a copy of the pane to its right, focused; the Home pane never remounts", async () => {
+    // the Sidebar stays open (1.37.1, the owner: "where did all the other tabs go"): it turns into the rail only by its toggle
+    await check("With the Sidebar open a third column doesn't fit: Split right is refused, the note says to collapse the Sidebar, and the Sidebar stays open", async () => {
+      const before = await panes(page);
+      await headerButton(page, 0, "split-right");
+      const after = await panes(page);
+      const note = await page.locator("[data-key-note]").textContent().catch(() => "");
+      const w = await sidebarW(page);
+      must(after.length === before.length, `${say(before)} → ${say(after)}`);
+      must(/no room/i.test(note ?? "") && /collapse the sidebar/i.test(note ?? ""), `note: ${note}`);
+      must(w > 64, `the Sidebar folded to ${w} px by itself`);
+      return { note, sidebar: w };
+    });
+    await check("After the Sidebar's toggle, Split right puts a copy of the pane to its right, focused; the Home pane never remounts", async () => {
+      await page.locator("[data-sidebar-toggle]").first().click();
+      await page.waitForTimeout(800);
       await headerButton(page, 0, "split-right");
       const ps = await panes(page);
       must(ps.length === 4, `4 panes, got ${say(ps)}`);
@@ -103,13 +127,13 @@ try {
       return say(ps);
     });
     await shot(page, "split-right");
-    await check("Every pane keeps the 320 × 240 minimum; the Sidebar drew as a rail by itself to make room", async () => {
+    await check("Every pane keeps the 320 × 240 minimum; the rail is there because its toggle was pressed, and that choice is saved", async () => {
       const ps = await panes(page);
       must(ps.every((p) => p.w >= 319 && p.h >= 239), say(ps));
       const w = await sidebarW(page);
       must(w > 0 && w <= 64, `the Sidebar is ${w} px`);
       const saved = await page.evaluate(() => localStorage.getItem("orchestrator.sidebar.v1"));
-      must(saved !== "rail", "the saved choice stays open");
+      must(saved === "rail", `saved: ${saved}`);
       return { sidebar: w, panes: say(ps) };
     });
     await check("A split with no room is refused, with one line saying why", async () => {
@@ -215,8 +239,9 @@ try {
   {
     const page = await open("desktop", { video: "switcher" });
     await openBeside(page, "projects");
-    await check("1180: three columns don't fit; one pane shows with a \"1 of 3\" switcher that reaches the others", async () => {
-      await headerButton(page, 1, "split-right");
+    // Home | Projects over Projects fits at 1440 beside the open Sidebar; at 1180 two columns no longer do
+    await check("1180: the panes don't fit beside the open Sidebar; one pane shows with a \"1 of 3\" switcher that reaches the others", async () => {
+      await headerButton(page, 1, "split-down");
       await page.setViewportSize({ width: 1180, height: 820 });
       await page.waitForTimeout(1200);
       const ps = await panes(page);
@@ -261,7 +286,7 @@ try {
     });
     await shot(page, "tablet-open-beside");
     await check("1180 touch: a finger 8 px off the divider drags it", async () => {
-      await openBeside(page, "projects");
+      await railBeside(page, "projects");
       const b = await page.locator("[data-panes] [role=separator]").first().boundingBox();
       const before = (await panes(page)).map((p) => p.w);
       const cdp = await page.context().newCDPSession(page);

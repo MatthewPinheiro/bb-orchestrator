@@ -63,6 +63,16 @@ async function openBeside(page, view) {
   await page.locator(`[data-page-sidebar] [data-beside="${view}"]`).first().click();
   await page.waitForTimeout(1200);
 }
+// the Sidebar as its rail, by its toggle; then a pane beside by Ctrl+click on a rail item (the rail has no Open beside).
+// Since 1.37.1 the Sidebar folds only by its toggle: two panes at 1180 need it
+async function railBeside(page, view) {
+  if (!(await page.locator("[data-page-sidebar][data-rail]").count())) {
+    await page.locator("[data-sidebar-toggle]").first().click();
+    await page.waitForTimeout(800);
+  }
+  await page.locator(`[data-page-sidebar] [data-nav="${view}"]`).first().click({ modifiers: ["Control"] });
+  await page.waitForTimeout(1200);
+}
 /** Drag from `from` (a locator) to a point at (fx, fy) of `to`'s box, by mouse; `esc` presses Escape before letting go. */
 async function drag(page, from, to, fx, fy, { esc = false, shotAs = null } = {}) {
   const a = await from.boundingBox();
@@ -249,7 +259,8 @@ try {
         n = m;
       }
       const before = await panes(page);
-      must(before.length >= 3, `set-up: ${say(before)}`);
+      // beside the open Sidebar, two columns fill 1440 (1.37.1)
+      must(before.length >= 2, `set-up: ${say(before)}`);
       const last = page.locator("[data-pane]").last();
       const id = await last.getAttribute("data-pane");
       const preview = await drag(page, page.locator('[data-page-sidebar] [data-nav="chat"]').first(), last, 0.9, 0.5);
@@ -265,7 +276,7 @@ try {
   // a finger on the grip docks too
   {
     const page = await open("tablet", { video: "touch" });
-    await openBeside(page, "projects");
+    await railBeside(page, "projects");
     await check("1180 touch: a finger drags Home's grip onto Projects' bottom edge", async () => {
       const a = await paneBy(page, "home").locator("[data-pane-grip]").boundingBox();
       const t = await paneBy(page, "projects").boundingBox();
@@ -557,23 +568,41 @@ try {
       await page.context().close();
     }
 
-    // S5 with a Sidebar drop that adds a third pane and flips the Sidebar to its rail
+    // S5 with a Sidebar drop that adds a third column. The Sidebar stays open unless its toggle is pressed (1.37.1), so
+    // with it open a third column isn't offered; with the rail, the drop adds it and nothing jumps
     {
       const page = await open("desktop");
       await openBeside(page, "projects");
-      const row = page.locator('[data-page-sidebar] [data-nav="chat"]').first();
-      const rb = await row.boundingBox();
-      const pb = await paneBy(page, "projects").boundingBox();
+      const toEdge = async () => {
+        const row = page.locator('[data-page-sidebar] [data-nav="chat"]').first();
+        const rb = await row.boundingBox();
+        const pb = await paneBy(page, "projects").boundingBox();
+        const from = [rb.x + rb.width / 2, rb.y + rb.height / 2];
+        await page.mouse.move(...from);
+        await page.mouse.down();
+        await F.path(page, F.through([from, [pb.x + pb.width * 0.5, pb.y + pb.height * 0.5], [pb.x + pb.width * 0.92, pb.y + pb.height * 0.5]], 15));
+      };
+      await check("With the Sidebar open, Projects' right edge offers no third column: the preview is its centre, and Esc drops nothing", async () => {
+        await toEdge();
+        await page.waitForTimeout(200);
+        const at = await page.locator("[data-dock-preview]").getAttribute("data-dock-preview").catch(() => null);
+        await page.keyboard.press("Escape");
+        await page.mouse.up();
+        await page.waitForTimeout(500);
+        const n = (await panes(page)).length;
+        must(/:center$/.test(at ?? "") && n === 2, JSON.stringify({ at, panes: n }));
+        return { at };
+      });
+      await page.locator("[data-sidebar-toggle]").first().click();
+      await page.waitForTimeout(800);
       await F.start(page);
-      await page.mouse.move(rb.x + 30, rb.y + rb.height / 2);
-      await page.mouse.down();
-      await F.path(page, F.through([[rb.x + 30, rb.y + rb.height / 2], [pb.x + pb.width * 0.5, pb.y + pb.height * 0.5], [pb.x + pb.width * 0.92, pb.y + pb.height * 0.5]], 15));
+      await toEdge();
       await page.mouse.up();
       await page.waitForTimeout(800);
       const rec = await F.stop(page);
       const up = rec.ups.at(-1);
       const after = rec.frames.filter((f) => f.t > up && f.panes.length === 3);
-      await check("S5 A Sidebar drop that adds a pane and flips the Sidebar to its rail: every box in the first frame with three panes equals its box 500 ms later", async () => {
+      await check("S5 With the rail, a Sidebar drop that adds a third column: every box in the first frame with three panes equals its box 500 ms later", async () => {
         const a = after[0];
         const b = after.find((f) => f.t >= a.t + 500) ?? after.at(-1);
         const ok = a && b && JSON.stringify(a.panes.map((p) => [p.id, p.box])) === JSON.stringify(b.panes.map((p) => [p.id, p.box]));
@@ -581,7 +610,7 @@ try {
         must(ok, JSON.stringify(smooth.railDrop));
         return smooth.railDrop;
       });
-      await check("S7 A new pane from the Sidebar fades in (opacity only) and is done within 200 ms; the Sidebar turns into the rail without animating its width", async () => {
+      await check("S7 A new pane from the Sidebar fades in (opacity only) and is done within 200 ms; nothing animates a width", async () => {
         smooth.newPane = F.settleOf(rec.frames, up);
         const { props, layout, lastAt, frames } = smooth.newPane;
         must(frames > 0 && !layout.length && props.every((p) => p === "transform" || p === "opacity") && lastAt <= 200, JSON.stringify(smooth.newPane));
@@ -700,6 +729,57 @@ try {
         const ghost = rec.frames.find((f) => f.ghost)?.ghost;
         must(ghost && /Home/.test(ghost.text) && shown.length && !bad.length && labels.includes("Move here") && labels.some((l) => /^Swap with /.test(l)), JSON.stringify({ ghost, labels, bad: bad.length }));
         return { ghost: ghost.text, labels, frames: shown.length };
+      });
+      // a drag from Home's grip that holds over Projects' right part, for the drag layer's checks
+      const holdDrag = async (then) => {
+        const g = await paneBy(page, "home").locator("[data-pane-grip]").boundingBox();
+        const pb = await paneBy(page, "projects").boundingBox();
+        await page.mouse.move(g.x + 8, g.y + 8);
+        await page.mouse.down();
+        await page.mouse.move(pb.x + pb.width * 0.9, pb.y + pb.height * 0.5, { steps: 12 });
+        await page.waitForTimeout(250);
+        try {
+          return await then();
+        } finally {
+          await page.keyboard.press("Escape");
+          await page.mouse.up();
+          await page.waitForTimeout(500);
+        }
+      };
+      await check(`The drag layer carries bb's plugin marks, so the preview has its fill and border; the layer itself is clear and the ghost and label opaque${tag}`, async () => {
+        const look = await holdDrag(async () => {
+          const r = await page.evaluate(() => {
+            const alpha = (c) => (c === "transparent" ? 0 : Number(c.match(/\/\s*([\d.]+)\s*\)$/)?.[1] ?? c.match(/^rgba\([^)]*,\s*([\d.]+)\)$/)?.[1] ?? 1));
+            const cover = document.querySelector("[data-drag-cover]");
+            const p = document.querySelector("[data-dock-preview]");
+            const bg = (el) => (el ? getComputedStyle(el).backgroundColor : "transparent");
+            return { marks: !!cover && ["data-bb-portaled-overlay", "data-bb-plugin-root"].every((k) => cover.hasAttribute(k)) && cover.getAttribute("data-bb-plugin") === "orchestrator", cover: alpha(bg(cover)), preview: alpha(bg(p)), border: alpha(p ? getComputedStyle(p).borderTopColor : "transparent"), ghost: alpha(bg(document.querySelector("[data-dock-ghost]"))), label: alpha(bg(p?.querySelector("span"))) };
+          });
+          if (out) await page.screenshot({ path: `${out}/drag-layer${dark ? "-dark" : ""}.png` });
+          return r;
+        });
+        must(look.marks && look.cover === 0 && look.preview > 0 && look.preview < 1 && look.border > 0 && look.ghost === 1 && look.label === 1, JSON.stringify(look));
+        return look;
+      });
+      await check(`The ghost stays inside the window at its bottom-right corner, beside the pointer, not under it${tag}`, async () => {
+        const vp = page.viewportSize();
+        const r = await holdDrag(async () => {
+          await page.mouse.move(vp.width - 3, vp.height - 3, { steps: 6 });
+          await page.waitForTimeout(250);
+          const g = await page.evaluate(() => document.querySelector("[data-dock-ghost]")?.getBoundingClientRect().toJSON() ?? null);
+          if (out) await page.screenshot({ path: `${out}/drag-corner${dark ? "-dark" : ""}.png` });
+          return g && { l: Math.round(g.left), t: Math.round(g.top), r: Math.round(g.right), b: Math.round(g.bottom) };
+        });
+        must(r && r.l >= 0 && r.t >= 0 && r.r <= vp.width && r.b <= vp.height && !(vp.width - 3 >= r.l && vp.width - 3 <= r.r && vp.height - 3 >= r.t && vp.height - 3 <= r.b), JSON.stringify({ r, vp }));
+        return r;
+      });
+      await check(`The one-time hint hides while a drag is on and comes back after it${tag}`, async () => {
+        const seen = () => page.evaluate(() => { const h = document.querySelector("[data-drag-hint]"); return h ? getComputedStyle(h).visibility : null; });
+        const before = await seen();
+        const during = await holdDrag(seen);
+        const r = { before, during, after: await seen(), cover: await page.locator("[data-drag-cover]").count() };
+        must(before === "visible" && during === "hidden" && r.after === "visible" && !r.cover, JSON.stringify(r));
+        return r;
       });
       await ctx.close();
     }

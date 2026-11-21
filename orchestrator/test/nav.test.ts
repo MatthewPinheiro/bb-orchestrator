@@ -10,10 +10,14 @@ const app = src("app.tsx");
 const ids = (xs: readonly { id: string }[]) => xs.map((x) => x.id);
 const ALL = ["home", "deliverables", "needs-you", "chat", "projects", "open-prs", "multiplayer", "coderabbit", "cloud", "gameboy", "rules", "board"].map((id) => ({ id, label: id }));
 
-test("four places, in order, and the phone's bar is those four", () => {
+test("four places, in order, on the web; the phone's bar leads with Needs you and Delivered (the owner, 2026-11-21)", () => {
   assert.deepEqual(ids(MAIN), ["home", "chat", "projects", "open-prs"]);
   assert.deepEqual(MAIN.map((m) => m.label), ["Home", "Chat", "Projects", "Reviews"]);
-  assert.match(src("app/page-nav.tsx"), /className="grid shrink-0 grid-cols-4 border-t/);
+  // "mostly you're still living in 'needs you' and 'delivered'": they come first, the feed and the rest behind More
+  const bar = src("app/page-nav.tsx").slice(src("app/page-nav.tsx").indexOf("export function BottomBar("), src("app/page-nav.tsx").indexOf("/** A phone has no Sidebar"));
+  assert.match(bar, /className="grid shrink-0 grid-cols-5 border-t/);
+  assert.deepEqual([...bar.matchAll(/\{ id: "(\w+)", label: "([^"]+)", icon:/g)].map((m) => m[2]), ["Needs you", "Delivered", "Projects", "Chat"]);
+  assert.match(bar, /data-nav="more"/);
 });
 
 test("every page the strip had is still in the nav: a place, a sub-item, a Home filter or a place's section (step 3), or a Tool", () => {
@@ -60,26 +64,26 @@ test("Start here marks a step done from the agents read: a live CoS, then a lead
 test("the mic sits in Home's header, and draws nothing while voice mode is off", () => {
   const feed = src("app/feed.tsx");
   const header = feed.slice(feed.indexOf("const header = alone"), feed.indexOf("const list = ("));
-  assert.equal(header.match(/<VoiceMic \/>/g)?.length, 3, "web, phone, and an empty Home on web");
+  assert.equal(header.match(/<VoiceMic \/>/g)?.length, 2, "Home's header (web and phone), and an empty Home's");
   assert.match(src("voice/app/voice-mic.tsx"), /if \(!enabled\) return null;/);
 });
 
-test("the bottom bar and the pages row step aside while an item is open full screen (card-390); the title bar names the place; ⚙ Tools only on a phone", () => {
+test("the bottom bar and the pages row step aside while an item is open full screen (card-390); the title bar names the place; Tools moved into the bar's More (2026-11-21)", () => {
   assert.match(app, /const phoneNav = compact && !itemOpen\.current\.has\(layout\.focus\);/, "an item open in the focused pane");
   assert.match(app, /onItemOpen=\{onItemOpen\(id\)\}/, "each Home pane says whether its own item is open");
   assert.match(app, /\{phoneNav \? <BottomBar /);
   assert.match(app, /experimental_usePageTitle: usePageTitle,/);
-  assert.match(app, /headerContent: PhoneTools,/);
-  assert.match(app, /if \(!phone\) return null;/);
-  const tools = app.slice(app.indexOf("function PhoneTools("), app.indexOf("export default definePluginApp"));
-  assert.match(tools, /useSyncExternalStore\(subscribeCompact, \(\) => compactNow\)/, "⚙ follows the page's own width: a narrow panel in a wide window has no Sidebar, so it needs ⚙");
-  assert.doesNotMatch(tools, /matchMedia/);
-  assert.match(app, /setCompactNow\(compact\);/);
+  assert.doesNotMatch(app, /headerContent:|function PhoneTools\(/, "the gear crowded bb's title bar at 360 px; Tools are in More");
+  assert.match(src("app/page-nav.tsx"), /<ToolsMenu\s+tools=\{nav\.tools\}\s+more=\{phoneMore\(nav\)\}/, "More holds the feed, Alerts, Reviews and Tools");
 });
 
-test("on a phone a place's pages sit in a row atop its page (the lead's call), and ⚙ holds Tools only", () => {
+test("on a phone a place's pages sit in a row atop its page (the lead's call)", () => {
   assert.match(app, /\{phoneNav \? <PlaceLinks nav=\{nav\} view=\{focusedView\} onGo=\{go\} \/> : null\}/);
-  const tools = app.slice(app.indexOf("function PhoneTools("), app.indexOf("export default definePluginApp"));
-  assert.doesNotMatch(tools, /more=/);
   assert.match(src("app/page-nav.tsx"), /if \(!place \|\| !place\.subs\.length\) return null;/, "a place with no pages draws no row");
+});
+
+test("a phone opens on Needs you; a link names its own place", () => {
+  assert.match(app, /if \(landed\.current \|\| !compact\) return;/, "phones only, once");
+  assert.match(app, /if \(hereRef\.current !== ""\) return;/, "a link keeps its own place");
+  assert.match(app, /act\(p\.id, filterRoute\("needs"\), "replace"\)/);
 });

@@ -30,9 +30,26 @@ const must = (ok, msg) => {
   if (!ok) throw new Error(msg);
 };
 const contexts = [];
+// read-only on the seeded data: a stray press must not answer a shared card (2026-11-20: one did, and broke P12 in panes.mjs)
+const writes = [];
+let routed = 0;
+// Home takes the focus by its header's free space: a press in its list could land on an answer
+async function focusHome(page) {
+  const h = paneOf(page, "home").locator("[data-pane-header]");
+  const b = await h.boundingBox();
+  await h.click({ position: { x: Math.round(b.width * 0.55), y: Math.round(b.height / 2) } });
+  await page.waitForTimeout(300);
+}
 async function open(kind = "desktop", { video = null, dark = false } = {}) {
   const ctx = await browser.newContext({ ...VP[kind], colorScheme: dark ? "dark" : "light", ...(video && out ? { recordVideo: { dir: `${out}/video-${video}`, size: VP[kind].viewport } } : {}) });
   contexts.push(ctx);
+  await ctx.route(/\/api\/v1\/plugins\/orchestrator\/http\//, (r) => {
+    routed++;
+    const path = new URL(r.request().url()).pathname;
+    if (r.request().method() === "GET" || /\/(feed\/seen|projects\/message-seen)$/.test(path)) return r.continue();
+    writes.push(path);
+    return r.abort();
+  });
   ctx.setDefaultTimeout(10000);
   const page = await ctx.newPage();
   page.on("pageerror", (e) => console.log("pageerror", e.message));
@@ -62,9 +79,22 @@ async function openBeside(page, view) {
   await page.locator(`[data-page-sidebar] [data-beside="${view}"]`).first().click();
   await page.waitForTimeout(1200);
 }
+// the Sidebar as its rail, by its toggle; then a pane beside by Ctrl+click on a rail item (the rail has no Open beside).
+// Since 1.37.1 the Sidebar folds only by its toggle: two panes at 1180, or three columns at 1440, need it
+async function toRail(page) {
+  if (await page.locator("[data-page-sidebar][data-rail]").count()) return;
+  await page.locator("[data-sidebar-toggle]").first().click();
+  await page.waitForTimeout(800);
+}
+async function railBeside(page, view) {
+  await toRail(page);
+  await page.locator(`[data-page-sidebar] [data-nav="${view}"]`).first().click({ modifiers: ["Control"] });
+  await page.waitForTimeout(1200);
+}
 const paneOf = (page, view) => page.locator(`[data-pane][data-pane-view="${view}"]`).first();
 const card = (page) => page.locator("[data-view-picker]");
-const rowsShown = (page) => page.evaluate(() => [...document.querySelectorAll("[data-picker-row]")].map((r) => r.getAttribute("data-picker-row")));
+// since 1.40.4 every row stays in the DOM; one the filter leaves out is hidden and disabled
+const rowsShown = (page) => page.evaluate(() => [...document.querySelectorAll("[data-picker-row]")].filter((r) => r.getAttribute("data-disabled") !== "true" && getComputedStyle(r).display !== "none").map((r) => r.getAttribute("data-picker-row")));
 const state = (page) => page.evaluate(() => ({ layout: localStorage.getItem("orchestrator.layout.v2"), href: location.href, history: history.length }));
 /** The one selected row, and what marks it. */
 const selection = (page) =>
@@ -100,19 +130,18 @@ try {
   {
     const page = await open("desktop", { video: "split-pick" });
     await openBeside(page, "projects");
-    await shot(page, "before-two-panes");
-    // the Sidebar's own words and icons, read before any picker is open
-    await page.locator('[data-page-sidebar] [data-nav="tools"]').click();
-    await page.waitForTimeout(400);
+    // the open Sidebar's own items, in its order, and its places' icons, read before any picker is open (since 1.40.0 every
+    // item is a picker row: Home's filters under Home but All, which is Home's own row, a place's sections, then all of Tools)
     const sidebar = await page.evaluate(() => ({
+      ids: [...new Set([...document.querySelectorAll("[data-page-sidebar] [data-beside], [data-page-sidebar] [data-tools-group] [data-tool]")].map((b) => b.getAttribute("data-beside") ?? b.getAttribute("data-tool")))].filter((id) => id !== "home/all"),
       main: ["home", "chat", "projects", "open-prs"].map((id) => {
         const b = document.querySelector(`[data-page-sidebar] [data-nav="${id}"]`);
-        return { label: b?.textContent?.replace(/\d+$/, "").trim(), icon: b?.querySelector("svg")?.getAttribute("class") };
+        return { id, label: b?.textContent?.replace(/\d+$/, "").trim(), icon: b?.querySelector("svg")?.getAttribute("class") };
       }),
-      tools: [...document.querySelectorAll("[data-tools-menu] [data-tool]")].map((t) => t.textContent.trim()).filter((t) => !/^Set up/.test(t)),
+      tools: [...document.querySelectorAll("[data-page-sidebar] [data-tools-group] [data-tool]")].map((t) => t.getAttribute("data-tool")),
     }));
-    await page.keyboard.press("Escape");
-    await page.waitForTimeout(300);
+    await toRail(page);
+    await shot(page, "before-two-panes");
 
     const before = await panes(page);
     const saved = await state(page);
@@ -153,14 +182,18 @@ try {
       must(Math.abs(r.dx) <= 1 && Math.abs(r.dy) <= 1 && r.gaps.every((g) => g >= 16), JSON.stringify(r));
       return r;
     });
-    await check("P4 The rows are the Sidebar's labels then its Tools menu's (no Set up), and each place has the Sidebar's icon", async () => {
+    await check("P4 The rows are the open Sidebar's items in its order (Home's filters, sections, then all of Tools); each place has its label and icon, Tools rows none", async () => {
       const r = await page.evaluate(() =>
-        [...document.querySelectorAll("[data-picker-row]")].map((row) => ({ label: row.querySelector(".truncate")?.textContent, icon: row.querySelector("svg:not([data-picker-current])")?.getAttribute("class") ?? null })),
+        [...document.querySelectorAll("[data-picker-row]")].map((row) => ({ id: row.getAttribute("data-picker-row"), label: row.querySelector(".truncate")?.textContent, icon: row.querySelector("svg:not([data-picker-current])")?.getAttribute("class") ?? null })),
       );
-      const want = [...sidebar.main.map((m) => m.label), ...sidebar.tools];
-      must(JSON.stringify(r.map((x) => x.label)) === JSON.stringify(want), `${r.map((x) => x.label)} ≠ ${want}`);
-      for (let i = 0; i < 4; i++) must(r[i].icon?.split(" ").find((c) => c.startsWith("lucide-")) === sidebar.main[i].icon?.split(" ").find((c) => c.startsWith("lucide-")), `icon ${i}: ${r[i].icon} vs ${sidebar.main[i].icon}`);
-      must(r.slice(4).every((x) => x.icon === null), "a Tools row has an icon");
+      const lucide = (c) => c?.split(" ").find((x) => x.startsWith("lucide-"));
+      must(sidebar.ids.length > 8 && sidebar.tools.length > 0, `the Sidebar read nothing: ${JSON.stringify(sidebar.ids)}`);
+      must(JSON.stringify(r.map((x) => x.id)) === JSON.stringify(sidebar.ids), `${r.map((x) => x.id)} ≠ ${sidebar.ids}`);
+      for (const m of sidebar.main) {
+        const row = r.find((x) => x.id === m.id);
+        must(row?.label === m.label && lucide(row?.icon) === lucide(m.icon), `${m.id}: ${JSON.stringify(row)} vs ${JSON.stringify(m)}`);
+      }
+      must(r.filter((x) => sidebar.tools.includes(x.id)).every((x) => x.icon === null), "a Tools row has an icon");
       return r.map((x) => x.label).join(", ");
     });
     await check("P5 One selected row at every step (open, ↓, ↑, pointer, typing), marked ↵ and medium; it starts on the page split from; the placeholder names the target", async () => {
@@ -210,7 +243,7 @@ try {
       await page.keyboard.press("Enter");
       await page.waitForTimeout(300);
       const still = await card(page).count();
-      must(JSON.stringify(rev) === '["open-prs"]' && JSON.stringify(need) === '["home/needs"]' && /Home › Needs you/.test(needLabel) && zzz.length === 0 && /No views match\./.test(empty) && still === 1, JSON.stringify({ rev, need, needLabel, zzz, still }));
+      must(JSON.stringify(rev) === '["open-prs"]' && JSON.stringify(need) === '["home/needs"]' && /^Needs you/.test(needLabel?.trim() ?? "") && zzz.length === 0 && /No views match\./.test(empty) && still === 1, JSON.stringify({ rev, need, needLabel, zzz, still }));
       await page.locator("[data-picker-input]").fill("");
       return { rev, need, zzz };
     });
@@ -258,7 +291,19 @@ try {
       const a = (await panes(page)).length;
       await paneOf(page, "projects").locator("[data-split-down]").click();
       await page.waitForTimeout(400);
-      await paneOf(page, "home").click({ position: { x: 200, y: 300 } });
+      // a point in Home's body that is no control, so the press can't answer a card
+      const blank = await page.evaluate(() => {
+        const p = document.querySelector('[data-pane][data-pane-view="home"]');
+        const r = p.getBoundingClientRect();
+        for (let y = r.top + 80; y < r.bottom - 20; y += 24)
+          for (let x = r.left + 20; x < r.right - 20; x += 40) {
+            const el = document.elementFromPoint(x, y);
+            if (el && p.contains(el) && !el.closest("button, a, input, textarea, label, [role=button], [role=menuitem], [role=checkbox], [data-pane-header], [tabindex]:not([data-pane])")) return { x: x - r.left, y: y - r.top };
+          }
+        return null;
+      });
+      must(blank, "no point in Home's body free of controls");
+      await paneOf(page, "home").click({ position: blank });
       await page.waitForTimeout(400);
       const b = await panes(page);
       const focusIn = await page.evaluate(() => document.activeElement?.closest("[data-pane]")?.getAttribute("data-pane-view") ?? document.activeElement?.tagName);
@@ -282,6 +327,7 @@ try {
   {
     const page = await open("desktop");
     await openBeside(page, "projects");
+    await toRail(page);
     const split = async () => {
       await paneOf(page, "projects").locator("[data-split-right]").click();
       await page.waitForTimeout(400);
@@ -346,6 +392,7 @@ try {
   {
     const page = await open("desktop", { video: "split-type-enter" });
     await openBeside(page, "projects");
+    await toRail(page);
     await page.waitForTimeout(600);
     await paneOf(page, "projects").locator("[data-split-right]").click();
     await page.waitForTimeout(900);
@@ -364,12 +411,12 @@ try {
   {
     const page = await open("desktop", { video: "keyboard" });
     await openBeside(page, "projects");
-    await check("P15 \\ in a pane opens the picker with its field focused; Esc restores the layout and puts the focus back in that pane", async () => {
-      await paneOf(page, "home").click({ position: { x: 200, y: 300 } });
+    await check("P15 - in a pane opens the picker with its field focused; Esc restores the layout and puts the focus back in that pane", async () => {
+      await focusHome(page);
       await page.evaluate(() => document.activeElement instanceof HTMLElement && document.activeElement.blur());
       const s0 = await state(page);
       const n0 = (await panes(page)).length;
-      await page.keyboard.press("\\");
+      await page.keyboard.press("-");
       await page.waitForTimeout(400);
       const opened = await page.evaluate(() => document.activeElement?.matches("[data-picker-input]") && document.querySelectorAll("[data-pane]").length);
       await page.keyboard.press("Escape");
@@ -379,7 +426,7 @@ try {
       must(opened === n0 + 1 && s1.layout === s0.layout && focusIn === "home" && (await panes(page)).length === n0, JSON.stringify({ opened, n0, focusIn }));
     });
     await check("P9 The page's keys are dead while the picker is open: ? opens no shortcut sheet there (and does when it is closed)", async () => {
-      await paneOf(page, "home").click({ position: { x: 200, y: 300 } });
+      await focusHome(page);
       await page.evaluate(() => document.activeElement instanceof HTMLElement && document.activeElement.blur());
       const sheet = () => page.locator("[data-key-help]").count();
       await page.keyboard.press("Shift+Slash");
@@ -399,18 +446,11 @@ try {
       return { closed, open, typed };
     });
     await check("P9 j with the picker open moves no Home selection: it is typed into the field", async () => {
-      // Home's Needs you list is where j and k walk the cards. Home takes the focus by its header's free space: a press in the
-      // list could land on an answer, and two presses there answer it
-      const focusHome = async () => {
-        const h = paneOf(page, "home").locator("[data-pane-header]");
-        const b = await h.boundingBox();
-        await h.click({ position: { x: Math.round(b.width * 0.55), y: Math.round(b.height / 2) } });
-        await page.waitForTimeout(300);
-      };
-      await focusHome();
+      // Home's Needs you list is where j and k walk the cards
+      await focusHome(page);
       await page.locator('[data-page-sidebar] [data-feed-filter="needs"]').first().click();
       await page.waitForTimeout(1200);
-      await focusHome();
+      await focusHome(page);
       await page.evaluate(() => document.activeElement instanceof HTMLElement && document.activeElement.blur());
       const selected = () => page.evaluate(() => {
         const cards = [...document.querySelectorAll('[data-pane-view="home"] [data-selected=""]')];
@@ -431,14 +471,14 @@ try {
       await page.keyboard.press("Escape");
       await page.waitForTimeout(300);
       // back to All on the Home pane (a Sidebar filter acts on the focused pane, which Esc left on Projects)
-      await focusHome();
+      await focusHome(page);
       await page.locator('[data-page-sidebar] [data-feed-filter="all"]').first().click();
       await page.waitForTimeout(800);
       must(before !== null && during === before && typed === "jj", JSON.stringify({ before, during, typed }));
       return { before, during, typed };
     });
-    await check("P6 Keyboard only: focus Split right, Enter, ↓, Enter fills the new pane with the row selected (Reviews)", async () => {
-      await paneOf(page, "projects").locator("[data-split-right]").focus();
+    await check("P6 Keyboard only: focus Split down, Enter, ↓, Enter fills the new pane with the row selected (Reviews)", async () => {
+      await paneOf(page, "projects").locator("[data-split-down]").focus();
       await page.keyboard.press("Enter");
       await page.waitForTimeout(400);
       await page.keyboard.press("ArrowDown");
@@ -590,6 +630,7 @@ try {
   {
     const page = await open("desktop");
     await openBeside(page, "projects");
+    await toRail(page);
     // long tasks from the click to the first frame that draws the picker, read at that frame
     const long = (js) =>
       page.evaluate(async (js) => {
@@ -630,7 +671,8 @@ try {
         splitM.push(await long(`document.querySelector('[data-pane-view="projects"] [data-split-right]').click()`));
         await esc();
       }
-      const beside = await long(`document.querySelector('[data-page-sidebar] [data-beside="chat"]').click()`);
+      // Open beside, as the rail does it: Ctrl+click on Chat
+      const beside = await long(`document.querySelector('[data-page-sidebar] [data-nav="chat"]').dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, ctrlKey: true }))`);
       const worst = (xs) => Math.max(0, ...xs.flatMap((x) => x.during));
       const idle = Math.max(0, ...[...change, ...splitM, ...focus].flatMap((x) => x.idle));
       const r = { idle, focusChange: worst(focus), changeCold: worst(change.slice(0, 1)), change: worst(change.slice(1)), splitCold: worst(splitM.slice(0, 1)), split: worst(splitM.slice(1)), openBeside: worst([beside]), runs: { change, split: splitM, focus, beside } };
@@ -645,6 +687,7 @@ try {
   {
     const page = await open("desktop", { dark: true });
     await openBeside(page, "projects");
+    await toRail(page);
     await paneOf(page, "projects").locator("[data-split-right]").click();
     await page.waitForTimeout(500);
     await shot(page, "split-picker-dark");
@@ -670,7 +713,7 @@ try {
   }
   {
     const page = await open("tablet");
-    await openBeside(page, "projects");
+    await railBeside(page, "projects");
     await check("1180: Split down opens the picker in the new pane; a pick fills it", async () => {
       await paneOf(page, "projects").locator("[data-split-down]").click();
       await page.waitForTimeout(500);
@@ -710,6 +753,10 @@ try {
     });
     await page.context().close();
   }
+  await check("Read-only: no answer, defer or other owner write left the page", async () => {
+    must(routed > 0 && !writes.length, `${routed} routed; writes: ${writes.join(", ")}`);
+    return { routed };
+  });
 } finally {
   for (const c of contexts) await c.close().catch(() => {});
   await browser.close();

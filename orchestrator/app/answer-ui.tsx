@@ -42,7 +42,7 @@ export function Options({ options, disabled, label = "Options" }: { options: Opt
         {sorted.map((o) => {
           const primary = o.pressed ?? o.recommended;
           return (
-            <Btn key={o.key} tone={primary ? "primary" : "outline"} className={cn("border", primary && "border-transparent")} aria-pressed={o.pressed} disabled={disabled} onClick={o.onPick} {...o.data}>
+            <Btn key={o.key} tone={primary ? "primary" : "outline"} className={cn("h-auto min-h-9 max-w-full border text-start whitespace-normal [overflow-wrap:anywhere]", primary && "border-transparent")} aria-pressed={o.pressed} disabled={disabled} onClick={o.onPick} {...o.data}>
               {o.label}
             </Btn>
           );
@@ -112,9 +112,10 @@ export function Fold({ label, className, children, ...data }: { label: ReactNode
   return (
     <Collapsible open={open} onOpenChange={setOpen} className={className} {...data}>
       <CollapsibleTrigger asChild>
-        <Btn tone="ghost" size="sm" className="-ml-2 h-7 gap-1 px-2 text-xs font-normal text-muted-foreground" data-fold-toggle="">
-          <ChevronRight className={cn("size-3.5 transition-transform", open && "rotate-90")} aria-hidden />
-          {label}
+        {/* the label wraps (2026-11-21): one long "Details: …" line pushed the phone's whole page sideways */}
+        <Btn tone="ghost" size="sm" className="-ml-2 h-auto min-h-7 max-w-full items-start justify-start gap-1 px-2 py-1.5 text-start text-xs font-normal whitespace-normal text-muted-foreground" data-fold-toggle="">
+          <ChevronRight className={cn("mt-px size-3.5 transition-transform", open && "rotate-90")} aria-hidden />
+          <span className="min-w-0 [overflow-wrap:anywhere]">{label}</span>
         </Btn>
       </CollapsibleTrigger>
       <CollapsibleContent forceMount className="data-[state=closed]:hidden">

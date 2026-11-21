@@ -8,7 +8,7 @@ import { PANEL_PATH } from "./open-proof.ts";
 import { gate, write } from "./store.ts";
 import { Button } from "./ui/button.tsx";
 import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyTitle } from "./ui/empty.tsx";
-import { Item, ItemActions, ItemContent, ItemDescription, ItemMedia, ItemTitle } from "./ui/item.tsx";
+import { Item, ItemActions, ItemContent, ItemDescription, ItemMedia, ItemTitle, WITH_DESCRIPTION } from "./ui/item.tsx";
 import { cn } from "./ui/utils.ts";
 import { startSteps } from "./start-steps.ts";
 
@@ -23,7 +23,7 @@ function Marker({ n, done }: { n: number; done: boolean }) {
 function Step({ n, done, title, text, action }: { n: number; done: boolean; title: string; text: string; action?: ReactNode }) {
   return (
     <Item variant="outline" size="sm" data-start-step={n}>
-      <ItemMedia>
+      <ItemMedia className={WITH_DESCRIPTION}>
         <Marker n={n} done={done} />
       </ItemMedia>
       <ItemContent>

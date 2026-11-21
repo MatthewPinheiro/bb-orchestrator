@@ -12,7 +12,7 @@ import { MULTIPLAYER_CHANNEL } from "./multiplayer/contract.ts";
 import { QUEUE_CHANNEL } from "./review-queue/contract.ts";
 import { pageContract } from "./cloud/contract.ts";
 import { cloudEmptyState } from "./cloud/core/setup.ts";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { ExperimentalBadge, PluginNavPanelProps } from "@get-bb/plugin-sdk/app";
 import { definePluginApp, experimental_useRpcQuery, useBbNavigate, useRealtime } from "@get-bb/plugin-sdk/app";
 import { CHANGED_CHANNEL, rpcContract } from "./contract.ts";
@@ -28,7 +28,7 @@ import type { SharedRefs } from "./app/ref-text.tsx";
 import { DeliverablesView, inReview, inScope } from "./app/deliverables.tsx";
 import { ReviewsView } from "./app/reviews.tsx";
 import { ReviewQueueView } from "./app/review-queue.tsx";
-import { scopeEntryOf } from "./app/kit.ts";
+import { ownerCounts, ownerCountsLabel, scopeEntryOf } from "./app/kit.ts";
 import { pointerPressed } from "./app/store.ts";
 import { beside, besideOf, close, dock, dropAt, findPane, fits, fitSizes, land, panes, parse, setRoute, setSizes, single, split, type Edge, type Layout } from "./app/layout.ts";
 import { dragFrom } from "./app/drag.ts";
@@ -45,7 +45,7 @@ import { TooltipProvider } from "./app/ui/tooltip.tsx";
 import { PANEL_PATH } from "./app/open-proof.ts";
 import { shownTabs } from "./app/hidden-tabs.ts";
 import { MAIN, filterOfPath, navOf, placeOf } from "./app/nav.ts";
-import { BottomBar, HOME_FILTERS, ICONS, PageSidebar, PlaceLinks, ToolsMenu } from "./app/page-nav.tsx";
+import { BottomBar, HOME_FILTERS, ICONS, PageSidebar, PlaceLinks } from "./app/page-nav.tsx";
 import { ViewPicker } from "./app/view-picker.tsx";
 import { pickerRowsOf } from "./app/picker-rows.ts";
 import { Button } from "./app/ui/button.tsx";
@@ -121,8 +121,8 @@ function useOrchestratorBadge(): ExperimentalBadge | null {
       void srefetch.current();
     }, []),
   );
-  const n = (q.data?.badge ?? 0) + inReview(dq.data).length + (sq.data?.badge ?? 0);
-  return n > 0 ? { count: n, label: `${n} ${n === 1 ? "item needs" : "items need"} you` } : null;
+  const c = ownerCounts(q.data, dq.data, sq.data);
+  return c.total > 0 ? { count: c.total, label: ownerCountsLabel(c) } : null;
 }
 
 const LAYOUT_KEY = "orchestrator.layout.v2";
@@ -322,10 +322,6 @@ function OrchestratorPanel({ subPath }: PluginNavPanelProps) {
     sideW.current = { ...sideW.current, [rail ? "rail" : "open"]: Math.round(w) };
     draw();
   });
-  useEffect(() => {
-    setCompactNow(compact);
-    return () => setCompactNow(false);
-  }, [compact]);
   const shown = new Set(solo ? [findPane(layout, layout.focus)?.route.view] : panes(layout.root).map((p) => p.route.view));
 
   const needs = useNeedsYou();
@@ -383,9 +379,11 @@ function OrchestratorPanel({ subPath }: PluginNavPanelProps) {
   }, []);
   const cloud = experimental_useRpcQuery({ contract: pageContract, method: "cs.available", input: null, enabled: shown.has("cloud") });
   const cloudOn = cloud.data?.available === true;
-  const reviewCount = inReview(deliverables.data).length;
+  // every count the page draws is a part of the rail badge's number (kit.ts ownerCounts), so they add up to it
+  const owner = ownerCounts(needs.data, deliverables.data, scope.data);
+  const reviewCount = owner.delivered;
   // what waits in the Scope tab, as it lists it: its open cards and its projects' scoping deliverables to review
-  const scopeWaiting = (scope.data?.badge ?? 0) + (deliverables.data ?? []).filter((d) => inScope(d) && !!scope.data?.projects.some((p) => p.slug === d.project)).length;
+  const scopeWaiting = owner.scope;
   const latest = useRef({ needs, board, projects, agents, shown, deliverables, config, scope });
   latest.current = { needs, board, projects, agents, shown, deliverables, config, scope };
   const refetchAll = useCallback(() => {
@@ -491,7 +489,7 @@ function OrchestratorPanel({ subPath }: PluginNavPanelProps) {
   const views = visible.map((v) => ({ id: v.id, label: v.label }));
   // the nav's counts: Home's filters from the feed read, the rest as the tabs had them
   const newCount = feed.data && feed.data.newCount > 0 ? (feed.data.newCount >= 50 ? "50+" : feed.data.newCount) : undefined;
-  const filterCounts = { all: newCount, needs: needs.data?.badge || undefined, delivered: reviewCount || undefined, alerts: feed.data?.counts.alerts || undefined };
+  const filterCounts = { all: newCount, needs: owner.needs || undefined, delivered: reviewCount || undefined, alerts: feed.data?.counts.alerts || undefined };
   const counts: Record<string, number | string | undefined> = {
     // what waits in its Scoping group (every unanswered card and deliverable to review, whole projects and tasks alike), else
     // a lead's note you haven't opened (PLAN 3.4); never a phone notification
@@ -596,6 +594,17 @@ function OrchestratorPanel({ subPath }: PluginNavPanelProps) {
     const p = findPane(lay.current!, lay.current!.focus)!;
     act(p.id, { view: "home", path: [], params: f === "all" ? {} : { filter: f } }, p.route.view === "home" ? "replace" : "push");
   };
+  // a phone opens on Needs you (2026-11-21, the owner: "mostly you're still living in 'needs you' and 'delivered'"); a
+  // link names its own place, and the web keeps its saved layout
+  const landed = useRef(false);
+  useEffect(() => {
+    if (landed.current || !compact) return;
+    landed.current = true;
+    if (hereRef.current !== "") return;
+    const p = findPane(lay.current!, lay.current!.focus);
+    if (p && !(p.route.view === "home" && p.route.params.filter === "needs")) act(p.id, filterRoute("needs"), "replace");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [compact]);
 
   // The view picker (feel spec part 1). Its rows are the Sidebar's: nav.main with its icons, then Tools without "Set up"
   const pickerRows = pickerRowsOf(nav, ICONS, HOME_FILTERS);
@@ -725,8 +734,6 @@ function OrchestratorPanel({ subPath }: PluginNavPanelProps) {
             item={route.params.item ?? null}
             onItem={(key) => to({ view: "home", path: [], params: { ...(route.params.filter ? { filter: route.params.filter } : {}), ...(key ? { item: key } : {}) } })}
             body={filter === "needs" ? <NeedsYouView q={needs} refetchAll={refetchAll} mons={mons} threads={threads} accents={accents} /> : filter === "delivered" ? <DeliverablesView q={deliverables} refetchAll={refetchAll} files={route.params.files === "1"} /> : undefined}
-            onFilter={(f) => to({ view: "home", path: [], params: f === "all" ? {} : { filter: f } }, "replace")}
-            filtersInNav={!compact}
             onItemOpen={onItemOpen(id)}
             width={width}
             agents={board.data?.agents}
@@ -827,7 +834,7 @@ function OrchestratorPanel({ subPath }: PluginNavPanelProps) {
               onHintDone={hintDone}
             />
           </div>
-          {phoneNav ? <BottomBar nav={nav} view={focusedView} needsYou={needs.data?.badge ?? 0} onGo={go} /> : null}
+          {phoneNav ? <BottomBar nav={nav} view={focusedView} filter={focusedFilter ?? "all"} counts={{ needs: owner.needs, delivered: owner.delivered, projects: owner.scope }} onGo={go} onFilter={onFilter} /> : null}
         </div>
       </div>
     </div>
@@ -842,43 +849,6 @@ function usePageTitle({ subPath }: PluginNavPanelProps) {
   return { title: MAIN.find((m) => m.id === view)?.label ?? VIEWS.find((v) => v.id === view)?.label ?? "Home" };
 }
 
-/** ⚙ Tools in bb's title bar, on a phone only (the web has them at the Sidebar's foot). */
-// the page's own compact flag (its width, not the window's), so ⚙ shows exactly when the Sidebar and its Tools don't
-let compactNow = false;
-const compactSubs = new Set<() => void>();
-function setCompactNow(v: boolean) {
-  if (v === compactNow) return;
-  compactNow = v;
-  for (const f of compactSubs) f();
-}
-const subscribeCompact = (f: () => void) => {
-  compactSubs.add(f);
-  return () => void compactSubs.delete(f);
-};
-
-function PhoneTools() {
-  const navigate = useBbNavigate();
-  const phone = useSyncExternalStore(subscribeCompact, () => compactNow);
-  const config = experimental_useRpcQuery({ contract: rpcContract, method: "config", input: null });
-  const scope = useScope();
-  if (!phone) return null;
-  const inUse = new Set(config.data?.shown ?? []);
-  const nav = navOf(shownTabs(VIEWS, new Set(config.data?.hiddenTabs ?? []), scope.data?.badge ?? 0, new Set(), inUse, PLACES), inUse);
-  const go = (id: string) => navigate.toPluginPanel(PANEL_PATH, { subPath: VIEWS.find((v) => v.id === id)?.subPath ?? id });
-  return (
-    <ToolsMenu
-      tools={nav.tools}
-      side="bottom"
-      onGo={go}
-      trigger={
-        <Button type="button" variant="ghost" size="icon" aria-label="Tools" data-phone-tools="">
-          <Settings />
-        </Button>
-      }
-    />
-  );
-}
-
 export default definePluginApp((app) => {
   app.slots.navPanel({
     id: "orchestrator",
@@ -888,7 +858,6 @@ export default definePluginApp((app) => {
     component: OrchestratorPanel,
     experimental_useBadge: useOrchestratorBadge,
     experimental_usePageTitle: usePageTitle,
-    headerContent: PhoneTools,
   });
   // the sidebar: each role agent's Pokémon, role and priority under its thread title
   app.slots.experimental_threadRowMetadata({ id: "agent", order: 0, useData: useRowData, component: RowMeta });

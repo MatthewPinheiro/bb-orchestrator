@@ -1,6 +1,6 @@
 // The page's navigation (Home first, step 2, 2026-11-20): shadcn's Sidebar on web; on a phone a bottom bar (a plugin part, no shadcn equivalent) and ⚙ Tools.
 import type { CSSProperties, MouseEvent, PointerEvent, ReactNode } from "react";
-import { Columns2, FolderKanban, GitPullRequest, GripVertical, House, MessageCircle, PanelLeft, Settings } from "lucide-react";
+import { Columns2, Ellipsis, FolderKanban, GitPullRequest, GripVertical, House, Inbox, MessageCircle, PackageCheck, PanelLeft, Settings } from "lucide-react";
 import type { FeedFilter } from "./feed.tsx";
 import { placeOf, type Nav, type NavLink, type NavMain } from "./nav.ts";
 import { Badge } from "./ui/badge.tsx";
@@ -113,7 +113,7 @@ export function PageSidebar({ nav, view, filter, filterCounts, counts, rail, onT
   // a place's pages, then its sections in use (Reviews: Multiplayer, CodeRabbit), each its own item
   const subsOf = (m: NavMain) => [...m.subs, ...(nav.sections[m.id] ?? [])];
   const homeButton = (m: NavMain) => (
-    <SidebarMenuButton type="button" tooltip={rail ? m.label : undefined} isActive={m.id !== "home" ? view === m.id : rail && view === "home"} className={SOURCE} data-nav={m.id} onPointerDown={(e) => onDrag(e, m.id)} onClick={rail && m.id === "home" ? undefined : (e) => (besideClick(e) ? onBeside(m.id) : m.id === "home" ? onFilter("all") : onGo(m.id))}>
+    <SidebarMenuButton type="button" tooltip={rail ? m.label : undefined} isActive={m.id !== "home" ? view === m.id : rail && view === "home"} className={cn(SOURCE, "pr-8")} data-nav={m.id} onPointerDown={(e) => onDrag(e, m.id)} onClick={rail && m.id === "home" ? undefined : (e) => (besideClick(e) ? onBeside(m.id) : m.id === "home" ? onFilter("all") : onGo(m.id))}>
       {ICONS[m.id]}
       <span>{m.label}</span>
     </SidebarMenuButton>
@@ -226,32 +226,59 @@ export function PageSidebar({ nav, view, filter, filterCounts, counts, rail, onT
   );
 }
 
-/** The phone's four places. Not drawn while an item is open full screen. */
-export function BottomBar({ nav, view, needsYou, onGo }: { nav: Nav; view: string; needsYou: number; onGo: (id: string) => void }) {
+/** What the phone bar's More holds: the feed and Alerts (Home's other filters), Reviews and its sections in use. */
+export function phoneMore(nav: Nav): NavLink[] {
+  return [{ id: "home/all", label: "Feed" }, { id: "home/alerts", label: "Alerts" }, { id: "open-prs", label: "Reviews" }, ...(nav.sections["open-prs"] ?? [])];
+}
+
+/**
+ * The phone's bar (2026-11-21, the owner: "mostly you're still living in 'needs you' and 'delivered'", and "the 'needs
+ * you' notifications on 'delivered' need to be showing"): Needs you and Delivered first, each with its count, then
+ * Projects (its Scope count) and Chat, then More (the feed, Alerts, Reviews and Tools; Tools left bb's title bar for it).
+ * The three counts are the parts of the rail badge's number (kit.ts ownerCounts). The icons sit 8 px under the top border
+ * (the owner: "there's no padding on top"). Not drawn while an item is open full screen. A standard tab bar: 48 px buttons and a 1 px border, and no safe-area padding of its own:
+ * bb's app shell already pads the bottom inset under every page (padding it here too left 34 px inside the bar and 34 px
+ * of empty strip under it on an iPhone).
+ */
+export function BottomBar({ nav, view, filter, counts, onGo, onFilter }: { nav: Nav; view: string; filter: FeedFilter; counts: { needs: number; delivered: number; projects: number }; onGo: (id: string) => void; onFilter: (f: FeedFilter) => void }) {
   const place = placeOf(view);
+  const on = (f: FeedFilter) => view === "home" && filter === f;
+  const tabs: { id: string; label: string; icon: ReactNode; count: number; active: boolean; go: () => void }[] = [
+    { id: "needs", label: "Needs you", icon: <Inbox />, count: counts.needs, active: on("needs"), go: () => onFilter("needs") },
+    { id: "delivered", label: "Delivered", icon: <PackageCheck />, count: counts.delivered, active: on("delivered"), go: () => onFilter("delivered") },
+    { id: "projects", label: "Projects", icon: ICONS.projects, count: counts.projects, active: place === "projects", go: () => onGo("projects") },
+    { id: "chat", label: "Chat", icon: ICONS.chat, count: 0, active: place === "chat", go: () => onGo("chat") },
+  ];
+  const moreOn = !tabs.some((t) => t.active);
+  const pick = (id: string) => (id.startsWith("home/") ? onFilter(id.slice(5) as FeedFilter) : onGo(id));
+  const cell = (active: boolean) => `relative h-12 w-full min-w-0 flex-col justify-start gap-0.5 rounded-none px-0 pt-2 pb-0 text-[11px] leading-4 font-normal [&_svg:not([class*='size-'])]:size-5 ${active ? "text-foreground" : "text-muted-foreground"}`;
   return (
-    <nav aria-label="Orchestrator" data-bottom-bar="" className="grid shrink-0 grid-cols-4 border-t bg-background pb-[env(safe-area-inset-bottom)]">
-      {nav.main.map((m) => (
-        <Button
-          key={m.id}
-          type="button"
-          variant="ghost"
-          data-nav={m.id}
-          aria-current={place === m.id ? "page" : undefined}
-          onClick={() => onGo(m.id)}
-          className={`relative h-auto flex-col gap-0.5 rounded-none py-2 text-xs font-normal [&_svg:not([class*='size-'])]:size-5 ${place === m.id ? "text-foreground" : "text-muted-foreground"}`}
-        >
+    <nav aria-label="Orchestrator" data-bottom-bar="" className="grid shrink-0 grid-cols-5 border-t bg-background">
+      {tabs.map((t) => (
+        <Button key={t.id} type="button" variant="ghost" data-nav={t.id} aria-current={t.active ? "page" : undefined} onClick={t.go} className={cell(t.active)}>
           <span className="relative">
-            {ICONS[m.id]}
-            {m.id === "home" && needsYou > 0 ? (
-              <Badge variant="destructive" className="absolute -top-1.5 -right-2.5 h-4 min-w-4 rounded-full px-1 text-[10px] tabular-nums" data-bottom-count="">
-                {needsYou}
+            {t.icon}
+            {t.count > 0 ? (
+              <Badge variant={t.id === "needs" ? "destructive" : "default"} className="absolute -top-1.5 -right-2.5 h-4 min-w-4 rounded-full px-1 text-[10px] tabular-nums" data-bottom-count={t.id}>
+                {t.count}
               </Badge>
             ) : null}
           </span>
-          {m.label}
+          {t.label}
         </Button>
       ))}
+      <ToolsMenu
+        tools={nav.tools}
+        more={phoneMore(nav)}
+        side="top"
+        onGo={pick}
+        trigger={
+          <Button type="button" variant="ghost" data-nav="more" aria-current={moreOn ? "page" : undefined} className={cell(moreOn)}>
+            <Ellipsis />
+            More
+          </Button>
+        }
+      />
     </nav>
   );
 }

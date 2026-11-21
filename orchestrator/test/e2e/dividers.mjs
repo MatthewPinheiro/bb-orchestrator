@@ -62,6 +62,15 @@ async function openBeside(page, view) {
   await page.locator(`[data-page-sidebar] [data-beside="${view}"]`).first().click();
   await page.waitForTimeout(1200);
 }
+// at 1180 a second pane fits only beside the rail (since 1.37.1 the Sidebar folds into it only by its toggle)
+async function railBeside(page, view) {
+  if (!(await page.locator("[data-page-sidebar][data-rail]").count())) {
+    await page.locator("[data-sidebar-toggle]").first().click();
+    await page.waitForTimeout(800);
+  }
+  await page.locator(`[data-page-sidebar] [data-nav="${view}"]`).first().click({ modifiers: ["Control"] });
+  await page.waitForTimeout(1200);
+}
 /** The divider's look, read from the page: its box, fills, its centre line and its grip. */
 const look = (page, nth = 0) =>
   page.evaluate((n) => {
@@ -236,6 +245,39 @@ try {
       must(n > 20 && !misses.length && smooth.s10.slotEqualsPane && gaps.p95 <= Math.max(2 * smooth.idle.p95, 17.5) && gaps.max <= 50, JSON.stringify(smooth.s10));
       return { frames: n, misses: misses.length, gaps, idle: smooth.idle, long: long.length };
     });
+    await check("The resize cursor without a page-wide rule: none on hover or in a drag; past the minimum a layer keeps the resize cursor; it goes at the release, a press makes none, and the next click reaches a pane", async () => {
+      const rules = () => page.evaluate(() => document.adoptedStyleSheets.flatMap((x) => [...x.cssRules].map((r) => r.cssText)).filter((t) => /cursor/.test(t)));
+      const covers = () => page.locator("[data-resize-cover]").count();
+      const b = await d.boundingBox();
+      const [cx, y] = [b.x + b.width / 2, b.y + 300];
+      await page.mouse.move(cx, y);
+      await page.waitForTimeout(200);
+      const hover = await rules();
+      await page.mouse.down();
+      await page.mouse.move(cx - 40, y, { steps: 4 });
+      const box = await page.evaluate(() => document.querySelector("[data-panes]").getBoundingClientRect().toJSON());
+      // past the left pane's minimum the divider stops and the pointer leaves it
+      await page.mouse.move(box.left + 60, y, { steps: 8 });
+      await page.waitForTimeout(150);
+      const during = { rules: await rules(), covers: await covers(), cursor: await page.evaluate(([x, y]) => { const el = document.elementFromPoint(x, y); return `${el?.hasAttribute("data-resize-cover") ? "cover" : el?.tagName}:${el && getComputedStyle(el).cursor}`; }, [box.left + 60, y]) };
+      await page.mouse.up();
+      await page.waitForTimeout(200);
+      const afterUp = await covers();
+      const b2 = await d.boundingBox();
+      await page.mouse.move(b2.x + b2.width / 2, y);
+      await page.mouse.down();
+      await page.waitForTimeout(150);
+      const pressed = await covers();
+      await page.mouse.up();
+      await page.waitForTimeout(150);
+      const reach = await page.evaluate(([x, y]) => !!document.elementFromPoint(x, y)?.closest("[data-pane]"), [box.left + 150, box.top + 120]);
+      const r = { hover, during, afterUp, pressed, afterPress: await covers(), reach };
+      // back to the even split for the checks after this one
+      await page.mouse.dblclick(b2.x + b2.width / 2, y);
+      await page.waitForTimeout(400);
+      must(!hover.length && !during.rules.length && during.covers === 1 && /^cover:col-resize$/.test(during.cursor) && !afterUp && !pressed && !r.afterPress && reach, JSON.stringify(r));
+      return r;
+    });
     save();
     await check("A drag leaves no text selected", async () => {
       const sel = await page.evaluate(() => String(getSelection()).trim());
@@ -281,7 +323,7 @@ try {
   }
   {
     const page = await open("tablet");
-    await openBeside(page, "projects");
+    await railBeside(page, "projects");
     await check("1180 touch: a finger 10 px off the line drags the divider (24 px hit area)", async () => {
       const b = await page.locator("[data-panes] [data-divider]").first().boundingBox();
       const before = (await panes(page)).map((p) => p.w);

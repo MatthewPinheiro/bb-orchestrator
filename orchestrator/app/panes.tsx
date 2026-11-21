@@ -163,6 +163,41 @@ export function PaneLayout(p: Props) {
     queueMicrotask(place);
   }, [p.layout.root, p.solo, p.solo ? p.layout.focus : null, place]);
   useEffect(() => () => ro.current?.disconnect(), []);
+  // the library's own cursor is a page-wide rule that restyles every element on each change (S10); this layer holds it instead
+  useEffect(() => {
+    const b = box.current;
+    if (!b) return;
+    let cover: HTMLDivElement | null = null;
+    const active = () => Array.from(b.querySelectorAll<HTMLElement>('[data-separator="active"]'));
+    const off = () => {
+      window.removeEventListener("pointermove", show, true);
+      cover?.remove();
+      cover = null;
+    };
+    // from the first move, so a press or a double-click keeps the divider as its target
+    const show = () => {
+      if (cover) return;
+      const on = active();
+      if (!on.length) return off();
+      const dirs = new Set(on.map((s) => s.getAttribute("aria-orientation")));
+      cover = document.createElement("div");
+      cover.dataset.resizeCover = "";
+      Object.assign(cover.style, { position: "fixed", inset: "0", zIndex: "2147483647", contain: "strict", cursor: dirs.size > 1 ? "move" : dirs.has("horizontal") ? "row-resize" : "col-resize" });
+      document.body.append(cover);
+    };
+    const mo = new MutationObserver(() => (active().length ? window.addEventListener("pointermove", show, true) : off()));
+    mo.observe(b, { subtree: true, attributes: true, attributeFilter: ["data-separator"] });
+    window.addEventListener("pointerup", off, true);
+    window.addEventListener("pointercancel", off, true);
+    window.addEventListener("blur", off);
+    return () => {
+      mo.disconnect();
+      off();
+      window.removeEventListener("pointerup", off, true);
+      window.removeEventListener("pointercancel", off, true);
+      window.removeEventListener("blur", off);
+    };
+  }, []);
   const hold = useCallback((id: string, el: HTMLElement | null) => {
     if (el) els.current.set(id, el);
     else els.current.delete(id);
@@ -231,9 +266,9 @@ const GUTTER_CLASS = cn(
   "data-[separator=active]:[&>div]:border-primary data-[separator=active]:[&>div]:bg-primary data-[separator=active]:[&>div]:text-primary-foreground",
 );
 // the grip sits at --grip-at along the gutter, off any junction with a crossing gutter
-const GUTTER_ROW = "[&>div]:absolute [&>div]:top-(--grip-at) [&>div]:left-1/2 [&>div]:-translate-x-1/2 [&>div]:-translate-y-1/2 w-2 border-x border-border before:inset-y-0 before:left-1/2 before:w-0.5 before:-translate-x-1/2 after:w-3 [@media(pointer:coarse)]:after:w-6";
+const GUTTER_ROW = "cursor-col-resize [&>div]:absolute [&>div]:top-(--grip-at) [&>div]:left-1/2 [&>div]:-translate-x-1/2 [&>div]:-translate-y-1/2 w-2 border-x border-border before:inset-y-0 before:left-1/2 before:w-0.5 before:-translate-x-1/2 after:w-3 [@media(pointer:coarse)]:after:w-6";
 const GUTTER_COL =
-  "[&>div]:absolute [&>div]:top-1/2 [&>div]:left-(--grip-at) [&>div]:-translate-x-1/2 [&>div]:-translate-y-1/2 border-y border-border aria-[orientation=horizontal]:h-2 before:inset-x-0 before:top-1/2 before:h-0.5 before:-translate-y-1/2 aria-[orientation=horizontal]:after:h-3 [@media(pointer:coarse)]:aria-[orientation=horizontal]:after:h-6";
+  "cursor-row-resize [&>div]:absolute [&>div]:top-1/2 [&>div]:left-(--grip-at) [&>div]:-translate-x-1/2 [&>div]:-translate-y-1/2 border-y border-border aria-[orientation=horizontal]:h-2 before:inset-x-0 before:top-1/2 before:h-0.5 before:-translate-y-1/2 aria-[orientation=horizontal]:after:h-3 [@media(pointer:coarse)]:aria-[orientation=horizontal]:after:h-6";
 
 function NodeView({ node, onSizes }: { node: Node; onSizes: Props["onSizes"] }) {
   if (node.kind === "pane") return <div data-pane-slot={node.id} className="h-full min-h-0 w-full min-w-0" />;
@@ -246,6 +281,7 @@ function NodeView({ node, onSizes }: { node: Node; onSizes: Props["onSizes"] }) 
       key={node.children.map((c) => c.id).join(",")}
       id={node.id}
       orientation={row ? "horizontal" : "vertical"}
+      disableCursor
       defaultLayout={Object.fromEntries(node.children.map((c, i) => [c.id, node.sizes[i]! * 100]))}
       onLayoutChanged={(layout, meta) => {
         if (meta.isUserInteraction) onSizes(node.id, node.children.map((c) => layout[c.id] ?? 0));

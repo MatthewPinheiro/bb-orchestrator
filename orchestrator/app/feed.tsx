@@ -14,7 +14,6 @@ import { ReplyAction, ReplyButton, ReplyComposer, ReplyField, ReplyHint } from "
 import { useIdentity } from "./identity.ts";
 import { Button } from "./ui/button.tsx";
 import { Kbd } from "./ui/kbd.tsx";
-import { Tabs, TabsList, TabsTrigger } from "./ui/tabs.tsx";
 import { Btn, EmptyState, ReadState, ago, cx } from "./ui.tsx";
 import { useTouchPhone } from "./phone.ts";
 import { styleHref } from "./style-href.ts";
@@ -109,7 +108,7 @@ function useHeldOrder(live: Feed | undefined, filter: FeedFilter) {
   return { posts, waiting, adopt, mine };
 }
 
-export function FeedView({ q, filter, item, onItem, body, onFilter, filtersInNav, onItemOpen, width, agents, needs, deliverables, refetch, refetchAll, onOpenProject, onChat }: {
+export function FeedView({ q, filter, item, onItem, body, onItemOpen, width, agents, needs, deliverables, refetch, refetchAll, onOpenProject, onChat }: {
   q: FeedQuery;
   filter: FeedFilter;
   /** The opened post (its key), from the pane's route, so a reload and Back restore it */
@@ -117,9 +116,6 @@ export function FeedView({ q, filter, item, onItem, body, onFilter, filtersInNav
   onItem: (key: string | null) => void;
   /** A folded tab's own list drawn in place of the feed's (Needs you, step 3) */
   body?: ReactNode;
-  onFilter: (f: FeedFilter) => void;
-  /** The page's Sidebar draws the filters (web); else Home draws them as Tabs (phone) */
-  filtersInNav: boolean;
   /** An item open full screen on a phone, so the page hides its bottom bar */
   onItemOpen: (open: boolean) => void;
   width: number;
@@ -191,39 +187,25 @@ export function FeedView({ q, filter, item, onItem, body, onFilter, filtersInNav
   // the page header row: where you are and its count; the mic (only while voice mode is on) and Mark all read on the right
   // an empty Home is Start here alone: no filters or Mark all read (start-here mockups); the web keeps its title
   const alone = !body && filter === "all" && !!view && posts.length === 0;
-  // on a phone, one row under bb's bar: the filters as shadcn's Tabs, then the mic and Mark all read (the owner, 2026-11-20)
-  const tabs = (
-    <Tabs value={filter} onValueChange={(v) => onFilter(v as FeedFilter)} className="min-w-0 flex-1 gap-0">
-      <TabsList aria-label="Home filters" className="w-full">
-        {FILTERS.map((f) => (
-          <TabsTrigger key={f.id} value={f.id} data-feed-filter={f.id} className="flex-auto px-2">
-            {f.label}
-            {f.id === "needs" && needs?.badge ? <span className="text-muted-foreground tabular-nums">{needs.badge}</span> : null}
-          </TabsTrigger>
-        ))}
-      </TabsList>
-    </Tabs>
-  );
+  // the page header row: where you are and its count, then the mic and Mark all read. Home's filters live in the nav on
+  // both (2026-11-21): the Sidebar on the web, the bar and its More on a phone, so a phone has no filter row repeating them
   const header = alone ? (
-    filtersInNav ? (
-      <div className="flex min-h-12 shrink-0 items-center gap-2 border-b px-4 py-2" data-home-header="">
-        <h1 className="m-0 text-base font-semibold">Home</h1>
-        <span className="ml-auto flex items-center gap-1">
-          <VoiceMic />
-        </span>
-      </div>
-    ) : null
-  ) : filtersInNav ? (
     <div className="flex min-h-12 shrink-0 items-center gap-2 border-b px-4 py-2" data-home-header="">
-      {/* on a phone bb's title bar already says Home */}
-      {filtersInNav ? <h1 className="m-0 text-base font-semibold">{label}</h1> : null}
-      {shown && filtersInNav ? (
+      <h1 className="m-0 text-base font-semibold">Home</h1>
+      <span className="ml-auto flex items-center gap-1">
+        <VoiceMic />
+      </span>
+    </div>
+  ) : (
+    <div className="flex min-h-12 shrink-0 items-center gap-2 border-b px-4 py-2" data-home-header="">
+      <h1 className="m-0 text-base font-semibold">{label}</h1>
+      {shown ? (
         <span data-feed-new={filter === "all" ? String(q.data?.newCount ?? 0) : undefined} className="text-sm text-muted-foreground tabular-nums">
           {shown}
         </span>
       ) : null}
       <span className="ml-auto flex items-center gap-1">
-        {filter === "needs" && filtersInNav ? (
+        {filter === "needs" && !phone ? (
           <span className="mr-2 flex items-center gap-1 text-xs text-muted-foreground" data-key-hint="">
             <Kbd>J</Kbd>
             <Kbd>K</Kbd>
@@ -234,21 +216,18 @@ export function FeedView({ q, filter, item, onItem, body, onFilter, filtersInNav
           </span>
         ) : null}
         <VoiceMic />
-        <Btn tone="ghost" size="sm" data-mark-all="" onClick={markAll} disabled={gate.lock !== null}>
-          Mark all read
-        </Btn>
+        {phone ? (
+          <Button type="button" variant="ghost" size="icon" className="size-11" aria-label="Mark all read" title="Mark all read" data-mark-all="" onClick={markAll} disabled={gate.lock !== null}>
+            <CheckCheck />
+          </Button>
+        ) : (
+          <Btn tone="ghost" size="sm" data-mark-all="" onClick={markAll} disabled={gate.lock !== null}>
+            Mark all read
+          </Btn>
+        )}
       </span>
     </div>
-  ) : (
-    <div className="flex shrink-0 items-center gap-1 border-b px-2 py-2" data-home-header="">
-      {tabs}
-      <VoiceMic />
-      <Button type="button" variant="ghost" size="icon" aria-label="Mark all read" title="Mark all read" data-mark-all="" onClick={markAll} disabled={gate.lock !== null}>
-        <CheckCheck />
-      </Button>
-    </div>
   );
-
   const list = (
     <div ref={root} className="min-w-0">
       <style href={styleHref("orch-answer", answerCss)} precedence="default">
@@ -339,7 +318,8 @@ export function FeedView({ q, filter, item, onItem, body, onFilter, filtersInNav
       </style>
       {header}
       <div className="flex min-h-0 flex-1">
-        <div ref={scroller} className={cx("min-h-0 overflow-y-auto", !phone && pane ? "w-[456px] shrink-0 border-r" : "min-w-0 flex-1")} data-feed-scroll="">
+        {/* never sideways (2026-11-21): wide content scrolls in its own box (diagrams, code); the page itself only up and down */}
+        <div ref={scroller} className={cx("min-h-0 overflow-x-hidden overflow-y-auto", !phone && pane ? "w-[456px] shrink-0 border-r" : "min-w-0 flex-1")} data-feed-scroll="">
           <div className={!phone && !pane && !body ? "max-w-3xl" : undefined}>{body ? <div className="px-4 pt-4" data-home-body={filter}>{body}</div> : list}</div>
         </div>
         {!phone && pane ? (

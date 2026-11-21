@@ -6,7 +6,7 @@
 // Projects search: about 2,000 elements per key; the view picker's filter: about 1,800). A keystroke must change nothing
 // in the DOM but the text the owner typed.
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync, statSync } from "node:fs";
 import { after, test } from "node:test";
 import { createElement as h, type ComponentType } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -64,4 +64,18 @@ test("the view picker hides rows that don't match instead of removing them, and 
   assert.match(picker, /\{rows\.main\.length \? <CommandGroup style=\{shown\.main\.length \? undefined : off\}>\{rows\.main\.map\(row\)\}/, "every row is drawn, matching or not");
   assert.match(picker, /disabled=\{!on\.has\(r\.id\)\} style=\{on\.has\(r\.id\) \? undefined : off\}/, "a hidden row must be disabled too, or the arrows land on it");
   assert.doesNotMatch(picker, /shown\.(main|tools|filters)\.map\(row\)/, "drawing only the matches adds and removes rows per key");
+});
+
+// The same evening: the rules behind that restyle are :has() rules whose anchor is an ancestor of what they style.
+// Tailwind writes one for each group-has-* class (`:is(.group\/x:has(...) *)`), and for a has-* class that styles
+// children (`.x:has(...) > *`). Each such rule alone made every element added or removed anywhere on bb's page restyle
+// about 2,700 elements. Our nine are gone (the rows pass their own classes instead); none may come back.
+test("no Tailwind class in the plugin compiles to a :has() rule anchored above what it styles", () => {
+  const files = (dir: string): string[] => readdirSync(new URL(dir, import.meta.url)).flatMap((n) => (statSync(new URL(dir + n, import.meta.url)).isDirectory() ? files(`${dir}${n}/`) : /\.(tsx?|css)$/.test(n) ? [`${dir}${n}`] : []));
+  const offenders: string[] = [];
+  for (const f of [...files("../app/"), "../app.tsx"]) {
+    const src = readFileSync(new URL(f, import.meta.url), "utf8");
+    for (const m of src.matchAll(/(?<![\w-])(?:group|peer)-has-[^\s"'`]*|(?<![\w-])has-[^\s"'`]*?:(?:-?space-[xy]|\*|divide)[^\s"'`]*/g)) offenders.push(`${f}: ${m[0]}`);
+  }
+  assert.deepEqual(offenders, [], "a group-has-* or child-styling has-* class makes the whole page restyle on every DOM insert");
 });
