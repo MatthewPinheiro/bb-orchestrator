@@ -3,7 +3,8 @@
 // lead, its name, one state chip (kit.ts STATE_CHIP), the one number that matters as a chip, and the status's age; quiet
 // projects are one dim line. The detail (project-book.tsx) is section cards: Pinned, the goal, Needs | Blocked, then
 // Now | PRs + Record, then Timeline, Flow, Dependencies and Pathways (2026-11-20). Under 1200 px the same rows make one
-// column and a tapped row opens the project's page, with a Back row. Scoping entries are a group on top (Scope folded in).
+// column and a tapped row opens the project's page, with a Back row. Scoping entries are children of their project's row
+// (2026-11-22: they were a group on top, which showed the project twice with two different counts).
 // Priority, Hold, Archive and "Pin a document…" are in the ⋯ menu; archived projects sit behind a toggle. Above them, the
 // standing agents on one line. The writes go through the page gate (store.ts), like every other.
 //
@@ -14,7 +15,7 @@
 import { styleHref } from "./style-href.ts";
 import { useElementWidth, usePaneFits } from "./panes.tsx";
 import { usePaneId } from "./key-state.ts";
-import { useEffect, useState, type MouseEvent, type ReactNode } from "react";
+import { Fragment, useEffect, useState, type MouseEvent, type ReactNode } from "react";
 import type { z } from "zod";
 import { useBbNavigate } from "@get-bb/plugin-sdk/app";
 import { WRITES, type Agents, type Board, type Deliverables, type NeedsYou, type Projects, type Scope, type archiveProjectBody, type directMessageBody, type holdBody, type priorityBody, type projectModeBody, type roleStartBody, type startLeadBody } from "../contract.ts";
@@ -41,13 +42,14 @@ import { useIdentity } from "./identity.ts";
 import { buildLanes, type Lane } from "./lanes.ts";
 import { ownerOnScreen } from "../core/owner.ts";
 import { PathwaysPart, ProjectDetail, ProjectSections } from "./project-detail.tsx";
-import { ScopeView, ScopingRows } from "./scope.tsx";
+import { ScopeView, scopeDeliveredIn, scopeWaitingIn } from "./scope.tsx";
+import { entryTitle } from "./scope-names.ts";
 import { PANEL_PATH } from "./open-proof.ts";
 import { useTouchPhone } from "./phone.ts";
 import { ProjectBook, bookCss } from "./project-book.tsx";
 import { SearchBox, SearchHits, searchCss, useSettled } from "./search.tsx";
 import { filterHides, isWide, searchLoaded, searchedProjects } from "./source.ts";
-import { listRow, needCount, projectScopeAction, projectState, STATE_CHIP, tasksScoping } from "./kit.ts";
+import { childHits, childrenOpen, scopeExtra, listRow, plannerStuck, matchesWithScope, needCount, projectScopeAction, projectState, quietWithScope, scopeEntries, STATE_CHIP, tasksScoping, type ScopeChild } from "./kit.ts";
 import { Chip, Icon, kitCss } from "./kit-ui.tsx";
 
 import { threadCss } from "./thread-card.tsx";
@@ -333,6 +335,28 @@ const layoutCss = /* css */ `
 [data-orch] .orch-cc .k-prow .k-side { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
 [data-orch] .orch-cc .k-prow[data-quiet="true"] { min-height: 40px; padding-top: 4px; padding-bottom: 4px; }
 [data-orch] .orch-cc .k-prow[data-quiet="true"] .name { font-weight: 400; color: var(--orch-muted); }
+/* a project's scoping children (2026-11-22): the chevron in a fourth column (kept empty on the list's other rows, so the
+   counts line up), the children indented under the name */
+[data-orch] .orch-cc .k-plist:has(> .k-prow[data-fold]) > .k-prow { grid-template-columns: 32px minmax(0, 1fr) auto 32px; }
+/* the tree, measured against bb's sidebar threads under their lead (2026-11-22): one straight 1 px hairline at 70% down
+   from under the parent's face (its centre: 12 px padding + 16), no elbows; each child a full-width 6 px-radius row
+   whose content starts 16 px right of the line: a round 28 px scope-icon tile in bb's portrait slot, then a 13/16 regular
+   title (right of the project's name, as bb's) over an 11/18 second line; hover and selected share the accent
+   background; rows 1 px apart */
+[data-orch] .orch-cc .k-kids { margin-top: -2px; }
+/* every property an earlier build of these rules set is set again here: React never removes a hoisted <style>, so a
+   window open across an update keeps the old rules beside these (2026-11-22: the old list border drew a second line) */
+[data-orch] .orch-cc .k-kids > ul { position: relative; display: flex; flex-direction: column; gap: 1px; margin: 0 0 4px; padding: 0; border: 0; list-style: none; }
+[data-orch] .orch-cc .k-kids > ul::before { content: ""; position: absolute; top: 0; bottom: 0; left: 28px; z-index: 1; pointer-events: none; border-left: 1px solid var(--border); opacity: 0.7; }
+[data-orch] .orch-cc .k-krow { position: static; display: grid; grid-template-columns: 28px minmax(0, 1fr); column-gap: 6px; flex-direction: row; flex-wrap: nowrap; align-items: center; justify-content: stretch; gap: 0 6px; min-height: 28px; margin: 0; padding: 5px 8px 5px 44px; border: 0; border-radius: 6px; cursor: pointer; }
+[data-orch] .orch-cc .k-krow::before { content: none; }
+[data-orch] .orch-cc .k-krow:hover, [data-orch] .orch-cc .k-krow[data-selected="true"] { background: var(--accent); }
+[data-orch] .orch-cc .k-krow .k-main { display: flex; flex-direction: column; align-items: flex-start; gap: 0; min-width: 0; max-width: 100%; line-height: 16px; }
+[data-orch] .orch-cc .k-krow .name { display: block; max-width: 100%; height: 16px; text-align: left; padding: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; line-height: 16px; font-weight: 400; color: var(--foreground); }
+[data-orch] .orch-cc .k-krow .k-sub { display: flex; align-items: center; gap: 6px; max-width: 100%; min-width: 0; font-size: 11px; line-height: 18px; color: var(--orch-muted); white-space: nowrap; }
+/* the portrait slot of bb's child rows (28 px, round) holds the Scoping chip's icon, so the title starts right of the project's name */
+[data-orch] .orch-cc .k-ktile { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border-radius: 999px; color: var(--orch-muted); background: color-mix(in srgb, var(--foreground) 8%, transparent); }
+[data-orch] .orch-cc .k-ktile .k-i { width: 14px; height: 14px; }
 [data-orch] .orch-cc .k-list-h { margin: 12px 0 0; padding: 0 12px; font-size: 12px; line-height: 16px; font-weight: 400; color: var(--orch-muted); }
 [data-orch] .orch-cc .k-inplace { padding: 8px 0 24px; cursor: default; }
 [data-orch] .orch-cc .detail { min-width: 0; display: flex; flex-direction: column; gap: 16px; }
@@ -382,6 +406,14 @@ const layoutCss = /* css */ `
 [data-orch] .orch-cc[data-phone] .k-prow .k-side { gap: 2px; }
 [data-orch] .orch-cc[data-phone] .k-prow .k-side .k-age { order: -1; line-height: 20px; }
 [data-orch] .orch-cc[data-phone] .k-prow[data-quiet="true"] { padding: 6px 0; }
+/* a phone: the project row has no side padding, so the line sits under the face's centre at 16 px; rows keep a 44 px tap height */
+[data-orch] .orch-cc[data-phone] .k-kids { border-bottom: 1px solid var(--border); padding: 0 0 6px; }
+[data-orch] .orch-cc[data-phone] .k-prow[data-fold="open"] { border-bottom-width: 0; }
+[data-orch] .orch-cc[data-phone] .k-kids > ul { margin: 0; padding: 0; border: 0; }
+[data-orch] .orch-cc[data-phone] .k-kids > ul::before { left: 16px; }
+[data-orch] .orch-cc[data-phone] .k-krow { min-height: 44px; padding: 5px 8px 5px 32px; border-radius: 6px; }
+[data-orch] .orch-cc[data-phone] .k-krow:hover { background: none; }
+[data-orch] .orch-cc[data-phone] .k-krow[data-selected="true"] { background: var(--accent); }
 [data-orch] .orch-cc[data-phone] .k-list-h { padding: 0; margin-top: 16px; }
 [data-orch] .orch-cc[data-phone] .standing { flex-wrap: nowrap; white-space: nowrap; margin-bottom: 12px; }
 [data-orch] .orch-cc[data-phone] .standing > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
@@ -397,8 +429,8 @@ const layoutCss = /* css */ `
  * A project in the list: its lead's face, name; one state chip and how many work; the one number, and the status's age.
  * No lead title or type (2026-11-20, the owner: "it doesn't really help and just adds clutter"); the opened project has them.
  */
-function ListRow({ project, lanes, now, selected, quiet, onSelect }: { project: Project; lanes: Lane[] | undefined; now: number; selected: boolean; quiet: boolean; onSelect: () => void }) {
-  const r = listRow(project, lanes, now, quiet);
+function ListRow({ project, lanes, now, selected, quiet, kids, onSelect }: { project: Project; lanes: Lane[] | undefined; now: number; selected: boolean; quiet: boolean; kids?: Kids | null; onSelect: () => void }) {
+  const r = listRow(project, lanes, now, quiet, kids ? scopeExtra(kids.list) : 0);
   return (
     <Item asChild>
     <li
@@ -408,6 +440,7 @@ function ListRow({ project, lanes, now, selected, quiet, onSelect }: { project: 
       data-list-row={project.slug}
       data-state={r.state}
       data-quiet={quiet ? "true" : "false"}
+      data-fold={kids ? (kids.open ? "open" : "closed") : undefined}
       style={accentVars(project.monType)}
       onClick={(e) => ((e.target as HTMLElement).closest("button, a") ? undefined : onSelect())}
     >
@@ -435,8 +468,75 @@ function ListRow({ project, lanes, now, selected, quiet, onSelect }: { project: 
           {r.age.text}
         </span>
       </div>
+      {kids ? (
+        <Button variant="ghost" size="icon-sm" className="k-fold" data-scope-fold={project.slug} aria-expanded={kids.open} aria-label={`${kids.open ? "Hide" : "Show"} scoping under ${project.slug}`} title={kids.open ? "Hide scoping" : "Show scoping"} onClick={kids.toggle}>
+          {kids.open ? <ChevronDown aria-hidden /> : <ChevronRight aria-hidden />}
+        </Button>
+      ) : null}
     </li>
     </Item>
+  );
+}
+
+/** A project's scoping children (kit.ts ScopeChild): all (for its count), those drawn (a search keeps the matching tasks), whether they show, and the chevron's toggle. */
+type Kids = { list: ScopeChild[]; shown: ScopeChild[]; open: boolean; toggle: () => void };
+
+/** The viewer's last open/closed choice per project, in this browser only; a blocked storage reads as no choice. */
+const FOLD_KEY = (slug: string) => `orch:projects:scope-open:${slug}`;
+function storedFold(slug: string): boolean | null {
+  try {
+    const v = localStorage.getItem(FOLD_KEY(slug));
+    return v === "1" ? true : v === "0" ? false : null;
+  } catch {
+    return null;
+  }
+}
+function storeFold(slug: string, open: boolean) {
+  try {
+    localStorage.setItem(FOLD_KEY(slug), open ? "1" : "0");
+  } catch {
+    // private window or blocked storage: the choice lasts for this view only
+  }
+}
+
+/**
+ * A project's scoping entries, under its row on a thin tree line (2026-11-22, replacing the Scoping group on top; styled
+ * after bb's sidebar, threads under their lead): "Whole project" while it scopes, then each open scoping task by name,
+ * with the Scoping chip's icon in the slot where bb's child rows have a portrait (no chip: the icon says it), and what
+ * waits on the owner in it. No portraits (2026-11-22, the owner): the chat is always the lead's, which
+ * relays a scoping thread's questions, so who plans is no concern of the owner's; only a scoping thread that is stuck
+ * says so. A click opens the entry (the scope view beside the list, or its own page).
+ */
+function ScopeKids({ slug, kids, selected, onOpen }: { slug: string; kids: ScopeChild[]; selected: string | null; onOpen: (key: string) => void }) {
+  return (
+    <li className="k-kids" data-scope-children={slug}>
+      <ul role="list" aria-label={`Scoping in ${slug}`}>
+        {kids.map(({ entry: e, waiting: n }) => {
+          const stuck = plannerStuck(e);
+          const on = selected === e.key;
+          return (
+            <Item key={e.key} asChild size="sm">
+              <li className="k-krow" data-scope-row={e.key} data-selected={on} onClick={(ev) => ((ev.target as HTMLElement).closest("button, a") ? undefined : onOpen(e.key))}>
+                <span className="k-ktile" data-scope-tile="">
+                  <Icon name="scope" />
+                </span>
+                <span className="k-main">
+                  <Button variant="link" className={cn("name", INLINE_LINK, "no-underline hover:underline")} data-scope-pick={e.key} aria-current={on ? "true" : undefined} onClick={() => onOpen(e.key)}>
+                    {entryTitle(e).title}
+                  </Button>
+                  <span className="k-sub">
+                    <span className="truncate" data-scope-row-waiting={String(n)}>
+                      {n ? `${n} ${n === 1 ? "waits" : "wait"} on you` : "nothing waits"}
+                      {stuck ? ` · ${stuck}` : ""}
+                    </span>
+                  </span>
+                </span>
+              </li>
+            </Item>
+          );
+        })}
+      </ul>
+    </li>
   );
 }
 
@@ -445,14 +545,15 @@ function ListRow({ project, lanes, now, selected, quiet, onSelect }: { project: 
  * sections (project-book.tsx), the Pinned strip first, and its history and Pathways. Focusing the message box pins the selection: the list's
  * order can change under a draft, and the default selection (the first project) must not swap while the owner types.
  */
-function DetailPanel({ project, lanes, busy, refetchAll, openCard, onOpen, onPick, now, narrow, needs, inPlace = false, onBack }: { project: Project; lanes: Lane[] | undefined; busy: boolean; refetchAll: () => void; openCard: OpenCard; onOpen: (slug: string) => void; onPick: () => void; now: number; narrow: boolean; needs: NeedsYou | undefined; inPlace?: boolean; onBack?: () => void }) {
+function DetailPanel({ project, lanes, busy, refetchAll, openCard, onOpen, onPick, now, narrow, needs, scoping = 0, inPlace = false, onBack }: { project: Project; lanes: Lane[] | undefined; busy: boolean; refetchAll: () => void; openCard: OpenCard; onOpen: (slug: string) => void; onPick: () => void; now: number; narrow: boolean; needs: NeedsYou | undefined; scoping?: number; inPlace?: boolean; onBack?: () => void }) {
   const { cosTitle, ownerName } = useIdentity();
   const [confirming, setConfirming] = useState(false);
   const [pinning, setPinning] = useState(false);
   const head = leadHead(project);
   const askStatus = askStatusFor(project, now, refetchAll);
   const st = projectState(project, lanes);
-  const forYou = needCount(project, lanes);
+  // what waits in its scoping children too, as its list row counts it (kit.ts listRow)
+  const forYou = needCount(project, lanes) + scoping;
   const leadLane = lanes?.find((l) => l.agent.role === "lead");
   const leadLevel = leadLane ? leadLane.agent.level : null;
   const party = partyOf((lanes ?? []).filter((l) => l.state !== "released").map((l) => l.agent), project.slug, head.persona?.roster);
@@ -598,7 +699,7 @@ export function ProjectsView({
   onDetail: (slug: string | null) => void;
   /** What the references in a row's text resolve against (refs.ts); null: plain text. */
   refs: SharedRefs | null;
-  /** Scope, folded in as the Scoping group (2026-11-20): its read, the open entry (scope/<key>) and how to open one. */
+  /** Scope, folded in (2026-11-20; its entries are the projects' children since 2026-11-22): its read, the open entry (scope/<key>) and how to open one. */
   scope: ScopeQuery;
   scopeOpen: string | null;
   onScope: (key: string | null) => void;
@@ -614,6 +715,8 @@ export function ProjectsView({
   const [filter, setFilter] = useState<Filter>("all");
   const [showArchived, setShowArchived] = useState(false);
   const [query, setQuery] = useState("");
+  // the chevrons the viewer has pressed in this view, by project (kit.ts childrenOpen)
+  const [toggled, setToggled] = useState<Record<string, boolean>>({});
   // what the results follow: the box's words once typing pauses (search.tsx useSettled)
   const found = useSettled(query);
   const [width, root] = useElementWidth();
@@ -644,12 +747,33 @@ export function ProjectsView({
   if (linked && !phone) return <ProjectDetail project={linked} lanes={lanes.get(linked.slug)} onBack={() => open(null)} openCard={openCard} ownerName={you.name} pathwaysOpen={pathwaysOpen} />;
   const cards = needs?.cards ?? [];
   const live = all.filter((p) => p.archivedAt === null);
-  const count = (f: Filter) => live.filter((p) => matches(f, p, lanes.get(p.slug))).length;
+  // each project's scoping children (kit.ts ScopeChild) and what waits in each
+  const scoping = scope.data?.projects ?? [];
+  const entries = scopeEntries(scoping);
+  const kidsBy = new Map<string, ScopeChild[]>();
+  for (const sp of scoping) kidsBy.set(sp.slug, entries.filter((e) => e.slug === sp.slug).map((entry) => ({ entry, waiting: scopeWaitingIn(sp, entry, deliverables), deliverables: scopeDeliveredIn(sp, entry, deliverables) })));
+  const kidsOf = (p: Project) => kidsBy.get(p.slug) ?? [];
+  const fits = (f: Filter, p: Project) => matchesWithScope(f, matches(f, p, lanes.get(p.slug)), kidsOf(p));
+  const count = (f: Filter) => live.filter((p) => fits(f, p)).length;
   const hits = found.trim() ? searchLoaded(live, lanes, cards, found, (w) => waitLine(w, now, cosTitle).text) : [];
-  const filtered = live.filter((p) => matches(filter, p, lanes.get(p.slug)));
-  const shown = searchedProjects(filtered, hits, found).sort(attentionOrder(lanes, now));
-  const main = shown.filter((p) => !isQuiet(p, lanes.get(p.slug), now));
-  const quiet = shown.filter((p) => isQuiet(p, lanes.get(p.slug), now));
+  const filtered = live.filter((p) => fits(filter, p));
+  // a search that matches a scoping task's name keeps its project, with that child
+  const searched = new Set(searchedProjects(filtered, hits, found).map((p) => p.slug));
+  const shown = filtered.filter((p) => searched.has(p.slug) || childHits(kidsOf(p), found).length > 0).sort(attentionOrder(lanes, now, (p) => needCount(p, lanes.get(p.slug)) + scopeExtra(kidsOf(p))));
+  const quietOne = (p: Project) => quietWithScope(isQuiet(p, lanes.get(p.slug), now), kidsOf(p));
+  const main = shown.filter((p) => !quietOne(p));
+  const quiet = shown.filter(quietOne);
+  const kidsFor = (p: Project): Kids | null => {
+    const list = kidsOf(p);
+    if (!list.length) return null;
+    const hit = found.trim() ? childHits(list, found) : [];
+    const isOpen = childrenOpen({ kids: list, toggled: toggled[p.slug], stored: storedFold(p.slug), holdsOpen: !!scopeOpen && list.some((k) => k.entry.key === scopeOpen), searchHit: hit.length > 0 });
+    const toggle = () => {
+      setToggled((t) => ({ ...t, [p.slug]: !isOpen }));
+      storeFold(p.slug, !isOpen);
+    };
+    return { list, shown: hit.length ? hit : list, open: isOpen, toggle };
+  };
   const archived = filter === "all" && !found.trim() ? all.filter((p) => p.archivedAt !== null).sort((a, b) => (b.archivedAt ?? 0) - (a.archivedAt ?? 0)) : [];
   // a click in the list: the detail beside it, or its own page in a narrow pane, shows the project's direct line, so its notes are seen
   const pick = (p: Project) => {
@@ -669,7 +793,7 @@ export function ProjectsView({
   const pickedPage = picked ? live.find((p) => p.slug === picked) : undefined;
   // `page`: the project is already the page (a phone's projects/<slug>). Picking it there would route to projects/@<slug>,
   // which a phone draws as the list: a tap in the message box threw the owner out of the project (2026-11-20).
-  const detailPanel = (p: Project, o: { onBack?: () => void; inPlace?: boolean; page?: boolean } = {}) => <DetailPanel key={p.slug} project={p} lanes={lanes.get(p.slug)} busy={busy} refetchAll={refetchAll} openCard={openCard} onOpen={open} onPick={o.page ? () => {} : () => onPick(p.slug)} now={now} narrow={narrow} needs={needs} onBack={o.onBack} inPlace={o.inPlace} />;
+  const detailPanel = (p: Project, o: { onBack?: () => void; inPlace?: boolean; page?: boolean } = {}) => <DetailPanel key={p.slug} project={p} lanes={lanes.get(p.slug)} busy={busy} refetchAll={refetchAll} openCard={openCard} onOpen={open} onPick={o.page ? () => {} : () => onPick(p.slug)} now={now} narrow={narrow} needs={needs} scoping={scopeExtra(kidsOf(p))} onBack={o.onBack} inPlace={o.inPlace} />;
   const scopePage = scopeOpen ? <ScopeView q={scope} projects={all} deliverables={deliverables} refetchAll={refetchAll} mons={mons} accents={accents} focus={scopeOpen} entryOnly fits={wide} /> : null;
   const styles = (
     <>
@@ -750,18 +874,23 @@ export function ProjectsView({
     </div>
   ) : null;
   const rows = (ps: Project[], isQuietGroup: boolean) =>
-    ps.map((p) =>
-      wide ? (
-        <ListRow key={p.slug} project={p} lanes={lanes.get(p.slug)} now={now} selected={p === selected} quiet={isQuietGroup} onSelect={() => pick(p)} />
-      ) : phone ? (
-        <ListRow key={p.slug} project={p} lanes={lanes.get(p.slug)} now={now} selected={false} quiet={isQuietGroup} onSelect={() => open(p.slug)} />
-      ) : (
-        <ListRow key={p.slug} project={p} lanes={lanes.get(p.slug)} now={now} selected={false} quiet={isQuietGroup} onSelect={() => pick(p)} />
-      ),
-    );
+    ps.map((p) => {
+      const kids = kidsFor(p);
+      return (
+        <Fragment key={p.slug}>
+          {wide ? (
+            <ListRow project={p} lanes={lanes.get(p.slug)} now={now} selected={p === selected} quiet={isQuietGroup} kids={kids} onSelect={() => pick(p)} />
+          ) : phone ? (
+            <ListRow project={p} lanes={lanes.get(p.slug)} now={now} selected={false} quiet={isQuietGroup} kids={kids} onSelect={() => open(p.slug)} />
+          ) : (
+            <ListRow project={p} lanes={lanes.get(p.slug)} now={now} selected={false} quiet={isQuietGroup} kids={kids} onSelect={() => pick(p)} />
+          )}
+          {kids?.open ? <ScopeKids slug={p.slug} kids={kids.shown} selected={wide ? scopeOpen : null} onOpen={(k) => onScope(k)} /> : null}
+        </Fragment>
+      );
+    });
   const list = (
     <div className={wide ? "k-listpane" : undefined} data-projects-list="">
-      {filter === "all" && !found.trim() ? <ScopingRows q={scope} projects={all} deliverables={deliverables} mons={mons} selected={wide ? scopeOpen : null} onOpen={(k) => onScope(k)} /> : null}
       {main.length ? (
         <ul className="k-plist" role="list" aria-label="Projects" data-group="led">
           {rows(main, false)}

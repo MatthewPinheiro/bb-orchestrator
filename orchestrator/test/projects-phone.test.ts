@@ -32,7 +32,7 @@ test("old Scope and Pathways links and saved panes open Projects, at the entry o
   for (const p of ["scope", "scope/kite", "pathways", "pathways/kite"]) assert.equal(fromPath(p, VIEWS).view, "projects", p);
   assert.deepEqual(fromPath("pathways/kite", VIEWS).path, ["kite"], "a Pathways link opens that project's page, which holds Pathways");
   assert.equal(fromPath("scope/kite%2Fst-1a2b", VIEWS).params.scope, "kite/st-1a2b", "a scoping task's entry");
-  assert.equal(fromPath("scope", VIEWS).params.scope, undefined, "bare Scope: the list, with its Scoping group on top");
+  assert.equal(fromPath("scope", VIEWS).params.scope, undefined, "bare Scope: the list, its scoping entries under their projects");
   assert.equal(fromPath("scope/%E0%A4%A", VIEWS).params.scope, undefined, "a broken escape opens the list, not an error");
   const entry = { view: "projects", path: [], params: { scope: "kite/st-1" } };
   assert.deepEqual(fromPath(toPath(entry, VIEWS), VIEWS), entry, "back on Projects, the same entry is open");
@@ -62,7 +62,9 @@ test("on a phone a tapped project opens its own page with a Back row; in a narro
   assert.match(p, /if \(linked && !phone\) return <ProjectDetail /, "web's project page is its history and Pathways, as before");
   assert.match(p, /\{onBack \? <BackRow onBack=\{onBack\}>\{more\}<\/BackRow> : null\}/, "the ⋯ shares the Back row, so no control sits alone on a line");
   assert.match(p, /\{onBack \? <ProjectSections /, "a phone's page holds Timeline, Flow and Dependencies");
-  assert.match(p, /<ScopingRows /, "the Scoping group sits in the list");
+  // 2026-11-22: no Scoping group on top; each project's scoping entries are children of its row, and there is no Open scope button
+  assert.doesNotMatch(p, /ScopingRows|Open scope<|data-group="scoping"/, "no separate Scoping group");
+  assert.match(p, /\{kids\?\.open \? <ScopeKids /, "a project's scoping children sit under its row");
   // Pathways reads Linear: it fetches only once opened
   assert.match(src("app/project-detail.tsx"), /<CollapsibleContent>\{open \? <PathwaysSection /);
   assert.doesNotMatch(src("app.tsx"), /focusedView === "projects" && \(detail/, "the bottom bar is left as it was (the nav-panes pause)");

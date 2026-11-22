@@ -140,56 +140,18 @@ function PlannerLine({ e, mon, size = 20, slug = true, ...data }: { e: ScopeEntr
 export function scopeWaitingIn(p: Scope["projects"][number], e: ScopeEntry, deliverables: Deliverables | undefined): number {
   const task = e.task?.id ?? null;
   const cards = p.cards.filter((c) => !gone.has(`${c.id}@${c.rev}`) && inScopeEntry(p, task, c.scopeTask)).length;
-  return cards + (deliverables ?? []).filter((d) => d.project === p.slug && inScope(d) && inScopeEntry(p, task, d.scopeTask)).length;
+  return cards + scopeDeliveredIn(p, e, deliverables);
 }
 
-/**
- * Projects' Scoping group (2026-11-20, build plan step 3; mockups-v2 projects-1440): one outline row per scoping entry,
- * its planner's face, what it is, what waits, and Open scope. Nothing scoping: nothing drawn.
- */
-export function ScopingRows({ q, projects, deliverables, mons, selected, onOpen }: { q: Query; projects: Projects | undefined; deliverables: Deliverables | undefined; mons: ReadonlyMap<string, Face>; selected?: string | null; onOpen: (key: string) => void }) {
-  const list = q.data?.projects ?? [];
-  const entries = scopeEntries(list);
-  if (!entries.length) return null;
-  const monOf = (address: string): Face | null => {
-    const lead = projects?.find((x) => `lead:${x.slug}` === address)?.lead;
-    return lead && (lead.mon || lead.persona) ? { mon: lead.mon, persona: lead.persona } : (mons.get(address) ?? null);
-  };
-  return (
-    <section data-group="scoping" aria-label="Scoping" className="flex flex-col gap-2">
-      <h3 className="k-list-h">Scoping · {entries.length}</h3>
-      <ItemGroup className="gap-2">
-        {entries.map((e) => {
-          const p = list.find((x) => x.slug === e.slug)!;
-          const n = scopeWaitingIn(p, e, deliverables);
-          const planner = plannerName(e);
-          return (
-            <Item key={e.key} variant="outline" size="sm" role="listitem" className={cn("cursor-pointer flex-nowrap gap-3 px-3 py-2", selected === e.key && "bg-muted/60")} data-scope-row={e.key} onClick={(ev) => ((ev.target as HTMLElement).closest("button") ? undefined : onOpen(e.key))}>
-              <AgentFace face={monOf(planner.address)} address={planner.address} size={24} boost={false} />
-              <span className="flex min-w-0 flex-1 flex-col">
-                <span className="truncate text-sm font-medium">
-                  {projectTitle(e.slug)}
-                  {e.task ? <span className="font-normal text-muted-foreground"> › {entryTitle(e).title}</span> : null}
-                </span>
-                <span className="truncate text-xs text-muted-foreground" data-scope-row-waiting={String(n)}>
-                  {n ? `${n} ${n === 1 ? "waits" : "wait"} on you` : "nothing waits"}
-                  {planner.state ? ` · ${planner.state}` : ""}
-                </span>
-              </span>
-              <Button size="sm" variant={n ? "default" : "outline"} className="shrink-0" data-scope-pick={e.key} aria-current={selected === e.key ? "true" : undefined} onClick={() => onOpen(e.key)}>
-                Open scope
-              </Button>
-            </Item>
-          );
-        })}
-      </ItemGroup>
-    </section>
-  );
+/** Of what waits in a scoping entry, its deliverables in review (Projects counts its cards already, kit.ts scopeExtra). */
+export function scopeDeliveredIn(p: Scope["projects"][number], e: ScopeEntry, deliverables: Deliverables | undefined): number {
+  const task = e.task?.id ?? null;
+  return (deliverables ?? []).filter((d) => d.project === p.slug && inScope(d) && inScopeEntry(p, task, d.scopeTask)).length;
 }
 
 /**
  * `focus`: the entry (scopeKey) to open. `entryOnly` (2026-11-20, Scope folded into Projects): only that entry, as a page of
- * Projects; its list is the Scoping group there (ScopingRows). `fits`: it sits beside that list, in a column of the pane's
+ * Projects; its list is the project rows' scoping children there (projects.tsx ScopeKids). `fits`: it sits beside that list, in a column of the pane's
  * height, so its header stays and its body scrolls (as on the wide Scope tab).
  */
 export function ScopeView({ q, projects, deliverables, refetchAll, mons, accents, focus = null, entryOnly = false, fits = false }: { q: Query; projects: Projects | undefined; deliverables: Deliverables | undefined; refetchAll: () => void; mons: ReadonlyMap<string, Face>; accents?: ReadonlyMap<string, string | null>; focus?: string | null; entryOnly?: boolean; fits?: boolean }) {

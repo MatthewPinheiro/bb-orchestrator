@@ -41,7 +41,8 @@ pick from (Esc cancels it); the view button at the left of a pane's header chang
 - **Chat**: the CoS's own chat.
 - **Projects**: each project's lead chat, goal, what needs you, what blocks it, its threads, PRs and record. Its page
   shows the Timeline, the Flow and the Dependencies on one scroll.
-  - **Scope**: projects and tasks being scoped with their lead. It shows only while something waits there.
+  - **Scoping**: a project or task being scoped with its lead sits under its project's row (the chevron shows or hides
+    it; open while something waits there). Click one to open its cards and the lead's chat.
   - **Pathways**: a project's Linear ticket map, once `linearApiKey` is set.
 - **Reviews**: your open PRs and the review ask to paste (once `githubLogin` is set), then your team boards and the
   CodeRabbit queue once each is in use. A board's card opens it.
